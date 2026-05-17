@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+{% block title %}Disparos · Insta Poster{% endblock %}
+{% block content %}
+
+<div class="flex items-end justify-between mb-7">
+  <div>
+    <h1 class="h-page">Disparos</h1>
+    <p class="text-sm text-soft mt-1">Configure os filtros e rode o post.py. Cada execução vira um job.</p>
+  </div>
+</div>
+
+<div class="grid grid-cols-3 gap-5">
+  <div class="surface p-5">
+    <div class="h-section mb-4">Novo disparo</div>
+    {% if accounts %}
+    <form id="run-form" class="space-y-4">
+      <div>
+        <label class="label">Conta</label>
+        <select name="account" class="select">
+          <option value="">— todas conectadas ({{ accounts|length }}) —</option>
+          {% for a in accounts %}<option value="{{ a.username }}">@{{ a.username }}</option>{% endfor %}
+        </select>
+        {% if total_active > accounts|length %}
+        <div class="text-[11px] text-muted mt-1.5 flex items-start gap-1.5">
+          <i data-lucide="info" style="width:11px;height:11px;margin-top:2px;flex-shrink:0;color:var(--warning)"></i>
+          <span>{{ total_active - accounts|length }} conta(s) ativa(s) sem sessão — ocultas. <a href="/accounts" class="underline hover:text-[var(--text)]">Conectar agora</a>.</span>
+        </div>
+        {% endif %}
+      </div>
+      <div>
+        <label class="label">Vídeo</label>
+        <select name="video" class="select">
+          <option value="">— todos pendentes ({{ videos|length }}) —</option>
+          {% for v in videos %}<option value="{{ v.name }}">{{ v.name }}</option>{% endfor %}
+        </select>
+      </div>
+      <label class="flex items-start gap-3 p-3 surface-2 cursor-pointer">
+        <input type="checkbox" name="dry_run" class="check mt-0.5" checked />
+        <div>
+          <div class="text-[13px] font-medium">Dry-run</div>
+          <div class="text-[11.5px] text-soft mt-0.5">Simula sem postar de verdade. Útil pra conferir o plano.</div>
+        </div>
+      </label>
+      <button type="submit" class="btn btn-accent w-full">
+        <i data-lucide="play" class="icon"></i> Disparar
+      </button>
+    </form>
+    <div class="mt-4 pt-4 border-t border-line text-[11.5px] text-soft leading-relaxed">
+      Delays automáticos: <span class="mono text-[var(--text)]">60-180s</span> entre contas, <span class="mono text-[var(--text)]">5-15min</span> entre vídeos.
+      Pode fechar a aba — o servidor continua rodando.
+    </div>
+    {% else %}
+    <div class="text-center py-8">
+      <i data-lucide="plug" style="width:32px;height:32px;color:var(--text-3);margin:0 auto 10px;display:block"></i>
+      <div class="text-[14px] font-medium mb-1">Nenhuma conta conectada</div>
+      <div class="text-[12px] text-soft mb-4">
+        {% if total_active %}
+        Você tem {{ total_active }} conta(s) ativa(s), mas nenhuma conectou ainda.
+        {% else %}
+        Adicione contas e conecte cada uma antes de disparar.
+        {% endif %}
+      </div>
+      <a href="/accounts" class="btn btn-accent inline-flex">
+        <i data-lucide="arrow-right" class="icon"></i> Ir para Contas
+      </a>
+    </div>
+    {% endif %}
+  </div>
+
+  <div class="surface col-span-2 overflow-hidden">
+    <div class="px-5 py-3.5 border-b border-line flex items-center justify-between">
+      <div class="h-section">Histórico</div>
+      <button class="btn btn-ghost btn-sm" onclick="loadJobs()"><i data-lucide="refresh-cw" class="icon"></i> Atualizar</button>
+    </div>
+    <div id="jobs-table-wrap"></div>
+  </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+  document.getElementById('run-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const payload = {
+      account: fd.get('account') || null,
+      video: fd.get('video') || null,
+      dry_run: fd.get('dry_run') === 'on',
+    };
+    try {
+      const r = await api('/api/jobs/run', { method: 'POST', body: JSON.stringify(payload) });
+      toast('Disparo iniciado', 'success');
+      setTimeout(() => location.href = `/jobs/${r.job_id}`, 400);
+    } catch (err) { toast(err.message, 'error'); }
+  });
+
+  function statusBadge(s) {
+    if (s === 'running') return '<span class="badge badge-warning"><span class="dot dot-warning dot-pulse"></span> rodando</span>';
+    if (s === 'finished') return '<span class="badge badge-success"><span class="dot dot-success"></span> concluído</span>';
+    if (s === 'error') return '<span class="badge badge-danger"><span class="dot dot-danger"></span> erro</span>';
+    if (s === 'cancelled') return '<span class="badge badge-neutral">cancelado</span>';
+    return `<span class="badge badge-neutral">${s}</span>`;
+  }
+
+  async function loadJobs() {
+    try {
+      const jobs = await api('/api/jobs');
+      const wrap = document.getElementById('jobs-table-wrap');
+      if (!jobs.length) {
+        wrap.innerHTML = `<div class="p-12 text-center"><div class="text-sm text-soft">Nenhum disparo ainda</div></div>`;
+        return;
+      }
+      wrap.innerHTML = `
+        <table class="t">
+          <thead><tr><th>Início</th><th>Tipo</th><th>Descrição</th><th>Status</th><th></th></tr></thead>
+          <tbody>
+            ${jobs.map(j => `
+              <tr class="cursor-pointer" onclick="location.href='/jobs/${j.id}'">
+                <td class="mono text-[11.5px] text-soft">${j.started_at || '—'}</td>
+                <td><span class="badge badge-neutral">${j.kind}</span></td>
+                <td>${j.label}</td>
+                <td>${statusBadge(j.status)}</td>
+                <td class="text-right"><i data-lucide="chevron-right" style="width:14px;height:14px;color:var(--text-3)"></i></td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>`;
+      if (window.lucide) lucide.createIcons();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  loadJobs();
+  setInterval(loadJobs, 4000);
+</script>
+{% endblock %}

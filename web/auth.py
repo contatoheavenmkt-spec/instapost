@@ -1,0 +1,249 @@
+"""
+Auth: usuários, senhas (pbkdf2), sessões via cookie, e convites por link.
+
+Owner é criado no primeiro boot (ver `ensure_owner_seed`).
+Signup público é bloqueado: só com token de convite válido.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import secrets
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+from fastapi import HTTPException, Request
+
+from core.paths import USERS_FILE, INVITES_FILE, SECRET_FILE
+
+OWNER_DEFAULT_EMAIL = "edson.juan.oliversilva@gmail.com"
+OWNER_DEFAULT_PASSWORD = "@Tos1725"
+
+PBKDF2_ITERATIONS = 200_000
+
+
+# ----- secret -----
+
+def get_or_create_secret() -> str:
+    if SECRET_FILE.exists():
+        return SECRET_FILE.read_text(encoding="utf-8").strip()
+    s = secrets.token_urlsafe(48)
+    SECRET_FILE.write_text(s, encoding="utf-8")
+    try:
+        if os.name == "nt":
+            pass
+        else:
+            os.chmod(SECRET_FILE, 0o600)
+    except Exception:
+        pass
+    return s
+
+
+# ----- password hashing -----
+
+def hash_password(password: str, salt: Optional[str] = None) -> dict:
+    salt = salt or secrets.token_hex(16)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), PBKDF2_ITERATIONS)
+    return {"salt": salt, "hash": dk.hex(), "algo": "pbkdf2_sha256", "iters": PBKDF2_ITERATIONS}
+
+
+def verify_password(password: str, stored: dict) -> bool:
+    if not stored:
+        return False
+    salt = stored.get("salt", "")
+    iters = stored.get("iters", PBKDF2_ITERATIONS)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), iters)
+    return secrets.compare_digest(dk.hex(), stored.get("hash", ""))
+
+
+# ----- users store -----
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def load_users() -> list[dict]:
+    if not USERS_FILE.exists():
+        return []
+    try:
+        return json.loads(USERS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+
+def save_users(users: list[dict]) -> None:
+    USERS_FILE.write_text(json.dumps(users, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def find_user(email: str) -> Optional[dict]:
+    email = email.lower().strip()
+    for u in load_users():
+        if u["email"].lower() == email:
+            return u
+    return None
+
+
+def create_user(email: str, password: str, role: str = "member", invited_by: Optional[str] = None) -> dict:
+    users = load_users()
+    email = email.lower().strip()
+    if any(u["email"].lower() == email for u in users):
+        raise ValueError("Email já cadastrado")
+    if not password or len(password) < 6:
+        raise ValueError("Senha precisa ter pelo menos 6 caracteres")
+    user = {
+        "email": email,
+        "role": role,
+        "password": hash_password(password),
+        "created_at": now_iso(),
+        "last_seen": None,
+        "invited_by": invited_by,
+    }
+    users.append(user)
+    save_users(users)
+    return user
+
+
+def update_last_seen(email: str) -> None:
+    users = load_users()
+    changed = False
+    for u in users:
+        if u["email"].lower() == email.lower():
+            u["last_seen"] = now_iso()
+            changed = True
+            break
+    if changed:
+        save_users(users)
+
+
+def delete_user(email: str) -> bool:
+    users = load_users()
+    new = [u for u in users if u["email"].lower() != email.lower()]
+    if len(new) == len(users):
+        return False
+    save_users(new)
+    return True
+
+
+def change_password(email: str, new_password: str) -> bool:
+    users = load_users()
+    for u in users:
+        if u["email"].lower() == email.lower():
+            u["password"] = hash_password(new_password)
+            save_users(users)
+            return True
+    return False
+
+
+def ensure_owner_seed() -> None:
+    """Cria o owner default se não houver nenhum owner cadastrado."""
+    users = load_users()
+    if any(u.get("role") == "owner" for u in users):
+        return
+    try:
+        create_user(OWNER_DEFAULT_EMAIL, OWNER_DEFAULT_PASSWORD, role="owner")
+    except ValueError:
+        for u in users:
+            if u["email"].lower() == OWNER_DEFAULT_EMAIL.lower():
+                u["role"] = "owner"
+        save_users(users)
+
+
+def public_user(u: dict) -> dict:
+    return {
+        "email": u["email"],
+        "role": u.get("role", "member"),
+        "created_at": u.get("created_at"),
+        "last_seen": u.get("last_seen"),
+        "invited_by": u.get("invited_by"),
+    }
+
+
+# ----- invites -----
+
+def load_invites() -> list[dict]:
+    if not INVITES_FILE.exists():
+        return []
+    try:
+        return json.loads(INVITES_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+
+def save_invites(invites: list[dict]) -> None:
+    INVITES_FILE.write_text(json.dumps(invites, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def create_invite(created_by_email: str, role: str = "member") -> dict:
+    invites = load_invites()
+    inv = {
+        "token": secrets.token_urlsafe(24),
+        "role": role,
+        "created_by": created_by_email,
+        "created_at": now_iso(),
+        "used_at": None,
+        "used_by": None,
+    }
+    invites.append(inv)
+    save_invites(invites)
+    return inv
+
+
+def find_invite(token: str) -> Optional[dict]:
+    for inv in load_invites():
+        if inv["token"] == token:
+            return inv
+    return None
+
+
+def revoke_invite(token: str) -> bool:
+    invites = load_invites()
+    new = [i for i in invites if i["token"] != token]
+    if len(new) == len(invites):
+        return False
+    save_invites(new)
+    return True
+
+
+def consume_invite(token: str, email: str) -> dict:
+    invites = load_invites()
+    target = None
+    for inv in invites:
+        if inv["token"] == token:
+            target = inv
+            break
+    if not target:
+        raise HTTPException(404, "Convite inválido ou expirado")
+    if target.get("used_at"):
+        raise HTTPException(400, "Esse convite já foi usado")
+    target["used_at"] = now_iso()
+    target["used_by"] = email.lower()
+    save_invites(invites)
+    return target
+
+
+# ----- session dependencies -----
+
+def current_user(request: Request) -> Optional[dict]:
+    email = request.session.get("email")
+    if not email:
+        return None
+    u = find_user(email)
+    if u:
+        update_last_seen(email)
+    return u
+
+
+def require_user(request: Request) -> dict:
+    u = current_user(request)
+    if not u:
+        raise HTTPException(401, "Login necessário")
+    return u
+
+
+def require_owner(request: Request) -> dict:
+    u = require_user(request)
+    if u.get("role") != "owner":
+        raise HTTPException(403, "Apenas o owner pode fazer isso")
+    return u

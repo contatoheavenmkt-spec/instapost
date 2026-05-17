@@ -1,0 +1,274 @@
+{% extends "base.html" %}
+{% block title %}Agenda · Insta Poster{% endblock %}
+{% block content %}
+
+<div class="flex items-end justify-between mb-6">
+  <div>
+    <h1 class="h-page">Agenda</h1>
+    <p class="text-sm text-soft mt-1">Postagens programadas — disparam sozinhas na hora marcada</p>
+  </div>
+  <button class="btn btn-accent" onclick="openNewModal()">
+    <i data-lucide="calendar-plus" class="icon"></i> Novo agendamento
+  </button>
+</div>
+
+<!-- Tabs -->
+<div class="flex items-center gap-1 mb-5 border-b border-line">
+  <button class="tab tab-active" data-tab="upcoming" onclick="switchTab('upcoming')">
+    Próximos <span class="text-muted ml-1" id="count-upcoming">0</span>
+  </button>
+  <button class="tab" data-tab="past" onclick="switchTab('past')">
+    Passados <span class="text-muted ml-1" id="count-past">0</span>
+  </button>
+</div>
+
+<div id="upcoming-wrap"></div>
+<div id="past-wrap" class="hidden"></div>
+
+<!-- New schedule modal -->
+<div id="new-modal" class="modal-bg hidden" onclick="if(event.target===this) closeNewModal()">
+  <div class="modal-card" style="max-width: 480px">
+    <div class="text-[15px] font-semibold mb-1">Novo agendamento</div>
+    <div class="text-[13px] text-soft mb-4">Configure quando e onde postar</div>
+    <form id="new-form" class="space-y-4">
+      <div>
+        <label class="label">Vídeo</label>
+        <select name="video" class="select" required>
+          <option value="">Selecione um vídeo da biblioteca</option>
+          {% for v in pending_videos %}<option value="{{ v.name }}">{{ v.name }}</option>{% endfor %}
+        </select>
+        {% if not pending_videos %}
+        <div class="text-[11px] text-muted mt-1.5">Nenhum vídeo pendente. <a href="/videos" class="underline">Suba um vídeo</a> primeiro.</div>
+        {% endif %}
+      </div>
+      <div>
+        <label class="label">Conta</label>
+        <select name="account" class="select">
+          <option value="">— todas as conectadas ({{ connected_accounts|length }}) —</option>
+          {% for u in connected_accounts %}<option value="{{ u }}">@{{ u }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="label">Data</label>
+          <input type="date" name="date" class="input" required />
+        </div>
+        <div>
+          <label class="label">Hora</label>
+          <input type="time" name="time" class="input" required />
+        </div>
+      </div>
+      <div class="text-[11px] text-muted">Horário de Brasília. Mín. 1 minuto no futuro.</div>
+      <div class="flex justify-end gap-2 pt-2 border-t border-line">
+        <button type="button" class="btn btn-ghost" onclick="closeNewModal()">Cancelar</button>
+        <button type="submit" class="btn btn-accent">
+          <i data-lucide="check" class="icon"></i> Agendar
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<style>
+  .tab { padding: 8px 14px; font-size: 13px; font-weight: 500; color: var(--text-2); border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .tab:hover { color: var(--text); }
+  .tab.tab-active { color: var(--text); border-bottom-color: var(--accent); }
+  .timeline-row { display: grid; grid-template-columns: 160px 1fr auto; gap: 16px; align-items: center; padding: 14px 16px; border-bottom: 1px solid var(--border); }
+  .timeline-row:last-child { border-bottom: 0; }
+  .timeline-row:hover { background: var(--surface-2); }
+  .time-cell { font-family: 'JetBrains Mono', monospace; font-size: 12.5px; }
+  .time-cell .day { color: var(--text); font-weight: 600; }
+  .time-cell .hour { color: var(--text-2); font-size: 13.5px; margin-top: 2px; }
+  .time-cell .rel { color: var(--text-3); font-size: 11px; margin-top: 2px; }
+</style>
+
+{% endblock %}
+{% block scripts %}
+<script>
+  let all = [];
+  let currentTab = 'upcoming';
+
+  function escapeHtml(s) { return (s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+  function fmtRel(iso) {
+    const d = new Date(iso);
+    const s = (d.getTime() - Date.now()) / 1000;
+    const abs = Math.abs(s);
+    if (abs < 60) return s < 0 ? 'agora' : 'em segundos';
+    if (abs < 3600) return s < 0 ? `há ${Math.floor(abs/60)} min` : `em ${Math.floor(abs/60)} min`;
+    if (abs < 86400) return s < 0 ? `há ${Math.floor(abs/3600)}h` : `em ${Math.floor(abs/3600)}h`;
+    return s < 0 ? `há ${Math.floor(abs/86400)}d` : `em ${Math.floor(abs/86400)}d`;
+  }
+
+  function fmtDay(iso) {
+    const d = new Date(iso);
+    const today = new Date(); today.setHours(0,0,0,0);
+    const tomorrow = new Date(today); tomorrow.setDate(today.getDate() + 1);
+    const cmp = new Date(d); cmp.setHours(0,0,0,0);
+    if (cmp.getTime() === today.getTime()) return 'Hoje';
+    if (cmp.getTime() === tomorrow.getTime()) return 'Amanhã';
+    return d.toLocaleDateString('pt-BR', { day: '2-digit', month: 'short', year: cmp.getFullYear() === today.getFullYear() ? undefined : '2-digit' });
+  }
+
+  function fmtHour(iso) {
+    const d = new Date(iso);
+    return d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+  }
+
+  function statusBadge(s, job_id) {
+    const map = {
+      pending: '<span class="badge badge-warning"><i data-lucide="clock" style="width:11px;height:11px"></i> pendente</span>',
+      running: '<span class="badge badge-warning"><span class="dot dot-warning dot-pulse"></span> rodando</span>',
+      done: '<span class="badge badge-success"><span class="dot dot-success"></span> postado</span>',
+      error: '<span class="badge badge-danger"><span class="dot dot-danger"></span> erro</span>',
+      cancelled: '<span class="badge badge-neutral">cancelado</span>',
+      missed: '<span class="badge badge-danger">perdido</span>',
+    };
+    return map[s] || `<span class="badge badge-neutral">${s}</span>`;
+  }
+
+  function actions(s) {
+    if (s.status === 'pending') {
+      return `<button class="btn btn-ghost btn-sm" onclick="cancelOne('${s.id}')" title="Cancelar"><i data-lucide="x" class="icon"></i></button>`;
+    }
+    if (s.status === 'running' && s.job_id) {
+      return `<a class="btn btn-ghost btn-sm" href="/jobs/${s.job_id}"><i data-lucide="external-link" class="icon"></i> ver job</a>`;
+    }
+    if (s.job_id) {
+      return `<a class="btn btn-ghost btn-sm" href="/jobs/${s.job_id}"><i data-lucide="external-link" class="icon"></i> job</a>
+              <button class="btn btn-ghost btn-sm" onclick="deleteOne('${s.id}')" title="Apagar do histórico"><i data-lucide="trash-2" class="icon"></i></button>`;
+    }
+    return `<button class="btn btn-ghost btn-sm" onclick="deleteOne('${s.id}')" title="Apagar"><i data-lucide="trash-2" class="icon"></i></button>`;
+  }
+
+  function renderList() {
+    const now = Date.now();
+    const upcoming = all.filter(s => s.status === 'pending' || s.status === 'running');
+    const past = all.filter(s => !upcoming.includes(s)).sort((a, b) => b.scheduled_at.localeCompare(a.scheduled_at));
+
+    document.getElementById('count-upcoming').textContent = upcoming.length;
+    document.getElementById('count-past').textContent = past.length;
+
+    document.getElementById('upcoming-wrap').innerHTML = upcoming.length
+      ? `<div class="surface overflow-hidden">${upcoming.map(rowHtml).join('')}</div>`
+      : `<div class="surface p-14 text-center">
+           <i data-lucide="calendar-clock" style="width:36px;height:36px;color:var(--text-3);margin:0 auto 12px;display:block"></i>
+           <div class="text-sm text-soft mb-1">Nenhum agendamento pendente</div>
+           <div class="text-xs text-muted">Clique em "Novo agendamento" pra programar uma postagem</div>
+         </div>`;
+
+    document.getElementById('past-wrap').innerHTML = past.length
+      ? `<div class="surface overflow-hidden">${past.map(rowHtml).join('')}</div>`
+      : `<div class="surface p-14 text-center">
+           <i data-lucide="history" style="width:36px;height:36px;color:var(--text-3);margin:0 auto 12px;display:block"></i>
+           <div class="text-sm text-soft">Nada no histórico ainda</div>
+         </div>`;
+
+    if (window.lucide) lucide.createIcons();
+  }
+
+  function rowHtml(s) {
+    const accountTxt = s.account ? `@${s.account}` : 'todas as conectadas';
+    return `<div class="timeline-row">
+      <div class="time-cell">
+        <div class="day">${fmtDay(s.scheduled_at)}</div>
+        <div class="hour">${fmtHour(s.scheduled_at)}</div>
+        <div class="rel">${fmtRel(s.scheduled_at)}</div>
+      </div>
+      <div class="min-w-0">
+        <div class="font-medium text-[13px] truncate">${escapeHtml(s.video)}</div>
+        <div class="text-[12px] text-soft mt-0.5">${accountTxt} ${s.note ? '· <span class="text-muted">' + escapeHtml(s.note) + '</span>' : ''}</div>
+        <div class="mt-1.5">${statusBadge(s.status)}</div>
+      </div>
+      <div class="flex items-center gap-1">${actions(s)}</div>
+    </div>`;
+  }
+
+  function switchTab(tab) {
+    currentTab = tab;
+    document.querySelectorAll('.tab').forEach(t => t.classList.toggle('tab-active', t.dataset.tab === tab));
+    document.getElementById('upcoming-wrap').classList.toggle('hidden', tab !== 'upcoming');
+    document.getElementById('past-wrap').classList.toggle('hidden', tab !== 'past');
+  }
+
+  async function load() {
+    try {
+      all = await api('/api/schedules');
+      renderList();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  // ----- New modal -----
+
+  function openNewModal() {
+    const m = document.getElementById('new-modal');
+    m.classList.remove('hidden');
+    // Default: hoje + 1h, arredondado pra próximos 5 min
+    const d = new Date(Date.now() + 60 * 60 * 1000);
+    d.setSeconds(0, 0);
+    d.setMinutes(Math.ceil(d.getMinutes() / 5) * 5);
+    document.querySelector('#new-form [name=date]').value = d.toISOString().slice(0, 10);
+    document.querySelector('#new-form [name=time]').value = d.toTimeString().slice(0, 5);
+    if (window.lucide) lucide.createIcons();
+  }
+  function closeNewModal() { document.getElementById('new-modal').classList.add('hidden'); }
+
+  document.getElementById('new-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const date = fd.get('date');
+    const time = fd.get('time');
+    if (!date || !time) return;
+    // Monta local datetime sem TZ — backend interpreta como local (Brasília)
+    const iso = `${date}T${time}:00`;
+    try {
+      await api('/api/schedules', {
+        method: 'POST',
+        body: JSON.stringify({
+          video: fd.get('video'),
+          account: fd.get('account') || null,
+          scheduled_at: iso,
+        }),
+      });
+      toast('Agendamento criado', 'success');
+      closeNewModal();
+      e.target.reset();
+      await load();
+    } catch (err) { toast(err.message, 'error'); }
+  });
+
+  async function cancelOne(id) {
+    const ok = await confirmModal({
+      title: 'Cancelar agendamento?',
+      message: 'O disparo não será feito. Você pode criar outro pra mesma hora se precisar.',
+      danger: true,
+      confirmText: 'Cancelar agendamento',
+    });
+    if (!ok) return;
+    try {
+      await api(`/api/schedules/${id}/cancel`, { method: 'POST' });
+      toast('Agendamento cancelado', 'success');
+      await load();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  async function deleteOne(id) {
+    const ok = await confirmModal({
+      title: 'Apagar do histórico?',
+      message: 'Só remove da lista, não desfaz a postagem.',
+      danger: true,
+      confirmText: 'Apagar',
+    });
+    if (!ok) return;
+    try {
+      await api(`/api/schedules/${id}/delete`, { method: 'POST' });
+      toast('Removido', 'success');
+      await load();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  load();
+  // Atualiza a cada 10s pra refletir mudanças de status quando o scheduler dispara
+  setInterval(load, 10000);
+</script>
+{% endblock %}

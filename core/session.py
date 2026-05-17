@@ -1,0 +1,147 @@
+"""
+Gerencia login e persistência de sessão.
+A regra de ouro: NUNCA logar do zero se já tem sessão salva.
+Login repetido = checkpoint quase certo.
+
+Suporte a 2FA TOTP: se a conta tiver `totp_secret` (a chave que o vendedor
+de contas fornece, ex: "XMO3 LBDQ ECDF CZL2 SU5M NEZ4 SIXE 4QXU"), o código
+de 6 dígitos é gerado e enviado automaticamente no login.
+"""
+import json
+import os
+import re
+from pathlib import Path
+from typing import Optional
+
+from instagrapi import Client
+from instagrapi.exceptions import LoginRequired, ChallengeRequired
+
+from core.paths import SESSIONS_DIR, ACCOUNTS_FILE
+
+
+def _clean_totp_secret(secret: Optional[str]) -> Optional[str]:
+    """Remove espaços, hífens e normaliza pra maiúscula. Os vendedores costumam
+    entregar a chave formatada em blocos de 4 caracteres com espaços."""
+    if not secret:
+        return None
+    cleaned = re.sub(r"[\s-]+", "", secret).upper()
+    return cleaned or None
+
+
+def get_client(
+    username: str,
+    password: str,
+    proxy: str = None,
+    totp_secret: Optional[str] = None,
+    challenge_handler=None,
+    totp_fallback_handler=None,
+) -> Client:
+    """
+    Retorna cliente logado. Tenta usar sessão salva primeiro.
+    Se a sessão expirou, faz login novo (com TOTP se disponível) e salva.
+
+    Args:
+        challenge_handler: callback(username, choice) -> code para responder
+            challenges de email/SMS do Instagram. Se None, o instagrapi usa input().
+        totp_fallback_handler: callback() -> code pedido se a conta tem 2FA mas
+            totp_secret não foi cadastrado. Se None, levanta exceção.
+    """
+    cl = Client()
+    cl.delay_range = [2, 5]
+    if proxy:
+        cl.set_proxy(proxy)
+    if challenge_handler:
+        cl.challenge_code_handler = challenge_handler
+
+    totp_secret = _clean_totp_secret(totp_secret)
+    session_file = SESSIONS_DIR / f"{username}.json"
+
+    def _do_login(client: Client):
+        """Faz o login passando código TOTP se a conta tem 2FA."""
+        if totp_secret:
+            try:
+                code = client.totp_generate_code(totp_secret)
+            except Exception as e:
+                raise RuntimeError(f"Falha gerando código TOTP (chave inválida?): {e}")
+            import time as _time
+            seconds_left = 30 - int(_time.time()) % 30
+            print(f"[{username}] 🔐 Código TOTP gerado: {code} (expira em {seconds_left}s)")
+            print(f"[{username}]    Senha sendo enviada: {len(password)} chars, começa com '{password[:3]}', termina com '{password[-2:]}'")
+            print(f"[{username}]    Abra o 2fa.ac com sua chave AGORA e confirme que mostra '{code}'.")
+            client.login(username, password, verification_code=code)
+        elif totp_fallback_handler:
+            # Não tem chave salva, mas o usuário pode digitar o código manualmente
+            # via UI. Tenta sem código primeiro pra ver se a conta tem 2FA mesmo.
+            try:
+                client.login(username, password)
+            except Exception as e:
+                if "two_factor" in str(e).lower() or "2fa" in str(e).lower():
+                    manual_code = totp_fallback_handler()
+                    client.login(username, password, verification_code=manual_code)
+                else:
+                    raise
+        else:
+            client.login(username, password)
+
+    # Tentativa 1: usar sessão salva
+    if session_file.exists():
+        try:
+            cl.load_settings(session_file)
+            _do_login(cl)
+            cl.get_timeline_feed()
+            print(f"[{username}] Sessão restaurada ✓")
+            return cl
+        except LoginRequired:
+            print(f"[{username}] Sessão expirou, fazendo login novo...")
+        except Exception as e:
+            print(f"[{username}] Sessão inválida ({e}), refazendo...")
+
+    # Tentativa 2: login do zero
+    try:
+        cl = Client()
+        cl.delay_range = [2, 5]
+        if proxy:
+            cl.set_proxy(proxy)
+
+        _do_login(cl)
+        cl.dump_settings(session_file)
+        kind = "com 2FA" if totp_secret else "sem 2FA"
+        print(f"[{username}] Login novo ✓ ({kind}, sessão salva)")
+        return cl
+
+    except ChallengeRequired:
+        print(f"[{username}] ⚠️  CHALLENGE: Instagram pediu verificação por email/SMS.")
+        print(f"   Isso acontece quando a conta é nova, ou foi flagada, ou logou de IP novo.")
+        print(f"   Faça login manual no app/web pra resolver e tente de novo.")
+        raise
+    except Exception as e:
+        msg = str(e).lower()
+        if "blacklist" in msg or "change your ip" in msg:
+            print(f"[{username}] 🚫 IP BLACKLISTED — Instagram bloqueou seu IP residencial.")
+            print(f"   Isso é diferente de senha errada. A mensagem 'password is incorrect' aqui é mentira do Instagram.")
+            print(f"   Causa comum: várias tentativas de login falhadas seguidas (incluindo as anteriores ao 2FA).")
+            print(f"   Soluções:")
+            print(f"     1. Esperar 1-24h e tentar de novo (mais comum)")
+            print(f"     2. Usar proxy residencial nessa conta (campo 'Proxy' na UI)")
+            print(f"     3. Reiniciar o roteador (pra pegar IP novo da operadora — funciona se for IP dinâmico)")
+            print(f"     4. Usar 4G/hotspot do celular como teste")
+        elif "two_factor" in msg or "2fa" in msg or "verification_code" in msg:
+            print(f"[{username}] ⚠️  Essa conta tem 2FA ativado. Cadastre a chave 2FA (TOTP) na UI.")
+        elif "checkpoint" in msg or "challenge" in msg:
+            print(f"[{username}] ⚠️  Instagram pediu verificação adicional (checkpoint).")
+            print(f"   Faça login manual no app/web pra resolver.")
+        print(f"[{username}] ❌ Falha no login: {e}")
+        raise
+
+
+def load_accounts(path: str = None) -> list:
+    """Carrega lista de contas do JSON (default: ACCOUNTS_FILE de core/paths)."""
+    target = Path(path) if path else ACCOUNTS_FILE
+    if not target.exists():
+        raise FileNotFoundError(
+            f"Arquivo {target} não encontrado. "
+            f"Adicione contas pela UI ou copie accounts.example.json."
+        )
+    with open(target) as f:
+        accounts = json.load(f)
+    return [a for a in accounts if a.get("active", True)]

@@ -1,0 +1,315 @@
+{% extends "base.html" %}
+{% block title %}Contas · Insta Poster{% endblock %}
+{% block content %}
+
+<div class="flex items-end justify-between mb-7">
+  <div>
+    <h1 class="h-page">Contas</h1>
+    <p class="text-sm text-soft mt-1">Adicione, conecte e gerencie as contas Instagram</p>
+  </div>
+  <button class="btn btn-accent" onclick="toggleAddForm(true)">
+    <i data-lucide="plus" class="icon"></i> Nova conta
+  </button>
+</div>
+
+<!-- Inline form (hidden by default) -->
+<div id="add-form-wrap" class="surface p-5 mb-5 hidden">
+  <div class="flex items-center justify-between mb-4">
+    <div class="h-section">Adicionar conta</div>
+    <button class="btn btn-ghost btn-sm" onclick="toggleAddForm(false)">
+      <i data-lucide="x" class="icon"></i>
+    </button>
+  </div>
+  <form id="add-form" class="space-y-3" autocomplete="off">
+    <div class="grid grid-cols-2 gap-3">
+      <div>
+        <label class="label">Usuário</label>
+        <input class="input" name="username" placeholder="conta_insta" required />
+      </div>
+      <div>
+        <label class="label">Senha</label>
+        <input class="input" type="password" name="password" required autocomplete="new-password" />
+      </div>
+    </div>
+    <div>
+      <label class="label flex items-center gap-1.5">
+        <i data-lucide="shield" style="width:12px;height:12px"></i>
+        Chave 2FA (TOTP) <span class="text-muted">— opcional, mas recomendado</span>
+      </label>
+      <input class="input mono text-[12.5px]" name="totp_secret" placeholder="XMO3 LBDQ ECDF CZL2 SU5M NEZ4 SIXE 4QXU" />
+      <div class="text-[11.5px] text-muted mt-1">A chave que você gera no app/site de 2FA (espaços são removidos automaticamente).</div>
+    </div>
+    <div>
+      <label class="label">Proxy <span class="text-muted">(opcional)</span></label>
+      <input class="input" name="proxy" placeholder="vazio = IP local" />
+    </div>
+    <div class="flex items-center justify-between pt-2 border-t border-line">
+      <label class="flex items-center gap-2 text-sm text-soft">
+        <span class="switch">
+          <input type="checkbox" name="active" checked />
+          <span class="slider"></span>
+        </span>
+        Conta ativa (entra nos disparos)
+      </label>
+      <button type="submit" class="btn btn-primary">
+        <i data-lucide="check" class="icon"></i> Salvar conta
+      </button>
+    </div>
+  </form>
+  <div class="mt-4 pt-4 border-t border-line flex gap-2 items-start text-[12px] text-soft">
+    <i data-lucide="info" class="icon mt-0.5" style="color:var(--warning)"></i>
+    <span>Se a conta tem 2FA ativado e você não cadastrar a chave aqui, o "Conectar" vai falhar com "senha errada" (na verdade é o código 2FA faltando).</span>
+  </div>
+</div>
+
+<!-- Bulk actions toolbar (visible when there's selection) -->
+<div id="bulk-bar" class="surface px-4 py-2.5 mb-3 flex items-center justify-between hidden">
+  <div class="text-sm">
+    <span id="bulk-count" class="font-semibold">0</span> <span class="text-soft">selecionada(s)</span>
+  </div>
+  <div class="flex gap-2">
+    <button class="btn btn-ghost btn-sm" onclick="clearSelection()">Desmarcar</button>
+    <button class="btn btn-danger btn-sm" onclick="bulkDelete()">
+      <i data-lucide="trash-2" class="icon"></i> Remover selecionadas
+    </button>
+  </div>
+</div>
+
+<!-- Accounts list -->
+<div class="surface overflow-hidden">
+  <table class="t">
+    <thead>
+      <tr>
+        <th style="width:32px"><input type="checkbox" class="check" id="check-all" onchange="toggleAll(this)" /></th>
+        <th>Conta</th>
+        <th style="width:120px">Status</th>
+        <th style="width:140px">Sessão</th>
+        <th>Proxy</th>
+        <th style="width:280px" class="text-right pr-4">Ações</th>
+      </tr>
+    </thead>
+    <tbody id="accounts-tbody"></tbody>
+  </table>
+  <div id="empty-state" class="hidden p-14 text-center">
+    <i data-lucide="users" style="width:36px;height:36px;color:var(--text-3);margin:0 auto 12px;display:block"></i>
+    <div class="text-sm text-soft mb-1">Nenhuma conta cadastrada</div>
+    <div class="text-xs text-muted">Clique em "Nova conta" para começar</div>
+  </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+  let accounts = [];
+  let selection = new Set();
+
+  function toggleAddForm(show) {
+    const w = document.getElementById('add-form-wrap');
+    w.classList.toggle('hidden', !show);
+    if (show) document.querySelector('#add-form [name=username]').focus();
+  }
+
+  function statusDot(active, session) {
+    if (!active) return '<span class="dot dot-muted"></span> <span class="text-soft text-[12.5px]">pausada</span>';
+    if (session === 'saved') return '<span class="dot dot-success"></span> <span class="text-[12.5px]">conectada</span>';
+    return '<span class="dot dot-warning"></span> <span class="text-[12.5px]">não conectada</span>';
+  }
+
+  function sessionBadge(session) {
+    return session === 'saved'
+      ? '<span class="badge badge-success"><i data-lucide="shield-check" style="width:11px;height:11px"></i> salva</span>'
+      : '<span class="badge badge-neutral">vazia</span>';
+  }
+
+  function render() {
+    const tbody = document.getElementById('accounts-tbody');
+    const empty = document.getElementById('empty-state');
+    if (!accounts.length) {
+      tbody.innerHTML = '';
+      empty.classList.remove('hidden');
+      document.querySelector('table.t').classList.add('hidden');
+      return;
+    }
+    empty.classList.add('hidden');
+    document.querySelector('table.t').classList.remove('hidden');
+
+    tbody.innerHTML = accounts.map(a => `
+      <tr data-username="${a.username}">
+        <td><input type="checkbox" class="check row-check" value="${a.username}" ${selection.has(a.username) ? 'checked' : ''} onchange="onSelect(this)" /></td>
+        <td>
+          <div class="flex items-center gap-2">
+            <div class="font-medium mono text-[13px]">@${a.username}</div>
+            ${a.has_totp
+              ? '<span class="badge badge-success" title="2FA cadastrado"><i data-lucide="shield-check" style="width:11px;height:11px"></i> 2FA</span>'
+              : '<span class="badge badge-neutral" title="Sem chave 2FA — se a conta tem 2FA ativo, conectar vai falhar"><i data-lucide="shield-off" style="width:11px;height:11px"></i> sem 2FA</span>'}
+          </div>
+        </td>
+        <td>${statusDot(a.active, a.session)}</td>
+        <td>${sessionBadge(a.session)}</td>
+        <td class="mono text-[12px] text-soft">${a.proxy || '<span class="text-muted">—</span>'}</td>
+        <td class="text-right pr-4">
+          <div class="inline-flex items-center gap-1.5">
+            <label class="switch" title="${a.active ? 'Pausar' : 'Ativar'}">
+              <input type="checkbox" ${a.active ? 'checked' : ''} onchange="onToggle('${a.username}')" />
+              <span class="slider"></span>
+            </label>
+            <button class="btn btn-subtle btn-sm" onclick="onTestLogin('${a.username}')" title="Testar login (salva sessão)">
+              <i data-lucide="log-in" class="icon"></i> Conectar
+            </button>
+            <button class="btn btn-ghost btn-sm" onclick="onEditTotp('${a.username}', ${a.has_totp})" title="${a.has_totp ? 'Atualizar' : 'Adicionar'} chave 2FA">
+              <i data-lucide="shield" class="icon"></i>
+            </button>
+            ${a.has_totp
+              ? `<button class="btn btn-ghost btn-sm" onclick="onShowTotp('${a.username}')" title="Ver código 2FA atual (pra conferir se a chave tá certa)"><i data-lucide="eye" class="icon"></i></button>`
+              : ''}
+            ${a.session === 'saved'
+              ? `<button class="btn btn-ghost btn-sm" onclick="onClearSession('${a.username}')" title="Apagar sessão salva"><i data-lucide="key-round" class="icon"></i></button>`
+              : ''}
+            <button class="btn btn-danger btn-sm" onclick="onDelete('${a.username}')" title="Remover conta">
+              <i data-lucide="trash-2" class="icon"></i>
+            </button>
+          </div>
+        </td>
+      </tr>
+    `).join('');
+    if (window.lucide) lucide.createIcons();
+    updateBulkBar();
+  }
+
+  function updateBulkBar() {
+    const bar = document.getElementById('bulk-bar');
+    const count = selection.size;
+    document.getElementById('bulk-count').textContent = count;
+    bar.classList.toggle('hidden', count === 0);
+    const all = document.getElementById('check-all');
+    all.checked = count > 0 && count === accounts.length;
+    all.indeterminate = count > 0 && count < accounts.length;
+  }
+
+  function onSelect(cb) {
+    if (cb.checked) selection.add(cb.value); else selection.delete(cb.value);
+    updateBulkBar();
+  }
+  function toggleAll(cb) {
+    selection = cb.checked ? new Set(accounts.map(a => a.username)) : new Set();
+    document.querySelectorAll('.row-check').forEach(c => c.checked = cb.checked);
+    updateBulkBar();
+  }
+  function clearSelection() { selection.clear(); render(); }
+
+  async function load() {
+    try {
+      accounts = await api('/api/accounts');
+      render();
+    } catch (e) {
+      toast(`Erro carregando contas: ${e.message}`, 'error');
+    }
+  }
+
+  document.getElementById('add-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const payload = {
+      username: fd.get('username'),
+      password: fd.get('password'),
+      proxy: fd.get('proxy') || null,
+      active: fd.get('active') === 'on',
+    };
+    try {
+      const r = await api('/api/accounts', { method: 'POST', body: JSON.stringify(payload) });
+      toast(`Conta @${r.account.username} adicionada`, 'success');
+      e.target.reset();
+      toggleAddForm(false);
+      await load();
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  });
+
+  async function onToggle(username) {
+    try {
+      const r = await api(`/api/accounts/${username}/toggle`, { method: 'POST' });
+      toast(`@${username} ${r.active ? 'ativada' : 'pausada'}`, 'success');
+      await load();
+    } catch (e) { toast(e.message, 'error'); await load(); }
+  }
+
+  async function onDelete(username) {
+    const ok = await confirmModal({
+      title: `Remover @${username}?`,
+      message: 'A conta sai da lista e a sessão salva é apagada. Não há como desfazer.',
+      danger: true,
+      confirmText: 'Remover'
+    });
+    if (!ok) return;
+    try {
+      await api(`/api/accounts/${username}/delete`, { method: 'POST' });
+      toast(`@${username} removida`, 'success');
+      selection.delete(username);
+      await load();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  async function bulkDelete() {
+    const arr = [...selection];
+    const ok = await confirmModal({
+      title: `Remover ${arr.length} conta(s)?`,
+      message: `As contas serão removidas e as sessões salvas apagadas. Não há como desfazer.<br><br><span class="mono text-[11px] text-soft">${arr.map(u=>'@'+u).join(', ')}</span>`,
+      danger: true,
+      confirmText: `Remover ${arr.length}`
+    });
+    if (!ok) return;
+    try {
+      const r = await api('/api/accounts/bulk-delete', { method: 'POST', body: JSON.stringify({ usernames: arr }) });
+      toast(`${r.removed.length} conta(s) removida(s)`, 'success');
+      selection.clear();
+      await load();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  async function onClearSession(username) {
+    const ok = await confirmModal({
+      title: `Limpar sessão de @${username}?`,
+      message: 'O próximo login dessa conta será do zero (alta chance de pedir verificação por email).',
+      confirmText: 'Limpar sessão'
+    });
+    if (!ok) return;
+    try {
+      await api(`/api/accounts/${username}/clear-session`, { method: 'POST' });
+      toast(`Sessão de @${username} apagada`, 'success');
+      await load();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  async function onTestLogin(username) {
+    try {
+      const r = await api(`/api/accounts/${username}/test-login`, { method: 'POST' });
+      toast(`Conectando @${username}…`, 'info');
+      setTimeout(() => location.href = `/jobs/${r.job_id}`, 600);
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  async function onEditTotp(username, hasTotp) {
+    const current = hasTotp ? '(já cadastrada — deixe vazio pra remover)' : '';
+    const value = prompt(`Chave 2FA (TOTP) de @${username} ${current}\n\nCole a chave do site/app de 2FA (ex: "XMO3 LBDQ ECDF CZL2 ..."). Espaços são removidos.`, '');
+    if (value === null) return;
+    try {
+      const r = await api(`/api/accounts/${username}/totp`, {
+        method: 'POST',
+        body: JSON.stringify({ totp_secret: value }),
+      });
+      toast(r.has_totp ? `Chave 2FA salva pra @${username}` : `2FA removido de @${username}`, 'success');
+      await load();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  async function onShowTotp(username) {
+    try {
+      const r = await api(`/api/accounts/${username}/totp-code`);
+      alert(`Código 2FA atual de @${username}:\n\n        ${r.code}\n\nExpira em ${r.seconds_left}s.\n\nEsse código DEVE ser idêntico ao que o 2fa.ac mostra agora. Se for diferente, a chave salva está errada.`);
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  load();
+</script>
+{% endblock %}

@@ -1,0 +1,44 @@
+services:
+  app:
+    build: .
+    image: insta-poster:latest
+    container_name: insta-poster-app
+    restart: unless-stopped
+    environment:
+      DATA_DIR: /data
+      HTTPS_ONLY: "1"
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
+      TZ: America/Sao_Paulo
+    volumes:
+      - ./data:/data
+    expose:
+      - "8000"
+    networks:
+      - web
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: insta-poster-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN}
+      EMAIL: ${EMAIL}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+    networks:
+      - web
+
+networks:
+  web:
+
+volumes:
+  caddy_data:
+  caddy_config:

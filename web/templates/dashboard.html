@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% block title %}Dashboard · Insta Poster{% endblock %}
+{% block content %}
+
+<div class="flex items-end justify-between mb-7">
+  <div>
+    <h1 class="h-page">Olá, {{ user.email.split('@')[0] if user else '' }}</h1>
+    <p class="text-sm text-soft mt-1">Visão geral do que está acontecendo</p>
+  </div>
+  <div class="text-right text-[11.5px] mono">
+    <div class="text-soft">local <span class="text-[var(--text)]">127.0.0.1:8000</span></div>
+    <div class="text-muted mt-0.5">LAN <span class="text-soft">{{ host_ip }}:8000</span></div>
+  </div>
+</div>
+
+<!-- Status cards -->
+<div class="grid grid-cols-4 gap-3 mb-6">
+  <a href="/accounts" class="surface p-5 hover:border-[var(--border-2)] transition-all block">
+    <div class="flex items-center justify-between mb-3">
+      <div class="text-[11px] uppercase tracking-wider text-muted font-semibold">Contas conectadas</div>
+      <i data-lucide="at-sign" style="width:14px;height:14px;color:var(--text-3)"></i>
+    </div>
+    <div class="text-[28px] font-semibold leading-none">{{ connected_accounts|length }}<span class="text-[14px] text-muted font-normal">/{{ active_accounts|length }}</span></div>
+    <div class="text-[12px] text-soft mt-2">
+      {% if active_accounts|length > connected_accounts|length %}
+        <span class="text-amber-300">{{ active_accounts|length - connected_accounts|length }} sem sessão →</span>
+      {% else %}
+        prontas pra postar
+      {% endif %}
+    </div>
+  </a>
+  <a href="/videos" class="surface p-5 hover:border-[var(--border-2)] transition-all block">
+    <div class="flex items-center justify-between mb-3">
+      <div class="text-[11px] uppercase tracking-wider text-muted font-semibold">Na fila</div>
+      <i data-lucide="film" style="width:14px;height:14px;color:var(--text-3)"></i>
+    </div>
+    <div class="text-[28px] font-semibold leading-none">{{ pending|length }}</div>
+    <div class="text-[12px] text-soft mt-2">mídias pendentes</div>
+  </a>
+  <a href="/schedule" class="surface p-5 hover:border-[var(--border-2)] transition-all block">
+    <div class="flex items-center justify-between mb-3">
+      <div class="text-[11px] uppercase tracking-wider text-muted font-semibold">Agendadas</div>
+      <i data-lucide="calendar-clock" style="width:14px;height:14px;color:var(--text-3)"></i>
+    </div>
+    <div class="text-[28px] font-semibold leading-none">{{ upcoming_count }}</div>
+    <div class="text-[12px] text-soft mt-2">postagens futuras</div>
+  </a>
+  <a href="/videos" class="surface p-5 hover:border-[var(--border-2)] transition-all block">
+    <div class="flex items-center justify-between mb-3">
+      <div class="text-[11px] uppercase tracking-wider text-muted font-semibold">Postados</div>
+      <i data-lucide="check-circle-2" style="width:14px;height:14px;color:var(--text-3)"></i>
+    </div>
+    <div class="text-[28px] font-semibold leading-none">{{ posted|length }}</div>
+    <div class="text-[12px] text-soft mt-2">no arquivo</div>
+  </a>
+</div>
+
+<!-- Setup hint quando não tem nada -->
+{% if not connected_accounts %}
+<div class="surface mb-5 p-5 flex items-start gap-3" style="border-left: 3px solid var(--warning)">
+  <i data-lucide="rocket" style="width:20px;height:20px;color:var(--warning);margin-top:1px;flex-shrink:0"></i>
+  <div>
+    <div class="font-semibold text-[14px] mb-1">Pra começar</div>
+    <div class="text-[13px] text-soft leading-relaxed mb-3">
+      Você ainda não tem nenhuma conta conectada. Adicione contas Instagram em <strong>Contas Insta</strong> (precisa do email/senha + chave 2FA se a conta tiver) e clique "Conectar" em cada uma.
+    </div>
+    <a href="/accounts" class="btn btn-accent btn-sm"><i data-lucide="plus" class="icon"></i> Adicionar primeira conta</a>
+  </div>
+</div>
+{% endif %}
+
+<div class="grid grid-cols-3 gap-5">
+  <!-- Atividade -->
+  <div class="surface col-span-2 overflow-hidden">
+    <div class="flex items-center justify-between px-5 py-3.5 border-b border-line">
+      <div class="h-section">Atividade recente</div>
+      <a href="/jobs" class="text-[12px] text-soft hover:text-[var(--text)] flex items-center gap-1">ver tudo <i data-lucide="arrow-right" style="width:12px;height:12px"></i></a>
+    </div>
+    {% if jobs %}
+    <table class="t">
+      <thead>
+        <tr><th>Quando</th><th>Descrição</th><th>Status</th></tr>
+      </thead>
+      <tbody>
+        {% for j in jobs %}
+        <tr class="cursor-pointer" onclick="location.href='/jobs/{{ j.id }}'">
+          <td class="mono text-[11.5px] text-soft">{{ j.started_at or '—' }}</td>
+          <td>{{ j.label }}</td>
+          <td>
+            {% if j.status == 'running' %}<span class="badge badge-warning"><span class="dot dot-warning dot-pulse"></span> rodando</span>
+            {% elif j.status == 'finished' %}<span class="badge badge-success"><span class="dot dot-success"></span> concluído</span>
+            {% elif j.status == 'error' %}<span class="badge badge-danger"><span class="dot dot-danger"></span> erro</span>
+            {% elif j.status == 'cancelled' %}<span class="badge badge-neutral">cancelado</span>
+            {% else %}<span class="badge badge-neutral">{{ j.status }}</span>{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="p-12 text-center">
+      <i data-lucide="inbox" style="width:32px;height:32px;color:var(--text-3);margin:0 auto 10px;display:block"></i>
+      <div class="text-sm text-soft mb-2">Nenhum disparo ainda</div>
+      <div class="text-xs text-muted">Quando você postar (manualmente ou agendado), o histórico aparece aqui</div>
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- Lateral -->
+  <div class="space-y-4">
+    <!-- Próximos agendamentos -->
+    {% if upcoming_schedules %}
+    <div class="surface overflow-hidden">
+      <div class="px-5 py-3 border-b border-line flex items-center justify-between">
+        <div class="h-section">Próximos</div>
+        <a href="/schedule" class="text-[12px] text-soft hover:text-[var(--text)]">ver tudo</a>
+      </div>
+      <div class="divide-y divide-[var(--border)]">
+        {% for s in upcoming_schedules %}
+        <div class="p-3 hover:bg-[var(--surface-2)]">
+          <div class="font-medium text-[12.5px] truncate">{{ s.video }}</div>
+          <div class="text-[11px] text-soft mt-0.5">
+            {{ s.scheduled_at[:16].replace('T', ' às ') }} ·
+            {{ '@' + s.account if s.account else 'todas conectadas' }}
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- Ação principal -->
+    <div class="surface p-4">
+      <div class="h-section mb-3">Atalhos</div>
+      <div class="space-y-2">
+        <a href="/videos" class="btn btn-accent w-full justify-between">
+          <span class="flex items-center gap-2"><i data-lucide="upload" class="icon"></i> Subir mídia</span>
+          <i data-lucide="chevron-right" class="icon"></i>
+        </a>
+        <a href="/schedule" class="btn btn-ghost w-full justify-between">
+          <span class="flex items-center gap-2"><i data-lucide="calendar-plus" class="icon"></i> Agendar</span>
+          <i data-lucide="chevron-right" class="icon"></i>
+        </a>
+        <a href="/jobs" class="btn btn-ghost w-full justify-between">
+          <span class="flex items-center gap-2"><i data-lucide="play" class="icon"></i> Disparar manual</span>
+          <i data-lucide="chevron-right" class="icon"></i>
+        </a>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,30 @@
+# Caddy 2 — reverse proxy + HTTPS automático via Let's Encrypt.
+# Domínio e email vêm do .env (variáveis DOMAIN e EMAIL).
+
+{
+    email {$EMAIL}
+}
+
+{$DOMAIN} {
+    encode zstd gzip
+
+    # Limite generoso pra upload de vídeos
+    request_body {
+        max_size 500MB
+    }
+
+    reverse_proxy app:8000 {
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+
+    # Cache estático básico
+    @static path /static/*
+    header @static Cache-Control "public, max-age=86400"
+
+    log {
+        output stdout
+        format console
+    }
+}

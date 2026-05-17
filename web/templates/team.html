@@ -1,0 +1,214 @@
+{% extends "base.html" %}
+{% block title %}Equipe · Insta Poster{% endblock %}
+{% block content %}
+
+<div class="flex items-end justify-between mb-7">
+  <div>
+    <h1 class="h-page">Equipe</h1>
+    <p class="text-sm text-soft mt-1">Membros do painel · gere link de convite pra adicionar gente</p>
+  </div>
+  <button class="btn btn-accent" onclick="onCreateInvite()">
+    <i data-lucide="link-2" class="icon"></i> Gerar link de convite
+  </button>
+</div>
+
+<div class="surface mb-5 overflow-hidden">
+  <div class="px-5 py-3.5 border-b border-line flex items-center justify-between">
+    <div class="h-section">Membros <span class="text-soft font-normal">· <span id="member-count">0</span></span></div>
+  </div>
+  <div id="members-wrap"></div>
+</div>
+
+<div class="surface overflow-hidden">
+  <div class="px-5 py-3.5 border-b border-line">
+    <div class="h-section">Convites pendentes <span class="text-soft font-normal">· <span id="invite-count">0</span></span></div>
+  </div>
+  <div id="invites-wrap"></div>
+</div>
+
+<!-- Modal pós-criação do convite (link gerado) -->
+<div id="link-modal" class="modal-bg hidden" onclick="if(event.target===this) this.classList.add('hidden')">
+  <div class="modal-card" style="max-width: 520px">
+    <div class="text-[15px] font-semibold mb-1">Link de convite gerado</div>
+    <div class="text-[13px] text-soft mb-4">Envie esse link pra pessoa. Ele expira após o primeiro uso.</div>
+    <div class="surface-2 flex items-center gap-2 p-2 pl-3">
+      <input id="link-input" class="bg-transparent flex-1 text-[12.5px] mono text-[var(--text)]" readonly />
+      <button class="btn btn-primary btn-sm" onclick="copyLink()"><i data-lucide="copy" class="icon"></i> <span id="copy-label">Copiar</span></button>
+    </div>
+    <div class="flex justify-end mt-5">
+      <button class="btn btn-ghost" onclick="document.getElementById('link-modal').classList.add('hidden')">Fechar</button>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+  let ownerEmail = '';
+
+  function timeAgo(iso) {
+    if (!iso) return 'nunca';
+    const d = new Date(iso);
+    const s = Math.floor((Date.now() - d.getTime()) / 1000);
+    if (s < 60) return 'online agora';
+    if (s < 3600) return `há ${Math.floor(s/60)} min`;
+    if (s < 86400) return `há ${Math.floor(s/3600)}h`;
+    return `há ${Math.floor(s/86400)}d`;
+  }
+
+  function isOnline(iso) {
+    if (!iso) return false;
+    return (Date.now() - new Date(iso).getTime()) < 120000;
+  }
+
+  function escapeHtml(s) { return (s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+  function renderMembers(members) {
+    document.getElementById('member-count').textContent = members.length;
+    const wrap = document.getElementById('members-wrap');
+    wrap.innerHTML = `
+      <table class="t">
+        <thead>
+          <tr><th>Email</th><th style="width:120px">Papel</th><th style="width:160px">Status</th><th style="width:160px">Cadastro</th><th style="width:80px" class="text-right pr-4"></th></tr>
+        </thead>
+        <tbody>
+          ${members.map(m => {
+            const isOwn = m.email.toLowerCase() === ownerEmail.toLowerCase();
+            const online = isOnline(m.last_seen);
+            return `
+              <tr>
+                <td>
+                  <div class="flex items-center gap-2.5">
+                    <div class="w-7 h-7 rounded-full bg-[var(--surface-2)] border border-[var(--border)] flex items-center justify-center text-[11px] font-semibold uppercase text-soft">${escapeHtml(m.email[0])}</div>
+                    <div>
+                      <div class="font-medium text-[13px]">${escapeHtml(m.email)}${isOwn ? ' <span class="text-muted text-[11px] font-normal">(você)</span>' : ''}</div>
+                    </div>
+                  </div>
+                </td>
+                <td>
+                  ${m.role === 'owner'
+                    ? '<span class="badge badge-warning"><i data-lucide="crown" style="width:11px;height:11px"></i> owner</span>'
+                    : '<span class="badge badge-neutral">membro</span>'}
+                </td>
+                <td>
+                  <span class="flex items-center gap-2 text-[12.5px]">
+                    <span class="dot ${online ? 'dot-success dot-pulse' : 'dot-muted'}"></span>
+                    ${online ? 'online agora' : timeAgo(m.last_seen)}
+                  </span>
+                </td>
+                <td class="mono text-[11.5px] text-soft">${m.created_at ? m.created_at.slice(0,10) : '—'}</td>
+                <td class="text-right pr-4">
+                  ${m.role !== 'owner'
+                    ? `<button class="btn btn-danger btn-sm" onclick="onDeleteMember('${escapeHtml(m.email)}')" title="Remover membro"><i data-lucide="trash-2" class="icon"></i></button>`
+                    : ''}
+                </td>
+              </tr>`;
+          }).join('')}
+        </tbody>
+      </table>`;
+    if (window.lucide) lucide.createIcons();
+  }
+
+  function renderInvites(invites) {
+    document.getElementById('invite-count').textContent = invites.length;
+    const wrap = document.getElementById('invites-wrap');
+    if (!invites.length) {
+      wrap.innerHTML = `
+        <div class="p-10 text-center">
+          <i data-lucide="link" style="width:28px;height:28px;color:var(--text-3);margin:0 auto 10px;display:block"></i>
+          <div class="text-[13px] text-soft">Nenhum convite pendente</div>
+        </div>`;
+      if (window.lucide) lucide.createIcons();
+      return;
+    }
+    const base = location.origin;
+    wrap.innerHTML = `
+      <table class="t">
+        <thead><tr><th>Link</th><th style="width:160px">Criado em</th><th style="width:200px" class="text-right pr-4">Ações</th></tr></thead>
+        <tbody>
+          ${invites.map(i => `
+            <tr>
+              <td class="mono text-[11.5px] text-soft">${base}/signup/${i.token.slice(0,10)}…</td>
+              <td class="mono text-[11.5px] text-soft">${i.created_at}</td>
+              <td class="text-right pr-4">
+                <button class="btn btn-subtle btn-sm" onclick="copyInviteLink('${i.token}')"><i data-lucide="copy" class="icon"></i> Copiar</button>
+                <button class="btn btn-danger btn-sm" onclick="onRevoke('${i.token}')" title="Revogar"><i data-lucide="x" class="icon"></i></button>
+              </td>
+            </tr>`).join('')}
+        </tbody>
+      </table>`;
+    if (window.lucide) lucide.createIcons();
+  }
+
+  async function load() {
+    try {
+      const data = await api('/api/team');
+      ownerEmail = data.owner_email;
+      renderMembers(data.members);
+      renderInvites(data.invites);
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  async function onCreateInvite() {
+    try {
+      const r = await api('/api/team/invite', { method: 'POST' });
+      const inp = document.getElementById('link-input');
+      inp.value = r.link;
+      document.getElementById('copy-label').textContent = 'Copiar';
+      document.getElementById('link-modal').classList.remove('hidden');
+      inp.select();
+      await load();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  async function copyLink() {
+    const inp = document.getElementById('link-input');
+    try {
+      await navigator.clipboard.writeText(inp.value);
+      document.getElementById('copy-label').textContent = 'Copiado!';
+      toast('Link copiado', 'success');
+    } catch { inp.select(); document.execCommand('copy'); toast('Link copiado', 'success'); }
+  }
+
+  async function copyInviteLink(token) {
+    const link = `${location.origin}/signup/${token}`;
+    try {
+      await navigator.clipboard.writeText(link);
+      toast('Link copiado', 'success');
+    } catch { toast(link, 'info'); }
+  }
+
+  async function onRevoke(token) {
+    const ok = await confirmModal({
+      title: 'Revogar este convite?',
+      message: 'O link deixa de funcionar imediatamente.',
+      danger: true,
+      confirmText: 'Revogar'
+    });
+    if (!ok) return;
+    try {
+      await api(`/api/team/invite/${token}/revoke`, { method: 'POST' });
+      toast('Convite revogado', 'success');
+      await load();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  async function onDeleteMember(email) {
+    const ok = await confirmModal({
+      title: `Remover ${email}?`,
+      message: 'O membro perde acesso ao painel imediatamente.',
+      danger: true,
+      confirmText: 'Remover'
+    });
+    if (!ok) return;
+    try {
+      await api(`/api/team/member/${encodeURIComponent(email)}/delete`, { method: 'POST' });
+      toast('Membro removido', 'success');
+      await load();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  load();
+  setInterval(load, 15000);
+</script>
+{% endblock %}

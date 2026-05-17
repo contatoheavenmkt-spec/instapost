@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Login · Insta Poster</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <style>
+    html, body { background: #09090b; color: #fafafa; font-family: 'Inter', system-ui, sans-serif; }
+    .input { width: 100%; background: #09090b; border: 1px solid #2a2a30; border-radius: 6px; padding: 10px 12px; color: #fafafa; font-size: 14px; }
+    .input:focus { outline: none; border-color: #ec4899; box-shadow: 0 0 0 3px rgba(236,72,153,.12); }
+    .label { display: block; font-size: 12px; color: #a1a1aa; font-weight: 500; margin-bottom: 6px; }
+    .btn-accent { background: #ec4899; color: white; padding: 10px 14px; border-radius: 6px; font-weight: 600; font-size: 14px; width: 100%; transition: .12s; }
+    .btn-accent:hover { background: #d8377f; }
+  </style>
+</head>
+<body class="min-h-screen flex items-center justify-center p-6">
+  <div class="w-full max-w-[380px]">
+    <div class="flex items-center justify-center gap-2 mb-6">
+      <div class="w-8 h-8 rounded-md bg-[#ec4899] flex items-center justify-center">
+        <i data-lucide="send" style="width:16px;height:16px;color:white"></i>
+      </div>
+      <div class="font-semibold text-[16px]">Insta Poster</div>
+    </div>
+
+    <div class="bg-[#101013] border border-[#1f1f23] rounded-xl p-7">
+      <h1 class="text-[18px] font-semibold mb-1">Entrar</h1>
+      <p class="text-[13px] text-[#a1a1aa] mb-6">Acesse com seu email e senha.</p>
+
+      {% if error == 'invalid' %}
+      <div class="mb-4 px-3 py-2.5 rounded-md bg-red-500/10 border border-red-500/20 text-[13px] text-red-300 flex items-start gap-2">
+        <i data-lucide="alert-circle" style="width:14px;height:14px;flex-shrink:0;margin-top:2px"></i>
+        Email ou senha incorretos.
+      </div>
+      {% endif %}
+
+      <form method="post" action="/login" class="space-y-4">
+        <input type="hidden" name="next" value="{{ next }}" />
+        <div>
+          <label class="label">Email</label>
+          <input class="input" type="email" name="email" required autocomplete="email" autofocus />
+        </div>
+        <div>
+          <label class="label">Senha</label>
+          <input class="input" type="password" name="password" required autocomplete="current-password" />
+        </div>
+        <button type="submit" class="btn-accent">Entrar</button>
+      </form>
+    </div>
+
+    <p class="text-center text-[12px] text-[#71717a] mt-5">
+      Não tem conta? Peça um link de convite para o admin.
+    </p>
+  </div>
+  <script>if (window.lucide) lucide.createIcons();</script>
+</body>
+</html>

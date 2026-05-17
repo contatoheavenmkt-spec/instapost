@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Logs · Insta Poster{% endblock %}
+{% block content %}
+
+<div class="flex items-end justify-between mb-7">
+  <div>
+    <h1 class="h-page">Logs</h1>
+    <p class="text-sm text-soft mt-1">Histórico arquivado do post.py · um arquivo por dia</p>
+  </div>
+</div>
+
+<div class="grid grid-cols-4 gap-5">
+  <div class="surface col-span-1 overflow-hidden">
+    <div class="px-4 py-3 border-b border-line">
+      <div class="h-section">Arquivos</div>
+    </div>
+    {% if files %}
+    <div class="p-2">
+      {% for f in files %}
+      <a href="/logs?date={{ f }}" class="block px-3 py-2 rounded text-[12.5px] mono {% if f == selected %}bg-[var(--surface-2)] text-[var(--text)]{% else %}text-soft hover:bg-[var(--surface-2)]{% endif %}">{{ f }}</a>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="p-8 text-center text-sm text-soft">Sem logs ainda</div>
+    {% endif %}
+  </div>
+
+  <div class="col-span-3">
+    {% if selected %}
+    <div class="surface overflow-hidden">
+      <div class="px-5 py-3 border-b border-line flex items-center justify-between">
+        <div class="mono text-[12.5px]">{{ selected }}</div>
+      </div>
+      <pre class="logs" style="border:none;border-radius:0;max-height:75vh">{{ content }}</pre>
+    </div>
+    {% else %}
+    <div class="surface p-12 text-center text-sm text-soft">Selecione um arquivo de log</div>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

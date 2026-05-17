@@ -1,0 +1,666 @@
+{% extends "base.html" %}
+{% block title %}Biblioteca · Insta Poster{% endblock %}
+{% block content %}
+
+<div class="flex items-end justify-between mb-6">
+  <div>
+    <h1 class="h-page">Biblioteca</h1>
+    <p class="text-sm text-soft mt-1">Vídeos para Reels e fotos/vídeos para Stories</p>
+  </div>
+  <button class="btn btn-accent" onclick="document.getElementById('file-input').click()">
+    <i data-lucide="upload" class="icon"></i> Subir mídia
+  </button>
+</div>
+
+<!-- Drag-drop zone -->
+<div id="drop-zone" class="surface mb-5 p-6 transition-all" style="border-style: dashed; border-color: var(--border-2)">
+  <div class="flex items-center justify-between gap-4 flex-wrap">
+    <div class="flex items-center gap-3 text-soft text-[13px]">
+      <i data-lucide="upload-cloud" style="width:22px;height:22px;color:var(--text-3)"></i>
+      <div>
+        <div class="text-[var(--text)] font-medium text-[13.5px]">Arraste vídeos ou fotos aqui</div>
+        <div class="text-[12px] text-muted mt-0.5">MP4 (Reel ou Story) · JPG/PNG/WebP (Story) · vários arquivos por vez</div>
+      </div>
+    </div>
+    <div id="upload-status" class="text-[12px] text-soft"></div>
+  </div>
+  <input id="file-input" type="file" accept="video/mp4,image/jpeg,image/png,image/webp" multiple class="hidden" />
+</div>
+
+<!-- Tabs -->
+<div class="flex items-center gap-1 mb-5 border-b border-line">
+  <button class="tab tab-active" data-tab="pending" onclick="switchTab('pending')">
+    Pendentes <span class="text-muted ml-1" id="count-pending">0</span>
+  </button>
+  <button class="tab" data-tab="posted" onclick="switchTab('posted')">
+    Postados <span class="text-muted ml-1" id="count-posted">0</span>
+  </button>
+</div>
+
+<!-- Grid -->
+<div id="grid-pending" class="grid grid-cols-4 gap-4"></div>
+<div id="grid-posted" class="grid grid-cols-4 gap-4 hidden"></div>
+
+<div id="empty-pending" class="hidden surface p-14 text-center">
+  <i data-lucide="film" style="width:36px;height:36px;color:var(--text-3);margin:0 auto 12px;display:block"></i>
+  <div class="text-sm font-medium text-[var(--text)] mb-1">Sua biblioteca está vazia</div>
+  <div class="text-xs text-muted mb-4">Arraste arquivos pra zona acima — vídeos viram Reel, fotos viram Story</div>
+  <button class="btn btn-accent btn-sm" onclick="document.getElementById('file-input').click()">
+    <i data-lucide="upload" class="icon"></i> Subir primeiro arquivo
+  </button>
+</div>
+<div id="empty-posted" class="hidden surface p-14 text-center">
+  <i data-lucide="check-circle-2" style="width:36px;height:36px;color:var(--text-3);margin:0 auto 12px;display:block"></i>
+  <div class="text-sm font-medium text-[var(--text)] mb-1">Nada postado ainda</div>
+  <div class="text-xs text-muted">Depois que o disparo rodar, as mídias movem pra cá automaticamente</div>
+</div>
+
+<!-- Upload options modal (abre ao selecionar arquivos) -->
+<div id="upload-opts-modal" class="modal-bg hidden" onclick="if(event.target===this) cancelUploadOpts()">
+  <div class="modal-card" style="max-width: 520px">
+    <div class="text-[15px] font-semibold mb-1">Subir mídia</div>
+    <div class="text-[13px] text-soft mb-4" id="upload-file-count">—</div>
+
+    <form id="upload-opts-form" class="space-y-4">
+      <div>
+        <label class="label">Tipo de postagem</label>
+        <div class="grid grid-cols-2 gap-1.5 surface-2 p-1 rounded-md">
+          <button type="button" class="kind-opt" data-kind="reel" onclick="setUploadKind('reel')" title="Vídeo permanente no perfil">
+            <i data-lucide="film" style="width:13px;height:13px"></i> Reel
+          </button>
+          <button type="button" class="kind-opt" data-kind="story" onclick="setUploadKind('story')" title="Foto/vídeo 24h">
+            <i data-lucide="circle-dot" style="width:13px;height:13px"></i> Story
+          </button>
+        </div>
+        <div id="upload-kind-desc" class="text-[11.5px] text-muted mt-1.5"></div>
+      </div>
+
+      <div id="upload-link-wrap" class="hidden">
+        <label class="label flex items-center gap-1.5">
+          <i data-lucide="link" style="width:12px;height:12px"></i>
+          Link no sticker <span class="text-muted">(opcional)</span>
+        </label>
+        <input id="upload-link" class="input mono text-[12px]" placeholder="https://meusite.com/promo" />
+        <div class="text-[11px] text-muted mt-1">Se preencher, ao postar gera 1 link curto único por conta automaticamente.</div>
+      </div>
+
+      <div>
+        <label class="label">Legenda <span class="text-muted">(opcional)</span></label>
+        <textarea id="upload-caption" class="textarea text-[12px]" rows="4" placeholder="Coloque a legenda aqui — usada por todos os arquivos selecionados (edita depois)"></textarea>
+      </div>
+
+      <div class="flex justify-end gap-2 pt-2 border-t border-line">
+        <button type="button" class="btn btn-ghost" onclick="cancelUploadOpts()">Cancelar</button>
+        <button type="submit" class="btn btn-accent" id="upload-confirm-btn">
+          <i data-lucide="upload" class="icon"></i> Subir
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Schedule modal (sub-modal abrindo de cima do detail) -->
+<div id="sched-modal" class="modal-bg hidden" style="z-index:60" onclick="if(event.target===this) closeScheduleModal()">
+  <div class="modal-card" style="max-width: 440px">
+    <div class="text-[15px] font-semibold mb-1">Agendar postagem</div>
+    <div class="text-[13px] text-soft mb-4" id="sched-video-name">—</div>
+    <form id="sched-form" class="space-y-4">
+      <div>
+        <label class="label">Conta</label>
+        <select name="account" id="sched-account" class="select">
+          <option value="">— todas as conectadas —</option>
+        </select>
+        <div class="text-[11px] text-muted mt-1.5">Só contas conectadas aparecem.</div>
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="label">Data</label>
+          <input type="date" name="date" class="input" required />
+        </div>
+        <div>
+          <label class="label">Hora</label>
+          <input type="time" name="time" class="input" required />
+        </div>
+      </div>
+      <div class="text-[11px] text-muted">Horário de Brasília. Mín. 1 minuto no futuro.</div>
+      <div class="flex justify-end gap-2 pt-2 border-t border-line">
+        <button type="button" class="btn btn-ghost" onclick="closeScheduleModal()">Cancelar</button>
+        <button type="submit" class="btn btn-accent">
+          <i data-lucide="check" class="icon"></i> Agendar
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Detail modal -->
+<div id="detail-modal" class="modal-bg hidden" onclick="if(event.target===this) closeDetail()">
+  <div class="modal-card" style="max-width: 920px; width: 100%; padding: 0; overflow: hidden">
+    <div class="flex items-center justify-between px-5 py-3 border-b border-line">
+      <div class="flex items-center gap-2 min-w-0">
+        <i data-lucide="film" style="width:14px;height:14px;color:var(--text-3);flex-shrink:0"></i>
+        <div id="d-name" class="font-mono text-[13px] truncate"></div>
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="closeDetail()"><i data-lucide="x" class="icon"></i></button>
+    </div>
+    <div class="grid grid-cols-5 gap-0" style="min-height: 380px">
+      <!-- Player (vídeo OU foto) -->
+      <div class="col-span-3 bg-black flex items-center justify-center" style="aspect-ratio: 9/16; max-height: 70vh">
+        <video id="d-video" class="w-full h-full hidden" controls preload="metadata" style="object-fit: contain; background: #000"></video>
+        <img id="d-image" class="w-full h-full hidden" style="object-fit: contain; background: #000" />
+      </div>
+      <!-- Sidebar -->
+      <div class="col-span-2 p-5 flex flex-col gap-4 overflow-auto">
+        <div>
+          <div class="text-[11px] uppercase tracking-wider text-muted font-semibold mb-2">Tipo de postagem</div>
+          <div id="d-kind-toggle" class="grid grid-cols-2 gap-1.5 surface-2 p-1 rounded-md">
+            <button type="button" class="kind-opt" data-kind="reel" onclick="changeKind('reel')" title="Vídeo permanente no perfil">
+              <i data-lucide="film" style="width:13px;height:13px"></i> Reel
+            </button>
+            <button type="button" class="kind-opt" data-kind="story" onclick="changeKind('story')" title="Vídeo/foto que dura 24h">
+              <i data-lucide="circle-dot" style="width:13px;height:13px"></i> Story
+            </button>
+          </div>
+          <div id="d-kind-desc" class="text-[11px] text-muted mt-1.5"></div>
+
+          <div id="d-link-wrap" class="mt-3 hidden">
+            <label class="label flex items-center gap-1.5">
+              <i data-lucide="link" style="width:12px;height:12px"></i>
+              Link no sticker <span class="text-muted">(opcional)</span>
+            </label>
+            <input id="d-link" class="input mono text-[12px]" placeholder="https://meusite.com/promo" oninput="updateLinkPreview()" />
+            <div id="d-link-preview" class="hidden mt-2 p-2.5 rounded-md surface-2" style="border-left: 2px solid var(--accent)">
+              <div class="flex items-start gap-2 text-[11.5px]">
+                <i data-lucide="zap" style="width:12px;height:12px;color:var(--accent);margin-top:2px;flex-shrink:0"></i>
+                <div class="leading-relaxed">
+                  <span id="d-link-summary" class="text-soft"></span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <div class="text-[11px] uppercase tracking-wider text-muted font-semibold mb-2">Legenda</div>
+          <textarea id="d-caption" class="textarea font-mono text-[12px]" rows="4" placeholder="Sem legenda"></textarea>
+        </div>
+
+        <div class="grid grid-cols-2 gap-2 text-[12px]">
+          <div>
+            <div class="text-muted text-[11px]">Tamanho</div>
+            <div id="d-size" class="font-medium mono">—</div>
+          </div>
+          <div>
+            <div class="text-muted text-[11px]">Adicionado</div>
+            <div id="d-mtime" class="font-medium mono">—</div>
+          </div>
+        </div>
+
+        <div id="d-actions" class="pt-3 mt-auto border-t border-line space-y-2">
+          <button class="btn btn-ghost w-full" onclick="saveAll()">
+            <i data-lucide="save" class="icon"></i> Salvar alterações
+          </button>
+          <button class="btn btn-accent w-full" onclick="postNow()">
+            <i data-lucide="send" class="icon"></i> Postar agora em todas as contas
+          </button>
+          <button class="btn btn-ghost w-full" onclick="openScheduleModal()">
+            <i data-lucide="calendar-clock" class="icon"></i> Agendar postagem
+          </button>
+          <button class="btn btn-danger w-full" onclick="removeVideo()">
+            <i data-lucide="trash-2" class="icon"></i> Remover
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<style>
+  .tab { padding: 8px 14px; font-size: 13px; font-weight: 500; color: var(--text-2); border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .tab:hover { color: var(--text); }
+  .tab.tab-active { color: var(--text); border-bottom-color: var(--accent); }
+  .card-video { cursor: pointer; transition: all .15s; overflow: hidden; }
+  .card-video:hover { transform: translateY(-2px); border-color: var(--border-2); }
+  .card-thumb { aspect-ratio: 16/9; background: #050507 center/cover no-repeat; position: relative; }
+  .card-thumb-overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.45); opacity: 0; transition: opacity .15s; flex-direction: column; gap: 6px; }
+  .card-thumb-overlay span { font-size: 11px; font-weight: 500; color: white; opacity: .9; }
+  .card-video:hover .card-thumb-overlay { opacity: 1; }
+  .card-meta { padding: 10px 12px; }
+  #drop-zone.is-dragging { background: rgba(236,72,153,.06); border-color: var(--accent); }
+  .kind-opt { display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 7px 10px; font-size: 12.5px; font-weight: 500; color: var(--text-2); border-radius: 5px; cursor: pointer; transition: .12s; }
+  .kind-opt:hover { color: var(--text); }
+  .kind-opt.is-active { background: var(--accent); color: white; }
+  @media (max-width: 1100px) { #grid-pending, #grid-posted { grid-template-columns: repeat(3, 1fr); } }
+  @media (max-width: 800px)  { #grid-pending, #grid-posted { grid-template-columns: repeat(2, 1fr); } }
+</style>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+  let currentTab = 'pending';
+  let allVideos = { pending: [], posted: [] };
+  let currentVideo = null;
+
+  function escapeHtml(s) { return (s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+  function switchTab(tab) {
+    currentTab = tab;
+    document.querySelectorAll('.tab').forEach(t => t.classList.toggle('tab-active', t.dataset.tab === tab));
+    document.getElementById('grid-pending').classList.toggle('hidden', tab !== 'pending');
+    document.getElementById('grid-posted').classList.toggle('hidden', tab !== 'posted');
+    renderGrid();
+  }
+
+  function renderGrid() {
+    for (const folder of ['pending', 'posted']) {
+      const grid = document.getElementById(`grid-${folder}`);
+      const empty = document.getElementById(`empty-${folder}`);
+      const items = allVideos[folder];
+      document.getElementById(`count-${folder}`).textContent = items.length;
+      if (!items.length) {
+        grid.innerHTML = '';
+        empty.classList.toggle('hidden', currentTab !== folder);
+        continue;
+      }
+      empty.classList.add('hidden');
+      grid.innerHTML = items.map(v => {
+        const kindBadge = v.kind === 'story'
+          ? '<span class="badge badge-warning"><i data-lucide="circle-dot" style="width:10px;height:10px"></i> STORY</span>'
+          : '<span class="badge badge-neutral"><i data-lucide="film" style="width:10px;height:10px"></i> REEL</span>';
+        const linkBadge = v.link_url
+          ? '<span class="badge badge-success" title="' + escapeHtml(v.link_url) + '"><i data-lucide="link" style="width:10px;height:10px"></i> link</span>'
+          : '';
+        const overlayIcon = v.media_type === 'photo' ? 'image' : 'play-circle';
+        return `
+        <div class="card-video surface" onclick="openDetail('${folder}', '${escapeHtml(v.name)}')">
+          <div class="card-thumb" style="${v.thumb_url ? `background-image: url('${v.thumb_url}')` : ''}">
+            ${!v.has_thumb ? `<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--text-3)"><i data-lucide="image-off" style="width:24px;height:24px"></i></div>` : ''}
+            <div style="position:absolute;top:8px;left:8px;display:flex;gap:4px">${kindBadge} ${linkBadge}</div>
+            <div class="card-thumb-overlay">
+              <i data-lucide="${overlayIcon}" style="width:32px;height:32px;color:white"></i>
+              <span>clique pra editar / postar</span>
+            </div>
+          </div>
+          <div class="card-meta">
+            <div class="font-medium text-[12.5px] truncate" title="${escapeHtml(v.name)}">${escapeHtml(v.name)}</div>
+            <div class="text-[11px] text-muted mt-1 flex items-center gap-2">
+              <span>${v.size_mb} MB</span>
+              <span>·</span>
+              <span>${v.mtime}</span>
+            </div>
+          </div>
+        </div>
+        `;
+      }).join('');
+    }
+    if (window.lucide) lucide.createIcons();
+  }
+
+  async function load() {
+    try {
+      const data = await api('/api/videos');
+      allVideos = data;
+      renderGrid();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  // ----- Detail modal -----
+
+  function openDetail(folder, name) {
+    const v = allVideos[folder].find(x => x.name === name);
+    if (!v) return;
+    currentVideo = { folder, ...v };
+    document.getElementById('d-name').textContent = v.name;
+    document.getElementById('d-size').textContent = v.size_mb + ' MB';
+    document.getElementById('d-mtime').textContent = v.mtime;
+    document.getElementById('d-caption').value = v.caption || '';
+    document.getElementById('d-link').value = v.link_url || '';
+
+    // Player vs imagem
+    const video = document.getElementById('d-video');
+    const image = document.getElementById('d-image');
+    if (v.media_type === 'photo') {
+      video.classList.add('hidden');
+      image.classList.remove('hidden');
+      image.src = v.stream_url;
+      video.removeAttribute('src');
+    } else {
+      image.classList.add('hidden');
+      video.classList.remove('hidden');
+      video.src = v.stream_url;
+      image.removeAttribute('src');
+    }
+
+    // Estado do toggle Reel/Story
+    applyKindUI(v.kind || (v.media_type === 'photo' ? 'story' : 'reel'));
+    // Foto só pode ser Story
+    document.querySelector('[data-kind="reel"]').disabled = v.media_type === 'photo';
+    document.querySelector('[data-kind="reel"]').style.opacity = v.media_type === 'photo' ? '0.4' : '';
+
+    // Read-only em postados
+    const readonly = folder === 'posted';
+    document.getElementById('d-actions').style.display = readonly ? 'none' : '';
+    document.getElementById('d-caption').readOnly = readonly;
+    document.getElementById('d-link').readOnly = readonly;
+    document.querySelectorAll('.kind-opt').forEach(b => { if (readonly) b.disabled = true; });
+
+    document.getElementById('detail-modal').classList.remove('hidden');
+    loadConnectedCount();  // atualiza preview com contas conectadas reais
+    if (window.lucide) lucide.createIcons();
+  }
+
+  function applyKindUI(kind) {
+    document.querySelectorAll('.kind-opt').forEach(b => b.classList.toggle('is-active', b.dataset.kind === kind));
+    document.getElementById('d-link-wrap').classList.toggle('hidden', kind !== 'story');
+    const desc = document.getElementById('d-kind-desc');
+    if (kind === 'reel') {
+      desc.textContent = 'Vídeo permanente no perfil. Aparece no feed e grid de Reels.';
+    } else {
+      desc.textContent = 'Foto/vídeo que dura 24h. Aceita sticker de link clicável.';
+    }
+    updateLinkPreview();
+  }
+
+  // Cache de contas conectadas (atualizado em background ao abrir modal)
+  let connectedCount = 0;
+  async function loadConnectedCount() {
+    try {
+      const accs = await api('/api/accounts');
+      connectedCount = accs.filter(a => a.active && a.session === 'saved').length;
+      updateLinkPreview();
+    } catch {}
+  }
+
+  function updateLinkPreview() {
+    const kind = document.querySelector('.kind-opt.is-active')?.dataset.kind;
+    const link = (document.getElementById('d-link')?.value || '').trim();
+    const wrap = document.getElementById('d-link-preview');
+    if (!wrap) return;
+    if (kind !== 'story' || !link) {
+      wrap.classList.add('hidden');
+      return;
+    }
+    wrap.classList.remove('hidden');
+    const sum = document.getElementById('d-link-summary');
+    const base = location.origin;
+    if (connectedCount === 0) {
+      sum.innerHTML = `Quando postar, vai usar este link como sticker. <span class="text-muted">(Nenhuma conta conectada agora — conecte em <a href="/accounts" class="underline">Contas</a>.)</span>`;
+    } else if (connectedCount === 1) {
+      sum.innerHTML = `Ao postar, gera <strong>1 link curto</strong> apontando pra <span class="mono">${escapeHtml(link)}</span>:<br><span class="mono text-[10.5px] text-muted">${base}/r/<span class="text-[var(--accent)]">abc1234</span></span>`;
+    } else {
+      sum.innerHTML = `Ao postar, gera <strong>${connectedCount} links únicos</strong> (1 por conta) apontando pra <span class="mono">${escapeHtml(link)}</span> — anti-cluster.<br>
+        <span class="mono text-[10.5px] text-muted">${base}/r/<span class="text-[var(--accent)]">abc</span> · ${base}/r/<span class="text-[var(--accent)]">xyz</span> · …</span>`;
+    }
+  }
+
+  function changeKind(kind) {
+    if (!currentVideo) return;
+    if (currentVideo.media_type === 'photo' && kind === 'reel') {
+      toast('Foto só pode virar Story', 'error');
+      return;
+    }
+    currentVideo.kind = kind;
+    applyKindUI(kind);
+  }
+
+  function closeDetail() {
+    const video = document.getElementById('d-video');
+    video.pause();
+    video.removeAttribute('src');
+    video.load();
+    document.getElementById('d-image').removeAttribute('src');
+    document.getElementById('detail-modal').classList.add('hidden');
+    currentVideo = null;
+  }
+
+  async function saveAll() {
+    if (!currentVideo) return;
+    const caption = document.getElementById('d-caption').value;
+    const kind = document.querySelector('.kind-opt.is-active')?.dataset.kind || 'reel';
+    const link_url = document.getElementById('d-link').value.trim() || null;
+    try {
+      // 1. Salvar legenda
+      const fd = new FormData();
+      fd.append('caption', caption);
+      const r1 = await fetch(`/api/videos/${encodeURIComponent(currentVideo.name)}/caption`, { method: 'POST', body: fd });
+      if (!r1.ok) throw new Error(`legenda: ${r1.status}`);
+      // 2. Salvar meta (kind + link)
+      await api(`/api/videos/${encodeURIComponent(currentVideo.name)}/meta`, {
+        method: 'POST',
+        body: JSON.stringify({ kind, link_url }),
+      });
+      toast('Salvo', 'success');
+      await load();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  async function postNow() {
+    if (!currentVideo) return;
+    const ok = await confirmModal({
+      title: `Disparar "${currentVideo.name}" agora?`,
+      message: 'Vai postar em todas as contas conectadas. Você acompanha o progresso na próxima tela.',
+      confirmText: 'Disparar'
+    });
+    if (!ok) return;
+    try {
+      const r = await api('/api/jobs/run', {
+        method: 'POST',
+        body: JSON.stringify({ video: currentVideo.name, dry_run: false }),
+      });
+      toast('Disparo iniciado', 'success');
+      closeDetail();
+      setTimeout(() => location.href = `/jobs/${r.job_id}`, 400);
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  async function removeVideo() {
+    if (!currentVideo) return;
+    const ok = await confirmModal({
+      title: `Remover "${currentVideo.name}"?`,
+      message: 'O vídeo, a legenda e a prévia serão apagados.',
+      danger: true,
+      confirmText: 'Remover'
+    });
+    if (!ok) return;
+    try {
+      await api(`/api/videos/${encodeURIComponent(currentVideo.name)}/delete`, { method: 'POST' });
+      toast('Vídeo removido', 'success');
+      closeDetail();
+      await load();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  // ----- Schedule modal (depende do vídeo aberto no detail) -----
+
+  async function openScheduleModal() {
+    if (!currentVideo) return;
+    // Popula contas conectadas no select
+    try {
+      const accounts = await api('/api/accounts');
+      const sel = document.getElementById('sched-account');
+      const connected = accounts.filter(a => a.active && a.session === 'saved');
+      sel.innerHTML = `<option value="">— todas as conectadas (${connected.length}) —</option>`
+        + connected.map(a => `<option value="${a.username}">@${a.username}</option>`).join('');
+    } catch (e) { toast(e.message, 'error'); return; }
+
+    document.getElementById('sched-video-name').textContent = currentVideo.name;
+    // Default: agora + 1h, arredondado 5 min
+    const d = new Date(Date.now() + 60 * 60 * 1000);
+    d.setSeconds(0, 0);
+    d.setMinutes(Math.ceil(d.getMinutes() / 5) * 5);
+    document.querySelector('#sched-form [name=date]').value = d.toISOString().slice(0, 10);
+    document.querySelector('#sched-form [name=time]').value = d.toTimeString().slice(0, 5);
+    document.getElementById('sched-modal').classList.remove('hidden');
+    if (window.lucide) lucide.createIcons();
+  }
+
+  function closeScheduleModal() {
+    document.getElementById('sched-modal').classList.add('hidden');
+  }
+
+  document.getElementById('sched-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (!currentVideo) return;
+    const fd = new FormData(e.target);
+    const iso = `${fd.get('date')}T${fd.get('time')}:00`;
+    try {
+      await api('/api/schedules', {
+        method: 'POST',
+        body: JSON.stringify({
+          video: currentVideo.name,
+          account: fd.get('account') || null,
+          scheduled_at: iso,
+        }),
+      });
+      toast('Agendamento criado', 'success');
+      closeScheduleModal();
+      closeDetail();
+      setTimeout(() => location.href = '/schedule', 400);
+    } catch (err) { toast(err.message, 'error'); }
+  });
+
+  // ----- Upload (drag-drop + click) -----
+
+  const dropZone = document.getElementById('drop-zone');
+  const fileInput = document.getElementById('file-input');
+  const statusEl = document.getElementById('upload-status');
+
+  fileInput.addEventListener('change', e => handleFiles(e.target.files));
+
+  ['dragenter', 'dragover'].forEach(ev => dropZone.addEventListener(ev, e => {
+    e.preventDefault();
+    dropZone.classList.add('is-dragging');
+  }));
+  ['dragleave', 'drop'].forEach(ev => dropZone.addEventListener(ev, e => {
+    e.preventDefault();
+    if (ev === 'dragleave' && dropZone.contains(e.relatedTarget)) return;
+    dropZone.classList.remove('is-dragging');
+  }));
+  dropZone.addEventListener('drop', e => handleFiles(e.dataTransfer.files));
+
+  // Drag global no body também: se o user soltar fora da zona, ignora
+  document.body.addEventListener('dragover', e => e.preventDefault());
+  document.body.addEventListener('drop', e => e.preventDefault());
+
+  // Files na fila aguardando confirmação no modal
+  let pendingUploadFiles = [];
+  let uploadKind = 'reel';
+
+  function isMp4(f) { return f.type === 'video/mp4' || f.name.toLowerCase().endsWith('.mp4'); }
+  function isImage(f) {
+    return /^image\/(jpe?g|png|webp)$/i.test(f.type) || /\.(jpe?g|png|webp)$/i.test(f.name);
+  }
+
+  function handleFiles(fileList) {
+    const files = Array.from(fileList).filter(f => isMp4(f) || isImage(f));
+    if (!files.length) {
+      toast('Selecione arquivos .mp4 ou .jpg/.png/.webp', 'error');
+      return;
+    }
+    pendingUploadFiles = files;
+
+    // Atualiza UI do modal
+    const allPhoto = files.every(isImage);
+    const allVideo = files.every(isMp4);
+    const mixed = !allPhoto && !allVideo;
+
+    // Default: foto → story; vídeo → reel; misto → story (mais permissivo)
+    uploadKind = allVideo ? 'reel' : 'story';
+
+    const countTxt = files.length === 1
+      ? `<strong>${escapeHtml(files[0].name)}</strong>`
+      : `<strong>${files.length} arquivos</strong> · vão usar as mesmas configurações (edita individualmente depois)`;
+    document.getElementById('upload-file-count').innerHTML = countTxt;
+
+    // Reel ficha disabled se tem foto na lista
+    const reelBtn = document.querySelector('#upload-opts-modal [data-kind="reel"]');
+    if (allPhoto || mixed) {
+      reelBtn.disabled = true;
+      reelBtn.style.opacity = '0.4';
+      reelBtn.title = 'Foto não pode virar Reel — só Story';
+    } else {
+      reelBtn.disabled = false;
+      reelBtn.style.opacity = '';
+      reelBtn.title = 'Vídeo permanente no perfil';
+    }
+
+    setUploadKind(uploadKind);
+    document.getElementById('upload-link').value = '';
+    document.getElementById('upload-caption').value = '';
+    document.getElementById('upload-opts-modal').classList.remove('hidden');
+    if (window.lucide) lucide.createIcons();
+  }
+
+  function setUploadKind(kind) {
+    uploadKind = kind;
+    document.querySelectorAll('#upload-opts-modal .kind-opt').forEach(b => b.classList.toggle('is-active', b.dataset.kind === kind));
+    document.getElementById('upload-link-wrap').classList.toggle('hidden', kind !== 'story');
+    const desc = document.getElementById('upload-kind-desc');
+    if (kind === 'reel') {
+      desc.textContent = 'Vídeo permanente no perfil. Aparece no feed e grid de Reels.';
+    } else {
+      desc.textContent = 'Foto/vídeo que dura 24h. Aceita sticker de link clicável.';
+    }
+  }
+
+  function cancelUploadOpts() {
+    document.getElementById('upload-opts-modal').classList.add('hidden');
+    pendingUploadFiles = [];
+    fileInput.value = '';
+  }
+
+  document.getElementById('upload-opts-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const files = pendingUploadFiles;
+    if (!files.length) return;
+
+    const caption = document.getElementById('upload-caption').value || '';
+    const linkUrl = (document.getElementById('upload-link').value || '').trim() || null;
+    const kind = uploadKind;
+
+    const btn = document.getElementById('upload-confirm-btn');
+    btn.disabled = true;
+    document.getElementById('upload-opts-modal').classList.add('hidden');
+
+    let ok = 0, fail = 0;
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i];
+      statusEl.textContent = `Enviando ${i+1}/${files.length}: ${f.name}…`;
+      const fd = new FormData();
+      fd.append('video', f);
+      fd.append('caption', caption);
+      try {
+        const res = await fetch('/api/videos/upload', { method: 'POST', body: fd });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `Erro ${res.status}`);
+        // Atualiza meta (kind + link) — se for foto, força story
+        const finalKind = isImage(f) ? 'story' : kind;
+        if (finalKind !== 'reel' || linkUrl) {
+          await api(`/api/videos/${encodeURIComponent(data.name)}/meta`, {
+            method: 'POST',
+            body: JSON.stringify({ kind: finalKind, link_url: finalKind === 'story' ? linkUrl : null }),
+          });
+        }
+        ok++;
+      } catch (e) {
+        fail++;
+        toast(`${f.name}: ${e.message}`, 'error');
+      }
+    }
+    statusEl.textContent = '';
+    fileInput.value = '';
+    pendingUploadFiles = [];
+    btn.disabled = false;
+    if (ok) toast(`${ok} arquivo(s) enviado(s) como ${kind === 'story' ? 'Story' : 'Reel'}${fail ? ` · ${fail} falhou` : ''}`, ok ? 'success' : 'error');
+    await load();
+  });
+
+  load();
+  // Polling leve a cada 10s pra refletir vídeos arquivados pelo post.py
+  setInterval(load, 10000);
+
+  // Atalho: ESC fecha modal
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDetail(); });
+</script>
+{% endblock %}

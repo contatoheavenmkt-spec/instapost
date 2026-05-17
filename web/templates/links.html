@@ -1,0 +1,271 @@
+{% extends "base.html" %}
+{% block title %}Links · Insta Poster{% endblock %}
+{% block content %}
+
+<div class="flex items-end justify-between mb-6">
+  <div>
+    <h1 class="h-page">Links</h1>
+    <p class="text-sm text-soft mt-1">Encurtador interno com tracking</p>
+  </div>
+  <button class="btn btn-ghost" onclick="openNew()">
+    <i data-lucide="plus" class="icon"></i> Link manual
+  </button>
+</div>
+
+<!-- Callout: como funciona -->
+<div class="surface mb-5 p-4 flex items-start gap-3" style="border-left: 3px solid var(--accent)">
+  <i data-lucide="info" style="width:18px;height:18px;color:var(--accent);margin-top:1px;flex-shrink:0"></i>
+  <div class="text-[13px] text-soft leading-relaxed">
+    Você <strong class="text-[var(--text)]">não precisa criar links aqui pra postar Stories</strong> — quando você cola um link no modal do vídeo e dispara, o sistema gera <strong>1 link curto único por conta</strong> automaticamente.
+    Esta tela é pra <strong>acompanhar os cliques</strong> e (opcional) criar links avulsos.
+  </div>
+</div>
+
+<!-- Stats -->
+<div class="grid grid-cols-4 gap-3 mb-5">
+  <div class="surface p-4">
+    <div class="text-[10.5px] uppercase tracking-wider text-muted font-semibold mb-1.5">Links ativos</div>
+    <div class="text-[22px] font-semibold" id="stat-active">—</div>
+  </div>
+  <div class="surface p-4">
+    <div class="text-[10.5px] uppercase tracking-wider text-muted font-semibold mb-1.5">Total de cliques</div>
+    <div class="text-[22px] font-semibold" id="stat-clicks">—</div>
+  </div>
+  <div class="surface p-4">
+    <div class="text-[10.5px] uppercase tracking-wider text-muted font-semibold mb-1.5">Mais clicado</div>
+    <div class="text-[13px] font-mono mt-1" id="stat-top">—</div>
+  </div>
+  <div class="surface p-4">
+    <div class="text-[10.5px] uppercase tracking-wider text-muted font-semibold mb-1.5">Base atual</div>
+    <div class="text-[12px] font-mono mt-1 text-soft" id="stat-base">—</div>
+  </div>
+</div>
+
+<div class="flex items-center gap-1 mb-3 border-b border-line">
+  <button class="tab tab-active" data-tab="auto" onclick="switchTab('auto')">
+    Auto-gerados <span class="text-muted ml-1" id="count-auto">0</span>
+  </button>
+  <button class="tab" data-tab="manual" onclick="switchTab('manual')">
+    Manuais <span class="text-muted ml-1" id="count-manual">0</span>
+  </button>
+  <button class="tab" data-tab="all" onclick="switchTab('all')">
+    Todos <span class="text-muted ml-1" id="count-all">0</span>
+  </button>
+</div>
+
+<div class="surface overflow-hidden">
+  <table class="t">
+    <thead>
+      <tr>
+        <th>Link curto</th>
+        <th>Destino</th>
+        <th style="width:90px">Cliques</th>
+        <th style="width:120px">Conta</th>
+        <th style="width:120px">Status</th>
+        <th style="width:200px" class="text-right pr-4">Ações</th>
+      </tr>
+    </thead>
+    <tbody id="links-tbody"></tbody>
+  </table>
+  <div id="empty" class="hidden p-14 text-center">
+    <i data-lucide="link" style="width:36px;height:36px;color:var(--text-3);margin:0 auto 12px;display:block"></i>
+    <div class="text-sm text-soft mb-1" id="empty-text">Nenhum link aqui</div>
+    <div class="text-xs text-muted" id="empty-hint">Os links auto-gerados aparecem aqui depois que você postar um Story com link</div>
+  </div>
+</div>
+
+<style>
+  .tab { padding: 8px 14px; font-size: 13px; font-weight: 500; color: var(--text-2); border-bottom: 2px solid transparent; margin-bottom: -1px; cursor: pointer; background: none; }
+  .tab:hover { color: var(--text); }
+  .tab.tab-active { color: var(--text); border-bottom-color: var(--accent); }
+</style>
+
+<!-- New link modal -->
+<div id="new-modal" class="modal-bg hidden" onclick="if(event.target===this) closeNew()">
+  <div class="modal-card" style="max-width: 480px">
+    <div class="text-[15px] font-semibold mb-1">Novo link encurtado</div>
+    <div class="text-[13px] text-soft mb-4">Slug aleatório se vazio. Domínio atual: <span id="modal-base" class="mono"></span></div>
+    <form id="new-form" class="space-y-4">
+      <div>
+        <label class="label">URL de destino</label>
+        <input class="input" type="url" name="target_url" placeholder="https://meusite.com/promo" required />
+      </div>
+      <div>
+        <label class="label">Rótulo (opcional)</label>
+        <input class="input" name="label" placeholder="ex: Promo Julho" />
+      </div>
+      <div>
+        <label class="label">Slug customizado <span class="text-muted">(opcional)</span></label>
+        <input class="input mono" name="slug" placeholder="auto-gerado se vazio" pattern="[A-Za-z0-9_-]+" />
+      </div>
+      <div class="flex justify-end gap-2 pt-2 border-t border-line">
+        <button type="button" class="btn btn-ghost" onclick="closeNew()">Cancelar</button>
+        <button type="submit" class="btn btn-accent"><i data-lucide="check" class="icon"></i> Criar</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+  let baseUrl = location.origin;
+  let allLinks = [];
+  let currentTab = 'auto';
+
+  function escapeHtml(s) { return (s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+  function truncate(s, n) { s = s || ''; return s.length > n ? s.slice(0, n) + '…' : s; }
+
+  // Auto-gerados = têm account específica (cada conta recebe seu link único)
+  function isAuto(l) { return !!l.account; }
+
+  function switchTab(tab) {
+    currentTab = tab;
+    document.querySelectorAll('.tab').forEach(t => t.classList.toggle('tab-active', t.dataset.tab === tab));
+    render(allLinks);
+  }
+
+  function render(links) {
+    allLinks = links;
+    const active = links.filter(l => l.active);
+    const totalClicks = links.reduce((acc, l) => acc + (l.click_count || 0), 0);
+    const top = links.slice().sort((a, b) => (b.click_count || 0) - (a.click_count || 0))[0];
+
+    document.getElementById('stat-active').textContent = active.length;
+    document.getElementById('stat-clicks').textContent = totalClicks;
+    document.getElementById('stat-top').textContent = top && top.click_count ? `/${top.slug} (${top.click_count})` : '—';
+    document.getElementById('stat-base').textContent = baseUrl;
+
+    // Contagens por tab
+    const autos = links.filter(isAuto);
+    const manuals = links.filter(l => !isAuto(l));
+    document.getElementById('count-auto').textContent = autos.length;
+    document.getElementById('count-manual').textContent = manuals.length;
+    document.getElementById('count-all').textContent = links.length;
+
+    const filtered = currentTab === 'auto' ? autos : (currentTab === 'manual' ? manuals : links);
+    const tbody = document.getElementById('links-tbody');
+    const empty = document.getElementById('empty');
+    const emptyText = document.getElementById('empty-text');
+    const emptyHint = document.getElementById('empty-hint');
+
+    if (!filtered.length) {
+      tbody.innerHTML = '';
+      empty.classList.remove('hidden');
+      document.querySelector('table.t').classList.add('hidden');
+      if (currentTab === 'auto') {
+        emptyText.textContent = 'Nenhum link auto-gerado ainda';
+        emptyHint.textContent = 'Eles aparecem aqui depois que você postar um Story com link';
+      } else if (currentTab === 'manual') {
+        emptyText.textContent = 'Nenhum link manual';
+        emptyHint.textContent = 'Crie um clicando em "Link manual" no canto';
+      } else {
+        emptyText.textContent = 'Nenhum link ainda';
+        emptyHint.textContent = 'Os links são gerados automaticamente em Stories ou manualmente aqui';
+      }
+      return;
+    }
+    empty.classList.add('hidden');
+    document.querySelector('table.t').classList.remove('hidden');
+
+    tbody.innerHTML = filtered.map(l => `
+      <tr>
+        <td>
+          <div class="font-mono text-[12.5px] flex items-center gap-2">
+            <span>/r/${l.slug}</span>
+            <button class="btn btn-ghost btn-sm" onclick="copyLink('${l.short_url}')" title="Copiar URL completa">
+              <i data-lucide="copy" class="icon"></i>
+            </button>
+          </div>
+          ${l.label ? `<div class="text-[11px] text-muted mt-0.5">${escapeHtml(l.label)}</div>` : ''}
+        </td>
+        <td>
+          <a href="${escapeHtml(l.target_url)}" target="_blank" class="text-[12.5px] hover:text-[var(--accent)] mono">${escapeHtml(truncate(l.target_url, 50))}</a>
+        </td>
+        <td class="font-semibold">${l.click_count || 0}</td>
+        <td class="text-soft text-[12px] mono">${l.account ? '@' + l.account : '<span class="text-muted">—</span>'}</td>
+        <td>
+          ${l.active
+            ? '<span class="badge badge-success"><span class="dot dot-success"></span> ativo</span>'
+            : '<span class="badge badge-neutral">desativado</span>'}
+        </td>
+        <td class="text-right pr-4 whitespace-nowrap">
+          <a class="btn btn-ghost btn-sm" href="${l.short_url}" target="_blank" title="Testar"><i data-lucide="external-link" class="icon"></i></a>
+          <button class="btn btn-ghost btn-sm" onclick="onToggle('${l.slug}')" title="${l.active ? 'Desativar' : 'Ativar'}">
+            <i data-lucide="${l.active ? 'pause' : 'play'}" class="icon"></i>
+          </button>
+          <button class="btn btn-danger btn-sm" onclick="onDelete('${l.slug}')" title="Apagar">
+            <i data-lucide="trash-2" class="icon"></i>
+          </button>
+        </td>
+      </tr>
+    `).join('');
+    if (window.lucide) lucide.createIcons();
+  }
+
+  async function load() {
+    try {
+      const links = await api('/api/links');
+      render(links);
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  function openNew() {
+    document.getElementById('modal-base').textContent = baseUrl;
+    document.getElementById('new-modal').classList.remove('hidden');
+    document.querySelector('#new-form [name=target_url]').focus();
+    if (window.lucide) lucide.createIcons();
+  }
+  function closeNew() { document.getElementById('new-modal').classList.add('hidden'); }
+
+  document.getElementById('new-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    try {
+      const r = await api('/api/links', {
+        method: 'POST',
+        body: JSON.stringify({
+          target_url: fd.get('target_url'),
+          label: fd.get('label') || null,
+          slug: fd.get('slug') || null,
+        }),
+      });
+      toast(`Link criado: ${r.link.short_url}`, 'success');
+      closeNew();
+      e.target.reset();
+      await load();
+    } catch (err) { toast(err.message, 'error'); }
+  });
+
+  async function copyLink(url) {
+    try { await navigator.clipboard.writeText(url); toast('URL copiada', 'success'); }
+    catch { toast(url, 'info'); }
+  }
+
+  async function onToggle(slug) {
+    try {
+      const r = await api(`/api/links/${slug}/toggle`, { method: 'POST' });
+      toast(r.active ? 'Link ativado' : 'Link desativado', 'success');
+      await load();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  async function onDelete(slug) {
+    const ok = await confirmModal({
+      title: `Apagar /r/${slug}?`,
+      message: 'A URL deixa de funcionar imediatamente. Cliques registrados serão perdidos.',
+      danger: true,
+      confirmText: 'Apagar',
+    });
+    if (!ok) return;
+    try {
+      await api(`/api/links/${slug}/delete`, { method: 'POST' });
+      toast('Link apagado', 'success');
+      await load();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  load();
+  setInterval(load, 15000);
+</script>
+{% endblock %}

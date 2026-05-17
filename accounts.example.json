@@ -1,0 +1,16 @@
+[
+  {
+    "username": "sua_conta_1",
+    "password": "senha_da_conta_1",
+    "proxy": null,
+    "active": true,
+    "totp_secret": "XMO3LBDQECDFCZL2SU5MNEZ4SIXE4QXU"
+  },
+  {
+    "username": "sua_conta_2",
+    "password": "senha_da_conta_2",
+    "proxy": null,
+    "active": true,
+    "totp_secret": null
+  }
+]

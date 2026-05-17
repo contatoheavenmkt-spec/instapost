@@ -1,0 +1,162 @@
+{% extends "base.html" %}
+{% block title %}Job {{ job.id }} · Insta Poster{% endblock %}
+{% block content %}
+
+<div class="flex items-start justify-between mb-7 gap-4">
+  <div class="min-w-0">
+    <div class="flex items-center gap-2 text-[12px] text-soft mb-1">
+      <a href="/jobs" class="hover:text-[var(--text)] flex items-center gap-1"><i data-lucide="arrow-left" style="width:12px;height:12px"></i> Disparos</a>
+      <span class="text-muted">/</span>
+      <span class="mono">{{ job.id }}</span>
+    </div>
+    <h1 class="h-page truncate">{{ job.label }}</h1>
+  </div>
+  <div class="flex items-center gap-2 flex-shrink-0">
+    <span id="status-badge"></span>
+    <button id="cancel-btn" class="btn btn-danger hidden" onclick="onCancel()"><i data-lucide="square" class="icon"></i> Cancelar</button>
+  </div>
+</div>
+
+<div class="grid grid-cols-4 gap-3 mb-5">
+  <div class="surface p-4">
+    <div class="text-[10.5px] uppercase tracking-wider text-muted font-semibold mb-1.5">Tipo</div>
+    <div class="text-[14px] font-medium">{{ job.kind }}</div>
+  </div>
+  <div class="surface p-4">
+    <div class="text-[10.5px] uppercase tracking-wider text-muted font-semibold mb-1.5">Início</div>
+    <div class="text-[12.5px] mono">{{ job.started_at or '—' }}</div>
+  </div>
+  <div class="surface p-4">
+    <div class="text-[10.5px] uppercase tracking-wider text-muted font-semibold mb-1.5">Fim</div>
+    <div class="text-[12.5px] mono" id="finished-at">{{ job.finished_at or '—' }}</div>
+  </div>
+  <div class="surface p-4">
+    <div class="text-[10.5px] uppercase tracking-wider text-muted font-semibold mb-1.5">Linhas log</div>
+    <div class="text-[14px] font-medium" id="line-count">{{ job.line_count }}</div>
+  </div>
+</div>
+
+<!-- Awaiting input panel -->
+<div id="awaiting-panel" class="surface p-5 mb-4 hidden" style="border-color: #f59e0b; background: rgba(245,158,11,.05)">
+  <div class="flex items-start gap-3">
+    <i data-lucide="key-round" style="width:20px;height:20px;color:#fcd34d;margin-top:2px;flex-shrink:0"></i>
+    <div class="flex-1 min-w-0">
+      <div class="font-semibold text-[14px] text-amber-200 mb-1">O Instagram pediu um código</div>
+      <div id="awaiting-prompt" class="text-[13px] text-soft mb-3"></div>
+      <form id="input-form" class="flex gap-2">
+        <input id="input-value" class="input mono flex-1" autocomplete="off" placeholder="Cole o código aqui" autofocus />
+        <button type="submit" class="btn btn-accent">
+          <i data-lucide="send" class="icon"></i> Enviar
+        </button>
+      </form>
+      <div class="text-[11px] text-muted mt-2">O código geralmente chega por email, SMS ou push notification do Instagram. Confira na conta.</div>
+    </div>
+  </div>
+</div>
+
+<div class="surface overflow-hidden">
+  <div class="flex items-center justify-between px-5 py-3 border-b border-line">
+    <div class="h-section">Output</div>
+    <label class="flex items-center gap-2 text-[12px] text-soft cursor-pointer">
+      <input type="checkbox" id="autoscroll" class="check" checked /> seguir final
+    </label>
+  </div>
+  <pre class="logs" id="log-pre" style="border:none; border-radius:0; max-height:60vh">{% for ln in job.lines %}{{ ln }}
+{% endfor %}</pre>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+  const JOB_ID = "{{ job.id }}";
+  const pre = document.getElementById('log-pre');
+  const badge = document.getElementById('status-badge');
+  const finished = document.getElementById('finished-at');
+  const countEl = document.getElementById('line-count');
+  const cancelBtn = document.getElementById('cancel-btn');
+  const autoscroll = document.getElementById('autoscroll');
+  let count = {{ job.line_count }};
+  let stop = false;
+
+  function renderBadge(s) {
+    if (s === 'running') return '<span class="badge badge-warning"><span class="dot dot-warning dot-pulse"></span> rodando</span>';
+    if (s === 'finished') return '<span class="badge badge-success"><span class="dot dot-success"></span> concluído</span>';
+    if (s === 'error') return '<span class="badge badge-danger"><span class="dot dot-danger"></span> erro</span>';
+    if (s === 'cancelled') return '<span class="badge badge-neutral">cancelado</span>';
+    return `<span class="badge badge-neutral">${s}</span>`;
+  }
+
+  function updateStatus(s) {
+    badge.innerHTML = renderBadge(s);
+    cancelBtn.classList.toggle('hidden', s !== 'running');
+  }
+
+  updateStatus("{{ job.status }}");
+  if (autoscroll.checked) pre.scrollTop = pre.scrollHeight;
+
+  const awaitingPanel = document.getElementById('awaiting-panel');
+  const awaitingPrompt = document.getElementById('awaiting-prompt');
+  const inputForm = document.getElementById('input-form');
+  const inputValue = document.getElementById('input-value');
+
+  inputForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const value = inputValue.value.trim();
+    if (!value) return;
+    try {
+      await api(`/api/jobs/${JOB_ID}/input`, {
+        method: 'POST',
+        body: JSON.stringify({ value }),
+      });
+      toast('Código enviado', 'success');
+      inputValue.value = '';
+      awaitingPanel.classList.add('hidden');
+    } catch (err) { toast(err.message, 'error'); }
+  });
+
+  function updateAwaiting(awaiting) {
+    if (awaiting && awaiting.prompt) {
+      awaitingPrompt.textContent = awaiting.prompt;
+      awaitingPanel.classList.remove('hidden');
+      if (window.lucide) lucide.createIcons();
+      inputValue.focus();
+    } else {
+      awaitingPanel.classList.add('hidden');
+    }
+  }
+
+  async function tick() {
+    if (stop) return;
+    try {
+      const j = await api(`/api/jobs/${JOB_ID}.json?since=${count}`);
+      if (j.lines && j.lines.length) {
+        pre.textContent += j.lines.join('\n') + '\n';
+        count = j.line_count;
+        countEl.textContent = count;
+        if (autoscroll.checked) pre.scrollTop = pre.scrollHeight;
+      }
+      updateStatus(j.status);
+      updateAwaiting(j.awaiting);
+      finished.textContent = j.finished_at || '—';
+      if (j.status !== 'running' && j.status !== 'queued') { stop = true; return; }
+    } catch (e) {}
+    setTimeout(tick, 1200);
+  }
+
+  async function onCancel() {
+    const ok = await confirmModal({
+      title: 'Cancelar este job?',
+      message: 'O processo será encerrado. Postagens já feitas permanecem no Instagram.',
+      danger: true,
+      confirmText: 'Cancelar job'
+    });
+    if (!ok) return;
+    try {
+      await api(`/api/jobs/${JOB_ID}/cancel`, { method: 'POST' });
+      toast('Cancelamento solicitado', 'info');
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  setTimeout(tick, 1000);
+</script>
+{% endblock %}
