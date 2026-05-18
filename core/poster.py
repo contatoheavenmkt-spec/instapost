@@ -34,47 +34,41 @@ def post_reel(cl: Client, video_path: str, caption: str) -> dict:
 
 # ----------- STORIES -----------
 
-def _build_story_link_stickers(link_url: Optional[str], link_text: Optional[str] = None) -> list:
-    """Cria sticker de link VISÍVEL com texto customizado.
+def _build_story_links(link_url: Optional[str], link_text: Optional[str] = None) -> list:
+    """Cria StoryLink que cobre a TELA INTEIRA — qualquer toque na imagem abre o link.
 
-    Usa StorySticker + StoryStickerLink (suportado a partir do instagrapi 2.7.0).
-    Renderiza como botão visível na tela do Story, com o texto que o usuário definir
-    (default: 'Clique aqui'). Substitui o StoryLink antigo que era invisível.
+    Sem sticker visível (porque o usuário já desenha o 'Clique aqui' no próprio design
+    da foto). É só uma 'tappable area' invisível cobrindo 100% da tela.
+
+    link_text é aceito mas ignorado (StoryLink simples não tem texto visível).
     """
     if not link_url:
         return []
     try:
-        from instagrapi.types import StorySticker, StoryStickerLink
-        text = (link_text or "Clique aqui").strip() or "Clique aqui"
-        return [StorySticker(
-            type="story_link",
-            x=0.5, y=0.7, z=0,
-            width=0.5, height=0.07,
+        from instagrapi.types import StoryLink
+        return [StoryLink(
+            webUri=link_url,
+            x=0.5, y=0.5, z=0,
+            width=1.0, height=1.0,   # tela INTEIRA
             rotation=0.0,
-            story_link=StoryStickerLink(
-                url=link_url,
-                link_title=text,
-                link_type="web",
-            ),
         )]
     except Exception as e:
-        print(f"[story_sticker_link] falhou: {e}")
+        print(f"[story_links] falhou: {e}")
         return []
 
 
 def post_story_video(cl: Client, video_path: str, caption: str = "",
                      link_url: Optional[str] = None, link_text: Optional[str] = None) -> dict:
-    """Posta vídeo no Story (até 60s, vertical 9:16). Se link_url for passada,
-    adiciona sticker visível com texto custom (default: 'Clique aqui')."""
+    """Posta vídeo no Story. Link é aplicado como tappable na tela inteira."""
     try:
         video = Path(video_path)
         if not video.exists():
             return {"success": False, "media_id": None, "error": f"Arquivo não encontrado: {video_path}"}
 
         kwargs = {"path": video, "caption": caption or ""}
-        stickers = _build_story_link_stickers(link_url, link_text)
-        if stickers:
-            kwargs["stickers"] = stickers
+        links = _build_story_links(link_url, link_text)
+        if links:
+            kwargs["links"] = links
 
         media = cl.video_upload_to_story(**kwargs)
         return {"success": True, "media_id": str(media.pk), "error": None}
@@ -84,16 +78,16 @@ def post_story_video(cl: Client, video_path: str, caption: str = "",
 
 def post_story_photo(cl: Client, photo_path: str, caption: str = "",
                      link_url: Optional[str] = None, link_text: Optional[str] = None) -> dict:
-    """Posta foto no Story com sticker de link visível (texto custom)."""
+    """Posta foto no Story. Link é aplicado como tappable na tela inteira."""
     try:
         photo = Path(photo_path)
         if not photo.exists():
             return {"success": False, "media_id": None, "error": f"Arquivo não encontrado: {photo_path}"}
 
         kwargs = {"path": photo, "caption": caption or ""}
-        stickers = _build_story_link_stickers(link_url, link_text)
-        if stickers:
-            kwargs["stickers"] = stickers
+        links = _build_story_links(link_url, link_text)
+        if links:
+            kwargs["links"] = links
 
         media = cl.photo_upload_to_story(**kwargs)
         return {"success": True, "media_id": str(media.pk), "error": None}
