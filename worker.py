@@ -30,10 +30,15 @@ from pathlib import Path
 import requests
 
 # Lê .env ao lado do script (sem depender de python-dotenv)
+# Usa utf-8-sig pra tolerar arquivos com BOM (PowerShell Out-File -Encoding utf8 adiciona)
 ENV_FILE = Path(__file__).resolve().parent / ".env"
 if ENV_FILE.exists():
-    for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
+    try:
+        text = ENV_FILE.read_text(encoding="utf-8-sig")
+    except Exception:
+        text = ENV_FILE.read_text(encoding="utf-8", errors="ignore")
+    for line in text.splitlines():
+        line = line.strip().lstrip("﻿")  # tira BOM se sobrou
         if not line or line.startswith("#") or "=" not in line:
             continue
         k, v = line.split("=", 1)
