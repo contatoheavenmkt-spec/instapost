@@ -153,8 +153,11 @@
               <input type="checkbox" ${a.active ? 'checked' : ''} onchange="onToggle('${a.username}')" />
               <span class="slider"></span>
             </label>
-            <button class="btn btn-subtle btn-sm" onclick="onTestLogin('${a.username}')" title="Testar login (salva sessão)">
-              <i data-lucide="log-in" class="icon"></i> Conectar
+            <button class="btn btn-subtle btn-sm" onclick="onConnectViaWorker('${a.username}')" title="Conecta usando worker (PC com IP residencial) — recomendado">
+              <i data-lucide="monitor" class="icon"></i> Conectar (worker)
+            </button>
+            <button class="btn btn-ghost btn-sm" onclick="onTestLogin('${a.username}')" title="Conectar pelo servidor — só use se a conta já tem sessão pré-aquecida">
+              <i data-lucide="server" class="icon"></i>
             </button>
             <button class="btn btn-ghost btn-sm" onclick="onEditTotp('${a.username}', ${a.has_totp})" title="${a.has_totp ? 'Atualizar' : 'Adicionar'} chave 2FA">
               <i data-lucide="shield" class="icon"></i>
@@ -284,8 +287,28 @@
   async function onTestLogin(username) {
     try {
       const r = await api(`/api/accounts/${username}/test-login`, { method: 'POST' });
-      toast(`Conectando @${username}…`, 'info');
+      toast(`Conectando @${username} (via servidor)…`, 'info');
       setTimeout(() => location.href = `/jobs/${r.job_id}`, 600);
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  async function onConnectViaWorker(username) {
+    // Antes de mandar, alerta se não tem worker online
+    try {
+      const workers = await api('/api/workers').catch(() => []);
+      const online = workers.filter(w => w.online);
+      if (!online.length) {
+        const ok = await confirmModal({
+          title: 'Nenhum worker online',
+          message: 'Nenhum worker está rodando no momento. O job vai ficar na fila até alguém abrir o worker no PC. Continuar?',
+          confirmText: 'Continuar mesmo assim',
+        });
+        if (!ok) return;
+      }
+      await api(`/api/accounts/${username}/connect-via-worker`, { method: 'POST' });
+      toast(`@${username} entrou na fila do worker. Em até 5s o worker vai logar.`, 'success');
+      // Aguarda um momento e recarrega pra mostrar status atualizado
+      setTimeout(load, 8000);
     } catch (e) { toast(e.message, 'error'); }
   }
 

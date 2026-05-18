@@ -140,12 +140,48 @@ def download_media(url: str, dest: Path):
 def execute_job(job: dict):
     job_id = job["id"]
     username = job["account_username"]
+    operation = job.get("operation", "post")
 
     def log(msg):
         print(f"[{job_id[:8]}] {msg}")
         log_to_server(job_id, msg)
 
     mark_started(job_id)
+
+    # Importa core (mesmo pra test_login, precisa do get_client)
+    try:
+        from core.session import get_client
+        from core.poster import post_reel, post_story_photo, post_story_video
+    except ImportError as e:
+        log(f"❌ módulos core não encontrados: {e}")
+        log("Rode o worker dentro da pasta do projeto: python worker.py")
+        report_result(job_id, False, error_msg=f"import: {e}")
+        return
+
+    # =====================================================
+    # OPERAÇÃO: test_login (só valida login, não posta)
+    # =====================================================
+    if operation == "test_login":
+        log(f"conectando @{username} (apenas login, sem post)")
+        try:
+            cl = get_client(
+                username=username,
+                password=job["account_password"],
+                proxy=job.get("account_proxy"),
+                totp_secret=job.get("account_totp_secret"),
+            )
+            # Valida que a sessão funciona
+            info = cl.account_info()
+            log(f"✅ conectado como @{info.username} ({info.full_name})")
+            report_result(job_id, True, media_id="session_ok")
+        except Exception as e:
+            log(f"❌ falha conexão: {e}")
+            report_result(job_id, False, error_msg=str(e))
+        return
+
+    # =====================================================
+    # OPERAÇÃO: post (default)
+    # =====================================================
     log(f"iniciando job: {job['video_name']} ({job['kind']}) -> @{username}")
 
     # Baixa mídia
@@ -158,18 +194,6 @@ def execute_job(job: dict):
     except Exception as e:
         log(f"❌ erro baixando mídia: {e}")
         report_result(job_id, False, error_msg=f"download: {e}")
-        return
-
-    # Importa core localmente (worker usa o mesmo código do projeto)
-    try:
-        from core.session import get_client
-        from core.poster import (
-            post_reel, post_story_photo, post_story_video,
-        )
-    except ImportError as e:
-        log(f"❌ módulos core não encontrados: {e}")
-        log("Rode o worker dentro da pasta do projeto: python worker.py")
-        report_result(job_id, False, error_msg=f"import: {e}")
         return
 
     # Login Instagram

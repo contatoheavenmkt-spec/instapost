@@ -500,6 +500,31 @@ def api_test_login(username: str):
     return {"ok": True, "job_id": job.id}
 
 
+@app.post("/api/accounts/{username}/connect-via-worker")
+def api_connect_via_worker(username: str, user=Depends(auth.require_user)):
+    """Cria um remote job de test_login — worker pega, loga, salva sessão local
+    no PC do worker. Não posta nada. Útil pra pré-aquecer várias contas."""
+    accounts = load_accounts()
+    account = next((a for a in accounts if a["username"] == username), None)
+    if not account:
+        raise HTTPException(404, f"Conta @{username} não cadastrada")
+
+    job = rjob_manager.create({
+        "operation": "test_login",
+        "account_username": account["username"],
+        "account_password": account["password"],
+        "account_totp_secret": account.get("totp_secret"),
+        "account_proxy": account.get("proxy"),
+        "video_name": "",
+        "media_type": "video",
+        "kind": "reel",
+        "caption": "",
+        "media_url": "",
+        "created_by": user["email"],
+    })
+    return {"ok": True, "job_id": job.id}
+
+
 @app.post("/api/accounts/{username}/clear-session")
 def api_clear_session(username: str):
     session_file = SESSIONS_DIR / f"{username}.json"

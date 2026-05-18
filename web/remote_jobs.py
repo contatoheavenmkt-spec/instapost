@@ -48,17 +48,19 @@ def parse_iso(s: Optional[str]) -> Optional[datetime]:
 class RemoteJob:
     def __init__(self, data: dict):
         self.id: str = data["id"]
-        # Payload da postagem
+        # Operação: "post" (default) ou "test_login" (só valida conexão)
+        self.operation: str = data.get("operation", "post")
+        # Payload da postagem (ou só auth, no caso de test_login)
         self.account_username: str = data["account_username"]
         self.account_password: str = data["account_password"]
         self.account_totp_secret: Optional[str] = data.get("account_totp_secret")
         self.account_proxy: Optional[str] = data.get("account_proxy")
-        self.video_name: str = data["video_name"]
+        self.video_name: str = data.get("video_name", "")
         self.media_type: str = data.get("media_type", "video")  # "video" | "photo"
         self.kind: str = data.get("kind", "reel")  # "reel" | "story"
         self.caption: str = data.get("caption", "")
         self.link_url: Optional[str] = data.get("link_url")
-        self.media_url: str = data["media_url"]  # URL no server pra worker baixar
+        self.media_url: str = data.get("media_url", "")
         # Estado
         self.status: str = data.get("status", "pending")
         self.worker_id: Optional[str] = data.get("worker_id")
@@ -73,6 +75,7 @@ class RemoteJob:
     def to_dict(self, include_secrets: bool = False, include_logs: bool = True) -> dict:
         d = {
             "id": self.id,
+            "operation": self.operation,
             "account_username": self.account_username,
             "video_name": self.video_name,
             "media_type": self.media_type,
