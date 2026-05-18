@@ -50,3 +50,73 @@ def generate_thumbnail(video_path: Path, thumb_path: Optional[Path] = None) -> P
         # Log mas não levanta — upload deve continuar
         print(f"[thumb] falhou em {video_path.name}: {e}")
         return thumb_path
+
+
+# ----- Normalização de imagem pra Story do Instagram -----
+
+STORY_SIZE = (1080, 1920)  # 9:16 padrão do Instagram Story
+
+
+def normalize_image_for_story(input_path: Path, output_path: Optional[Path] = None) -> Path:
+    """Prepara uma imagem pra ser postada como Story do Instagram.
+
+    Resolve o erro 'Photo story upload configure succeeded without media payload'
+    que acontece com:
+      - Fotos do WhatsApp (metadados JFIF estranhos)
+      - Proporções diferentes de 9:16
+      - JPEGs mal-formados ou com EXIF corrompido
+
+    Faz:
+      1. Aplica rotação EXIF (se a foto era do celular)
+      2. Remove TODOS os metadados
+      3. Converte pra RGB (sRGB)
+      4. Resize/padding pra 1080x1920 mantendo o aspecto original (fundo preto)
+      5. Salva como JPEG limpo, qualidade 92
+
+    Retorna o path do output. Se output_path não for passado, sobrescreve o input.
+    """
+    output_path = output_path or input_path
+    try:
+        from PIL import Image, ImageOps
+    except Exception as e:
+        print(f"[normalize_story] PIL faltando: {e}")
+        return input_path
+
+    try:
+        with Image.open(input_path) as img:
+            # 1. Rotação EXIF (foto do celular vem rotacionada)
+            img = ImageOps.exif_transpose(img)
+            # 2. Converte pra RGB
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+
+            # 3. Resize/padding pra 1080x1920
+            img_ratio = img.width / img.height
+            target_ratio = STORY_SIZE[0] / STORY_SIZE[1]
+
+            if abs(img_ratio - target_ratio) < 0.01:
+                # Já está em 9:16 (ou muito próximo) — só redimensiona
+                final = img.resize(STORY_SIZE, Image.LANCZOS)
+            else:
+                # Padding com fundo preto pra manter aspecto
+                canvas = Image.new("RGB", STORY_SIZE, (0, 0, 0))
+                if img_ratio > target_ratio:
+                    # Imagem é mais larga (paisagem ou quadrada) — caber pela largura
+                    new_w = STORY_SIZE[0]
+                    new_h = int(new_w / img_ratio)
+                    resized = img.resize((new_w, new_h), Image.LANCZOS)
+                    canvas.paste(resized, (0, (STORY_SIZE[1] - new_h) // 2))
+                else:
+                    # Imagem é mais alta — caber pela altura
+                    new_h = STORY_SIZE[1]
+                    new_w = int(new_h * img_ratio)
+                    resized = img.resize((new_w, new_h), Image.LANCZOS)
+                    canvas.paste(resized, ((STORY_SIZE[0] - new_w) // 2, 0))
+                final = canvas
+
+            # 4. Salva JPEG limpo (sem metadados)
+            final.save(output_path, "JPEG", quality=92, optimize=False)
+            return output_path
+    except Exception as e:
+        print(f"[normalize_story] falhou em {input_path}: {e} — usando original")
+        return input_path

@@ -362,6 +362,14 @@ def execute_job(job: dict):
 
         if kind == "story":
             if media_type == "photo":
+                # Normaliza foto pra 1080x1920 + JPEG limpo (resolve erros do Insta com
+                # fotos do WhatsApp / proporções não-9:16 / EXIF estranho)
+                try:
+                    from core.media import normalize_image_for_story
+                    log("normalizando foto pra story (1080x1920)")
+                    normalize_image_for_story(media_path)
+                except Exception as ne:
+                    log(f"⚠️ normalização falhou ({ne}) — tentando com original")
                 result = post_story_photo(cl, str(media_path), caption, link_url, link_text)
             else:
                 result = post_story_video(cl, str(media_path), caption, link_url, link_text)
