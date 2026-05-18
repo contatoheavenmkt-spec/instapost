@@ -119,6 +119,9 @@
           <i data-lucide="upload" class="icon"></i> Trocar foto
         </button>
         <div id="profile-pic-name" class="text-[11px] text-muted mt-1 text-center"></div>
+        <div class="text-[10.5px] text-amber-300 mt-2 leading-tight">
+          ⚠ Instagram limita trocas de foto (~1 a cada algumas horas por conta). Se trocar em várias contas seguidas, algumas podem ficar pendentes.
+        </div>
       </div>
 
       <!-- Bio + nome + link -->
@@ -578,7 +581,7 @@
       return;
     }
 
-    let count = 0;
+    const jobIds = [];
     try {
       // 1. Salvar automações (sempre, não vai pro worker)
       await api(`/api/accounts/${username}/automations`, {
@@ -595,7 +598,7 @@
 
       // 2. Se editou perfil (bio/nome/link), cria job
       if (fullname || bio || link) {
-        await api('/api/accounts/edit-profile', {
+        const r = await api('/api/accounts/edit-profile', {
           method: 'POST',
           body: JSON.stringify({
             accounts: [username],
@@ -604,7 +607,7 @@
             external_url: link || null,
           }),
         });
-        count++;
+        if (r.job_ids && r.job_ids[0]) jobIds.push({id: r.job_ids[0], type: 'perfil'});
       }
 
       // 3. Se trocou foto, cria job de upload
@@ -615,17 +618,58 @@
         const res = await fetch('/api/accounts/change-picture', { method: 'POST', body: fd });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.detail || `Erro ${res.status}`);
-        count++;
+        if (data.job_ids && data.job_ids[0]) jobIds.push({id: data.job_ids[0], type: 'foto'});
       }
 
-      if (count > 0) {
-        toast(`Configurações salvas + ${count} job(s) enviado(s) pro worker`, 'success');
-      } else {
+      if (jobIds.length === 0) {
         toast('Automações salvas', 'success');
+        closeProfileEditor();
+        await load();
+        return;
       }
+
+      toast(`${jobIds.length} job(s) enviado(s). Aguardando worker…`, 'info');
       closeProfileEditor();
-      await load();
+      // Acompanha resultado em tempo real
+      monitorJobs(jobIds, username);
     } catch (e) { toast(e.message, 'error'); }
+  }
+
+  // Polling pra acompanhar o resultado dos jobs criados no modal
+  async function monitorJobs(jobs, username) {
+    const maxWaitMs = 90000; // 1.5 min
+    const startTs = Date.now();
+    const pending = new Map(jobs.map(j => [j.id, j.type]));
+    while (pending.size > 0 && (Date.now() - startTs) < maxWaitMs) {
+      await new Promise(r => setTimeout(r, 3000));
+      for (const [jid, type] of Array.from(pending.entries())) {
+        try {
+          const job = await api(`/api/remote-jobs/${jid}`);
+          if (job.status === 'done') {
+            toast(`✓ ${type} de @${username} atualizado`, 'success');
+            pending.delete(jid);
+          } else if (job.status === 'error') {
+            const err = job.error_msg || 'erro desconhecido';
+            // Detecta erros típicos de rate limit / feedback_required
+            let friendly = err;
+            const lower = err.toLowerCase();
+            if (lower.includes('feedback_required') || lower.includes('rate')) {
+              friendly = `Instagram limitou (rate limit). Tenta novamente em 1-2h.`;
+            } else if (lower.includes('challenge') || lower.includes('checkpoint')) {
+              friendly = `Instagram pediu verificação. Faz login manual no app antes.`;
+            } else if (lower.includes('login')) {
+              friendly = `Falha de login. Conecta a conta de novo em "Conectar".`;
+            }
+            toast(`✗ ${type} de @${username}: ${friendly}`, 'error');
+            pending.delete(jid);
+          }
+        } catch (e) {}
+      }
+    }
+    if (pending.size > 0) {
+      toast(`Worker demorou — ${pending.size} job(s) ainda pendente(s). Veja em /jobs`, 'info');
+    }
+    await load();
   }
 
   async function onShowTotp(username) {
