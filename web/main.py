@@ -287,11 +287,11 @@ def page_videos(request: Request):
 def page_jobs(request: Request):
     accounts = load_accounts()
     pending = list_videos(PENDING_DIR)
-    # Só contas ativas E com sessão salva podem entrar no disparo
-    # (sem sessão, o post.py vai falhar pedindo challenge no meio do batch)
+    # Só contas ativas E com sessão (servidor OU worker) entram no disparo manual via /jobs
     connected = [
         a for a in accounts
-        if a.get("active", True) and session_status(a["username"]) == "saved"
+        if a.get("active", True)
+        and (session_status(a["username"]) == "saved" or a.get("connected_via_worker_id"))
     ]
     total_active = sum(1 for a in accounts if a.get("active", True))
     return templates.TemplateResponse(
@@ -384,6 +384,9 @@ def _account_view(a: dict) -> dict:
         "proxy": a.get("proxy"),
         "session": session_status(a["username"]),
         "has_totp": bool(a.get("totp_secret")),
+        "connected_via_worker_id": a.get("connected_via_worker_id"),
+        "connected_via_worker_name": a.get("connected_via_worker_name"),
+        "connected_at": a.get("connected_at"),
     }
 
 
@@ -1023,6 +1026,7 @@ class WorkerResultIn(BaseModel):
 @app.post("/api/worker/jobs/{job_id}/result")
 def api_worker_job_result(job_id: str, payload: WorkerResultIn, request: Request):
     w = _require_worker(request)
+    job = rjob_manager.get(job_id)
     ok = rjob_manager.report_result(
         job_id=job_id, worker_id=w.id,
         success=payload.success,
@@ -1031,6 +1035,23 @@ def api_worker_job_result(job_id: str, payload: WorkerResultIn, request: Request
     )
     if not ok:
         raise HTTPException(404, "Job não encontrado ou não atribuído a esse worker")
+
+    # Side-effect: marca conta como "conectada via worker" quando o
+    # worker reporta sucesso em test_login ou em qualquer post.
+    # Assim o painel /accounts mostra status correto mesmo sem sessão na VPS.
+    if payload.success and job:
+        try:
+            accounts = load_accounts()
+            for a in accounts:
+                if a["username"] == job.account_username:
+                    a["connected_via_worker_id"] = w.id
+                    a["connected_via_worker_name"] = w.name
+                    a["connected_at"] = scheduler_mod.now_local().isoformat(timespec="seconds")
+                    save_accounts(accounts)
+                    break
+        except Exception as e:
+            print(f"[worker_result] erro marcando conta conectada: {e}")
+
     return {"ok": True}
 
 

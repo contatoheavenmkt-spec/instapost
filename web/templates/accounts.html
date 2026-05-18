@@ -109,16 +109,17 @@
     if (show) document.querySelector('#add-form [name=username]').focus();
   }
 
-  function statusDot(active, session) {
+  function statusDot(active, session, workerName) {
     if (!active) return '<span class="dot dot-muted"></span> <span class="text-soft text-[12.5px]">pausada</span>';
-    if (session === 'saved') return '<span class="dot dot-success"></span> <span class="text-[12.5px]">conectada</span>';
+    if (session === 'saved') return '<span class="dot dot-success"></span> <span class="text-[12.5px]">conectada (servidor)</span>';
+    if (workerName) return `<span class="dot dot-success"></span> <span class="text-[12.5px]">conectada (worker)</span>`;
     return '<span class="dot dot-warning"></span> <span class="text-[12.5px]">não conectada</span>';
   }
 
-  function sessionBadge(session) {
-    return session === 'saved'
-      ? '<span class="badge badge-success"><i data-lucide="shield-check" style="width:11px;height:11px"></i> salva</span>'
-      : '<span class="badge badge-neutral">vazia</span>';
+  function sessionBadge(session, workerName) {
+    if (session === 'saved') return '<span class="badge badge-success"><i data-lucide="shield-check" style="width:11px;height:11px"></i> servidor</span>';
+    if (workerName) return `<span class="badge badge-success" title="Sessão salva no worker: ${workerName}"><i data-lucide="monitor" style="width:11px;height:11px"></i> ${workerName}</span>`;
+    return '<span class="badge badge-neutral">vazia</span>';
   }
 
   function render() {
@@ -144,8 +145,8 @@
               : '<span class="badge badge-neutral" title="Sem chave 2FA — se a conta tem 2FA ativo, conectar vai falhar"><i data-lucide="shield-off" style="width:11px;height:11px"></i> sem 2FA</span>'}
           </div>
         </td>
-        <td>${statusDot(a.active, a.session)}</td>
-        <td>${sessionBadge(a.session)}</td>
+        <td>${statusDot(a.active, a.session, a.connected_via_worker_name)}</td>
+        <td>${sessionBadge(a.session, a.connected_via_worker_name)}</td>
         <td class="mono text-[12px] text-soft">${a.proxy || '<span class="text-muted">—</span>'}</td>
         <td class="text-right pr-4">
           <div class="inline-flex items-center gap-1.5">
