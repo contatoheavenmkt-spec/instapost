@@ -34,45 +34,47 @@ def post_reel(cl: Client, video_path: str, caption: str) -> dict:
 
 # ----------- STORIES -----------
 
-def _build_story_links(link_url: Optional[str], link_text: Optional[str] = None) -> list:
-    """Cria StoryLink que o instagrapi converte em sticker de link.
+def _build_story_link_stickers(link_url: Optional[str], link_text: Optional[str] = None) -> list:
+    """Cria sticker de link VISÍVEL com texto customizado.
 
-    LIMITAÇÃO CONHECIDA: a versão do instagrapi instalada (2.6.x) NÃO tem
-    o campo 'linkText' no StoryLink, então não dá pra customizar o texto
-    do botão programaticamente — o Instagram usa o texto padrão dele
-    (geralmente o domínio da URL ou "Saiba mais").
-
-    O link funciona como **tappable area**: toca na tela do Story → abre o link.
+    Usa StorySticker + StoryStickerLink (suportado a partir do instagrapi 2.7.0).
+    Renderiza como botão visível na tela do Story, com o texto que o usuário definir
+    (default: 'Clique aqui'). Substitui o StoryLink antigo que era invisível.
     """
     if not link_url:
         return []
     try:
-        from instagrapi.types import StoryLink
-        return [StoryLink(
-            webUri=link_url,
+        from instagrapi.types import StorySticker, StoryStickerLink
+        text = (link_text or "Clique aqui").strip() or "Clique aqui"
+        return [StorySticker(
+            type="story_link",
             x=0.5, y=0.7, z=0,
             width=0.5, height=0.07,
             rotation=0.0,
+            story_link=StoryStickerLink(
+                url=link_url,
+                link_title=text,
+                link_type="web",
+            ),
         )]
     except Exception as e:
-        print(f"[story_links] falhou: {e}")
+        print(f"[story_sticker_link] falhou: {e}")
         return []
 
 
 def post_story_video(cl: Client, video_path: str, caption: str = "",
                      link_url: Optional[str] = None, link_text: Optional[str] = None) -> dict:
     """Posta vídeo no Story (até 60s, vertical 9:16). Se link_url for passada,
-    adiciona como tappable link (toca na tela pra abrir).
-    NOTA: link_text é aceito mas ignorado pela versão atual do instagrapi."""
+    adiciona sticker visível com texto custom (default: 'Clique aqui')."""
     try:
         video = Path(video_path)
         if not video.exists():
             return {"success": False, "media_id": None, "error": f"Arquivo não encontrado: {video_path}"}
 
         kwargs = {"path": video, "caption": caption or ""}
-        links = _build_story_links(link_url, link_text)
-        if links:
-            kwargs["links"] = links
+        stickers = _build_story_link_stickers(link_url, link_text)
+        if stickers:
+            kwargs["stickers"] = stickers
 
         media = cl.video_upload_to_story(**kwargs)
         return {"success": True, "media_id": str(media.pk), "error": None}
@@ -82,17 +84,16 @@ def post_story_video(cl: Client, video_path: str, caption: str = "",
 
 def post_story_photo(cl: Client, photo_path: str, caption: str = "",
                      link_url: Optional[str] = None, link_text: Optional[str] = None) -> dict:
-    """Posta foto no Story. Se link_url for passada, vira tappable link
-    (toca na tela pra abrir o link)."""
+    """Posta foto no Story com sticker de link visível (texto custom)."""
     try:
         photo = Path(photo_path)
         if not photo.exists():
             return {"success": False, "media_id": None, "error": f"Arquivo não encontrado: {photo_path}"}
 
         kwargs = {"path": photo, "caption": caption or ""}
-        links = _build_story_links(link_url, link_text)
-        if links:
-            kwargs["links"] = links
+        stickers = _build_story_link_stickers(link_url, link_text)
+        if stickers:
+            kwargs["stickers"] = stickers
 
         media = cl.photo_upload_to_story(**kwargs)
         return {"success": True, "media_id": str(media.pk), "error": None}
