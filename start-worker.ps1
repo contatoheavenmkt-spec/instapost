@@ -34,10 +34,16 @@ try {
     Write-Host "AVISO: git pull falhou (sem internet?), seguindo com codigo local" -ForegroundColor Yellow
 }
 
-# 3. Upgrade instagrapi
+# 3. Check instagrapi (sem upgrade forcado pra evitar conflito pillow/moviepy)
 Write-Host ""
-Write-Host "[3/4] Atualizando dependencia instagrapi..." -ForegroundColor Yellow
-pip install --upgrade --quiet instagrapi 2>&1 | Out-Host
+Write-Host "[3/4] Verificando instagrapi..." -ForegroundColor Yellow
+$instaVersion = (pip show instagrapi 2>&1 | Select-String -Pattern "^Version:" | ForEach-Object { $_.ToString().Split(" ")[1] })
+if ($instaVersion) {
+    Write-Host "    instagrapi $instaVersion OK"
+} else {
+    Write-Host "    Instalando instagrapi..." -ForegroundColor Yellow
+    pip install --quiet --use-deprecated=legacy-resolver instagrapi 2>&1 | Out-Host
+}
 
 # 4. Inicia worker
 Write-Host ""

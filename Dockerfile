@@ -8,8 +8,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Instala deps primeiro (cache de layer)
+# --use-deprecated=legacy-resolver: instagrapi 2.7 quer Pillow==12.2.0 (pin)
+# e moviepy 2.x quer pillow<12 — o resolver novo recusa, mas o legado aceita
+# (warnings, mas funciona na prática)
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --use-deprecated=legacy-resolver -r requirements.txt
 
 # Copia o código
 COPY . .
