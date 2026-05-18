@@ -189,6 +189,7 @@ def list_videos(folder: Path) -> list[dict]:
             "media_type": "photo" if is_photo else "video",
             "kind": meta.get("kind", "story" if is_photo else "reel"),
             "link_url": meta.get("link_url"),
+            "link_text": meta.get("link_text") or "Clique aqui",
         })
     return out
 
@@ -593,6 +594,7 @@ def api_update_caption(name: str, caption: str = Form("")):
 class MediaMetaIn(BaseModel):
     kind: str  # "reel" | "story"
     link_url: Optional[str] = None
+    link_text: Optional[str] = None  # texto do sticker (default "Clique aqui")
 
 
 @app.post("/api/videos/{name}/meta")
@@ -609,8 +611,9 @@ def api_update_meta(name: str, payload: MediaMetaIn):
         raise HTTPException(400, "Reel só aceita vídeo (.mp4). Use story pra fotos.")
     from core.poster import save_meta
     link = (payload.link_url or "").strip() or None
-    save_meta(str(media), {"kind": payload.kind, "link_url": link})
-    return {"ok": True, "kind": payload.kind, "link_url": link}
+    link_txt = (payload.link_text or "").strip() or "Clique aqui"
+    save_meta(str(media), {"kind": payload.kind, "link_url": link, "link_text": link_txt})
+    return {"ok": True, "kind": payload.kind, "link_url": link, "link_text": link_txt}
 
 
 @app.post("/api/videos/{name}/delete")
@@ -1058,8 +1061,9 @@ def api_worker_job_result(job_id: str, payload: WorkerResultIn, request: Request
 # ---------- REMOTE JOBS (criado pelo painel, executado por worker) ----------
 
 class RemoteJobIn(BaseModel):
-    video: str               # nome do arquivo em pending/
-    account: str             # username Instagram
+    video: str                       # nome do arquivo em pending/
+    account: Optional[str] = None    # username (legacy single-conta)
+    accounts: Optional[list[str]] = None  # multi-conta: cria N jobs (1 por conta)
 
 
 @app.get("/api/remote-jobs")
@@ -1083,11 +1087,30 @@ def api_create_remote_job(payload: RemoteJobIn, request: Request, user=Depends(a
     if not media_path.exists():
         raise HTTPException(404, f"Mídia '{video_name}' não está em pending")
 
-    # Valida conta
+    # Resolve lista de contas alvo (multi-account ou single)
     accounts = load_accounts()
-    account = next((a for a in accounts if a["username"] == payload.account), None)
-    if not account:
-        raise HTTPException(404, f"Conta @{payload.account} não existe")
+
+    # Modo "todas conectadas via worker"
+    if payload.accounts == ["__all_worker__"]:
+        target_usernames = [
+            a["username"] for a in accounts
+            if a.get("active", True) and a.get("connected_via_worker_id")
+        ]
+        if not target_usernames:
+            raise HTTPException(400, "Nenhuma conta conectada via worker")
+    elif payload.accounts:
+        target_usernames = payload.accounts
+    elif payload.account:
+        target_usernames = [payload.account]
+    else:
+        raise HTTPException(400, "Forneça 'account' ou 'accounts'")
+
+    targets = []
+    for uname in target_usernames:
+        a = next((a for a in accounts if a["username"] == uname), None)
+        if not a:
+            raise HTTPException(404, f"Conta @{uname} não existe")
+        targets.append(a)
 
     # Lê meta + caption do arquivo
     from core.poster import load_meta, detect_media_kind, load_caption
@@ -1095,38 +1118,51 @@ def api_create_remote_job(payload: RemoteJobIn, request: Request, user=Depends(a
     media_type = detect_media_kind(str(media_path))
     caption = load_caption(str(media_path))
 
-    # Monta URL pública pro worker baixar a mídia
     base = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/") or str(request.base_url).rstrip("/")
-    media_url = f"{base}/api/videos/pending/{video_name}/stream"
+    media_url = f"{base}/api/worker/media/{video_name}"
 
-    # Se for story+link, gera 1 short link pra essa conta (anti-cluster)
-    link_url = meta.get("link_url")
-    if meta.get("kind") == "story" and link_url:
-        try:
-            shortened = link_manager.create(
-                target_url=link_url,
-                label=f"story · @{payload.account}",
-                account=payload.account,
-                created_by=user["email"],
-            )
-            link_url = f"{base}/r/{shortened.slug}"
-        except Exception as e:
-            print(f"[remote_job] shortener falhou: {e} — usando URL original")
+    raw_link = meta.get("link_url")
+    link_text = meta.get("link_text") or "Clique aqui"
+    created = []
 
-    job = rjob_manager.create({
-        "account_username": account["username"],
-        "account_password": account["password"],
-        "account_totp_secret": account.get("totp_secret"),
-        "account_proxy": account.get("proxy"),
-        "video_name": video_name,
-        "media_type": media_type,
-        "kind": meta.get("kind", "reel"),
-        "caption": caption,
-        "link_url": link_url,
-        "media_url": media_url,
-        "created_by": user["email"],
-    })
-    return {"ok": True, "job": job.to_dict(include_secrets=False)}
+    for acc in targets:
+        # Se for story+link, gera 1 short link único por conta (anti-cluster)
+        link_url = raw_link
+        if meta.get("kind") == "story" and raw_link:
+            try:
+                shortened = link_manager.create(
+                    target_url=raw_link,
+                    label=f"story · @{acc['username']}",
+                    account=acc["username"],
+                    created_by=user["email"],
+                )
+                link_url = f"{base}/r/{shortened.slug}"
+            except Exception as e:
+                print(f"[remote_job] shortener falhou pra {acc['username']}: {e}")
+
+        job = rjob_manager.create({
+            "operation": "post",
+            "account_username": acc["username"],
+            "account_password": acc["password"],
+            "account_totp_secret": acc.get("totp_secret"),
+            "account_proxy": acc.get("proxy"),
+            "video_name": video_name,
+            "media_type": media_type,
+            "kind": meta.get("kind", "reel"),
+            "caption": caption,
+            "link_url": link_url,
+            "link_text": link_text,
+            "media_url": media_url,
+            "created_by": user["email"],
+        })
+        created.append(job.id)
+
+    return {
+        "ok": True,
+        "count": len(created),
+        "job_ids": created,
+        "first_job_id": created[0] if created else None,
+    }
 
 
 @app.post("/api/remote-jobs/{job_id}/cancel")

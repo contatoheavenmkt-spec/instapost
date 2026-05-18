@@ -101,16 +101,23 @@
 
 <!-- Worker dispatch modal -->
 <div id="worker-modal" class="modal-bg hidden" style="z-index:60" onclick="if(event.target===this) closeWorkerModal()">
-  <div class="modal-card" style="max-width: 480px">
+  <div class="modal-card" style="max-width: 540px">
     <div class="text-[15px] font-semibold mb-1">Postar via worker</div>
     <div class="text-[13px] text-soft mb-1" id="worker-video-name">—</div>
-    <div class="text-[12px] text-muted mb-4">Cria 1 job na fila pro worker (PC com IP residencial) executar. Mais lento que o servidor mas evita blacklist do Instagram.</div>
+    <div class="text-[12px] text-muted mb-4">Worker posta usando IP residencial. Selecione 1 ou várias contas — cada conta gera 1 job na fila.</div>
     <form id="worker-form" class="space-y-4">
       <div>
-        <label class="label">Conta de destino</label>
-        <select name="account" id="worker-account" class="select" required>
-          <option value="">Carregando…</option>
-        </select>
+        <label class="label flex items-center justify-between">
+          <span>Contas de destino</span>
+          <span class="flex items-center gap-3 text-[11px]">
+            <button type="button" class="text-[var(--accent)] underline" onclick="selectAllAccs(true)">marcar todas</button>
+            <button type="button" class="text-muted underline" onclick="selectAllAccs(false)">limpar</button>
+          </span>
+        </label>
+        <div id="worker-accounts" class="surface-2 p-2 rounded-md max-h-60 overflow-auto space-y-1">
+          <div class="text-[12px] text-muted text-center py-3">Carregando…</div>
+        </div>
+        <div class="text-[11px] text-muted mt-1.5"><span id="acc-count">0</span> selecionada(s)</div>
       </div>
       <div id="worker-status-hint" class="surface-2 p-2.5 rounded-md text-[11.5px] text-soft">—</div>
       <div class="flex justify-end gap-2 pt-2 border-t border-line">
@@ -187,13 +194,23 @@
           </div>
           <div id="d-kind-desc" class="text-[11px] text-muted mt-1.5"></div>
 
-          <div id="d-link-wrap" class="mt-3 hidden">
-            <label class="label flex items-center gap-1.5">
-              <i data-lucide="link" style="width:12px;height:12px"></i>
-              Link no sticker <span class="text-muted">(opcional)</span>
-            </label>
-            <input id="d-link" class="input mono text-[12px]" placeholder="https://meusite.com/promo" oninput="updateLinkPreview()" />
-            <div id="d-link-preview" class="hidden mt-2 p-2.5 rounded-md surface-2" style="border-left: 2px solid var(--accent)">
+          <div id="d-link-wrap" class="mt-3 hidden space-y-2">
+            <div>
+              <label class="label flex items-center gap-1.5">
+                <i data-lucide="link" style="width:12px;height:12px"></i>
+                URL do link <span class="text-muted">(opcional)</span>
+              </label>
+              <input id="d-link" class="input mono text-[12px]" placeholder="https://meusite.com/promo" oninput="updateLinkPreview()" />
+            </div>
+            <div>
+              <label class="label flex items-center gap-1.5">
+                <i data-lucide="mouse-pointer-click" style="width:12px;height:12px"></i>
+                Texto do botão
+              </label>
+              <input id="d-link-text" class="input text-[12px]" placeholder="Clique aqui" maxlength="32" oninput="updateLinkPreview()" />
+              <div class="text-[10.5px] text-muted mt-1">É o texto que aparece no sticker do Story. Padrão "Clique aqui". Máx 32 caracteres.</div>
+            </div>
+            <div id="d-link-preview" class="hidden p-2.5 rounded-md surface-2" style="border-left: 2px solid var(--accent)">
               <div class="flex items-start gap-2 text-[11.5px]">
                 <i data-lucide="zap" style="width:12px;height:12px;color:var(--accent);margin-top:2px;flex-shrink:0"></i>
                 <div class="leading-relaxed">
@@ -343,6 +360,7 @@
     document.getElementById('d-mtime').textContent = v.mtime;
     document.getElementById('d-caption').value = v.caption || '';
     document.getElementById('d-link').value = v.link_url || '';
+    document.getElementById('d-link-text').value = v.link_text || 'Clique aqui';
 
     // Player vs imagem
     const video = document.getElementById('d-video');
@@ -402,6 +420,7 @@
   function updateLinkPreview() {
     const kind = document.querySelector('.kind-opt.is-active')?.dataset.kind;
     const link = (document.getElementById('d-link')?.value || '').trim();
+    const linkText = (document.getElementById('d-link-text')?.value || 'Clique aqui').trim() || 'Clique aqui';
     const wrap = document.getElementById('d-link-preview');
     if (!wrap) return;
     if (kind !== 'story' || !link) {
@@ -411,14 +430,15 @@
     wrap.classList.remove('hidden');
     const sum = document.getElementById('d-link-summary');
     const base = location.origin;
+    const btnPreview = `<span class="badge badge-success" style="font-size:10px"><i data-lucide="mouse-pointer-click" style="width:9px;height:9px"></i> ${escapeHtml(linkText)}</span>`;
     if (connectedCount === 0) {
-      sum.innerHTML = `Quando postar, vai usar este link como sticker. <span class="text-muted">(Nenhuma conta conectada agora — conecte em <a href="/accounts" class="underline">Contas</a>.)</span>`;
+      sum.innerHTML = `Sticker aparecerá como ${btnPreview}. <span class="text-muted">(Nenhuma conta conectada agora.)</span>`;
     } else if (connectedCount === 1) {
-      sum.innerHTML = `Ao postar, gera <strong>1 link curto</strong> apontando pra <span class="mono">${escapeHtml(link)}</span>:<br><span class="mono text-[10.5px] text-muted">${base}/r/<span class="text-[var(--accent)]">abc1234</span></span>`;
+      sum.innerHTML = `Sticker ${btnPreview} → ${base}/r/<span class="text-[var(--accent)]">abc1234</span> → <span class="mono">${escapeHtml(link)}</span>`;
     } else {
-      sum.innerHTML = `Ao postar, gera <strong>${connectedCount} links únicos</strong> (1 por conta) apontando pra <span class="mono">${escapeHtml(link)}</span> — anti-cluster.<br>
-        <span class="mono text-[10.5px] text-muted">${base}/r/<span class="text-[var(--accent)]">abc</span> · ${base}/r/<span class="text-[var(--accent)]">xyz</span> · …</span>`;
+      sum.innerHTML = `Cada uma das <strong>${connectedCount} contas</strong> recebe um sticker ${btnPreview} com URL única (anti-cluster). Todas redirecionam pra <span class="mono">${escapeHtml(link)}</span>.`;
     }
+    if (window.lucide) lucide.createIcons();
   }
 
   function changeKind(kind) {
@@ -446,16 +466,17 @@
     const caption = document.getElementById('d-caption').value;
     const kind = document.querySelector('.kind-opt.is-active')?.dataset.kind || 'reel';
     const link_url = document.getElementById('d-link').value.trim() || null;
+    const link_text = document.getElementById('d-link-text').value.trim() || 'Clique aqui';
     try {
       // 1. Salvar legenda
       const fd = new FormData();
       fd.append('caption', caption);
       const r1 = await fetch(`/api/videos/${encodeURIComponent(currentVideo.name)}/caption`, { method: 'POST', body: fd });
       if (!r1.ok) throw new Error(`legenda: ${r1.status}`);
-      // 2. Salvar meta (kind + link)
+      // 2. Salvar meta (kind + link + link_text)
       await api(`/api/videos/${encodeURIComponent(currentVideo.name)}/meta`, {
         method: 'POST',
-        body: JSON.stringify({ kind, link_url }),
+        body: JSON.stringify({ kind, link_url, link_text }),
       });
       toast('Salvo', 'success');
       await load();
@@ -500,35 +521,58 @@
 
   // ----- Worker dispatch modal -----
 
+  function selectAllAccs(checked) {
+    document.querySelectorAll('#worker-accounts input[type=checkbox]').forEach(c => c.checked = checked);
+    updateAccCount();
+  }
+
+  function updateAccCount() {
+    const n = document.querySelectorAll('#worker-accounts input[type=checkbox]:checked').length;
+    document.getElementById('acc-count').textContent = n;
+  }
+
   async function openWorkerModal() {
     if (!currentVideo) return;
     document.getElementById('worker-video-name').textContent = currentVideo.name;
-    const sel = document.getElementById('worker-account');
-    sel.innerHTML = '<option value="">Carregando…</option>';
-    // Popula contas (qualquer ativa, mesmo sem sessão — worker vai logar localmente)
+    const wrap = document.getElementById('worker-accounts');
+    wrap.innerHTML = '<div class="text-[12px] text-muted text-center py-3">Carregando…</div>';
+
     try {
       const [accounts, workers] = await Promise.all([
         api('/api/accounts'),
         api('/api/workers').catch(() => []),
       ]);
       const active = accounts.filter(a => a.active);
-      sel.innerHTML = active.length
-        ? active.map(a => `<option value="${a.username}">@${a.username}</option>`).join('')
-        : '<option value="">Nenhuma conta ativa</option>';
+      if (!active.length) {
+        wrap.innerHTML = '<div class="text-[12px] text-muted text-center py-3">Nenhuma conta ativa</div>';
+      } else {
+        wrap.innerHTML = active.map(a => {
+          const connected = !!a.connected_via_worker_name;
+          return `
+            <label class="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-[var(--surface)] cursor-pointer">
+              <input type="checkbox" class="check acc-check" value="${a.username}" ${connected ? 'checked' : ''} onchange="updateAccCount()" />
+              <span class="mono text-[12.5px] flex-1">@${a.username}</span>
+              ${connected
+                ? `<span class="badge badge-success" style="font-size:10px"><i data-lucide="monitor" style="width:9px;height:9px"></i> ${escapeHtml(a.connected_via_worker_name)}</span>`
+                : '<span class="badge badge-neutral" style="font-size:10px">não conectada</span>'}
+            </label>`;
+        }).join('');
+      }
+      updateAccCount();
+      if (window.lucide) lucide.createIcons();
 
-      // Hint sobre workers online
+      // Hint workers
       const online = workers.filter(w => w.online);
       const hint = document.getElementById('worker-status-hint');
       if (online.length === 0) {
-        hint.innerHTML = `<span class="text-amber-300">⚠ Nenhum worker online agora.</span> O job vai ficar na fila até alguém abrir o worker no PC. Configure em <a href="/workers" class="underline">Workers</a>.`;
+        hint.innerHTML = `<span class="text-amber-300">⚠ Nenhum worker online.</span> Os jobs vão pra fila até alguém abrir o worker.`;
       } else {
-        hint.innerHTML = `<strong class="text-emerald-300">${online.length} worker(s) online</strong> — o primeiro disponível pega o job.`;
+        hint.innerHTML = `<strong class="text-emerald-300">${online.length} worker(s) online</strong> — distribui os jobs entre eles em até 5s.`;
       }
     } catch (e) {
-      sel.innerHTML = '<option value="">Erro ao carregar</option>';
+      wrap.innerHTML = `<div class="text-[12px] text-red-300 text-center py-3">${e.message}</div>`;
     }
     document.getElementById('worker-modal').classList.remove('hidden');
-    if (window.lucide) lucide.createIcons();
   }
 
   function closeWorkerModal() {
@@ -538,15 +582,17 @@
   document.getElementById('worker-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     if (!currentVideo) return;
-    const fd = new FormData(e.target);
-    const account = fd.get('account');
-    if (!account) return;
+    const checked = Array.from(document.querySelectorAll('#worker-accounts input[type=checkbox]:checked')).map(c => c.value);
+    if (!checked.length) {
+      toast('Selecione pelo menos uma conta', 'error');
+      return;
+    }
     try {
       const r = await api('/api/remote-jobs', {
         method: 'POST',
-        body: JSON.stringify({ video: currentVideo.name, account }),
+        body: JSON.stringify({ video: currentVideo.name, accounts: checked }),
       });
-      toast(`Job enviado pra fila. Worker vai pegar em até 5s.`, 'success');
+      toast(`${r.count} job(s) na fila. Worker(s) vão pegar em até 5s.`, 'success');
       closeWorkerModal();
       closeDetail();
       setTimeout(() => location.href = `/jobs`, 400);

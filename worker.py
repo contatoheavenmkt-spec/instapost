@@ -217,14 +217,15 @@ def execute_job(job: dict):
         media_type = job.get("media_type", "video")
         caption = job.get("caption", "")
         link_url = job.get("link_url")
+        link_text = job.get("link_text") or "Clique aqui"
 
-        log(f"postando ({kind}, {media_type}){' + link' if link_url else ''}")
+        log(f"postando ({kind}, {media_type}){' + link [' + link_text + ']' if link_url else ''}")
 
         if kind == "story":
             if media_type == "photo":
-                result = post_story_photo(cl, str(media_path), caption, link_url)
+                result = post_story_photo(cl, str(media_path), caption, link_url, link_text)
             else:
-                result = post_story_video(cl, str(media_path), caption, link_url)
+                result = post_story_video(cl, str(media_path), caption, link_url, link_text)
         else:
             if media_type == "photo":
                 result = {"success": False, "media_id": None, "error": "Foto não pode virar Reel"}

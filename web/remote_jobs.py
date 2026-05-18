@@ -60,6 +60,7 @@ class RemoteJob:
         self.kind: str = data.get("kind", "reel")  # "reel" | "story"
         self.caption: str = data.get("caption", "")
         self.link_url: Optional[str] = data.get("link_url")
+        self.link_text: Optional[str] = data.get("link_text", "Clique aqui")
         self.media_url: str = data.get("media_url", "")
         # Estado
         self.status: str = data.get("status", "pending")
@@ -82,6 +83,7 @@ class RemoteJob:
             "kind": self.kind,
             "caption": self.caption,
             "link_url": self.link_url,
+            "link_text": self.link_text,
             "media_url": self.media_url,
             "status": self.status,
             "worker_id": self.worker_id,
