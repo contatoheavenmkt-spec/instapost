@@ -99,6 +99,30 @@
   </div>
 </div>
 
+<!-- Worker dispatch modal -->
+<div id="worker-modal" class="modal-bg hidden" style="z-index:60" onclick="if(event.target===this) closeWorkerModal()">
+  <div class="modal-card" style="max-width: 480px">
+    <div class="text-[15px] font-semibold mb-1">Postar via worker</div>
+    <div class="text-[13px] text-soft mb-1" id="worker-video-name">—</div>
+    <div class="text-[12px] text-muted mb-4">Cria 1 job na fila pro worker (PC com IP residencial) executar. Mais lento que o servidor mas evita blacklist do Instagram.</div>
+    <form id="worker-form" class="space-y-4">
+      <div>
+        <label class="label">Conta de destino</label>
+        <select name="account" id="worker-account" class="select" required>
+          <option value="">Carregando…</option>
+        </select>
+      </div>
+      <div id="worker-status-hint" class="surface-2 p-2.5 rounded-md text-[11.5px] text-soft">—</div>
+      <div class="flex justify-end gap-2 pt-2 border-t border-line">
+        <button type="button" class="btn btn-ghost" onclick="closeWorkerModal()">Cancelar</button>
+        <button type="submit" class="btn btn-accent">
+          <i data-lucide="send" class="icon"></i> Enviar pra fila
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <!-- Schedule modal (sub-modal abrindo de cima do detail) -->
 <div id="sched-modal" class="modal-bg hidden" style="z-index:60" onclick="if(event.target===this) closeScheduleModal()">
   <div class="modal-card" style="max-width: 440px">
@@ -201,7 +225,10 @@
             <i data-lucide="save" class="icon"></i> Salvar alterações
           </button>
           <button class="btn btn-accent w-full" onclick="postNow()">
-            <i data-lucide="send" class="icon"></i> Postar agora em todas as contas
+            <i data-lucide="send" class="icon"></i> Postar agora (servidor)
+          </button>
+          <button class="btn btn-ghost w-full" onclick="openWorkerModal()" title="Posta usando worker (PC residencial) — anti-blacklist">
+            <i data-lucide="monitor" class="icon"></i> Postar via worker (IP residencial)
           </button>
           <button class="btn btn-ghost w-full" onclick="openScheduleModal()">
             <i data-lucide="calendar-clock" class="icon"></i> Agendar postagem
@@ -470,6 +497,61 @@
       await load();
     } catch (e) { toast(e.message, 'error'); }
   }
+
+  // ----- Worker dispatch modal -----
+
+  async function openWorkerModal() {
+    if (!currentVideo) return;
+    document.getElementById('worker-video-name').textContent = currentVideo.name;
+    const sel = document.getElementById('worker-account');
+    sel.innerHTML = '<option value="">Carregando…</option>';
+    // Popula contas (qualquer ativa, mesmo sem sessão — worker vai logar localmente)
+    try {
+      const [accounts, workers] = await Promise.all([
+        api('/api/accounts'),
+        api('/api/workers').catch(() => []),
+      ]);
+      const active = accounts.filter(a => a.active);
+      sel.innerHTML = active.length
+        ? active.map(a => `<option value="${a.username}">@${a.username}</option>`).join('')
+        : '<option value="">Nenhuma conta ativa</option>';
+
+      // Hint sobre workers online
+      const online = workers.filter(w => w.online);
+      const hint = document.getElementById('worker-status-hint');
+      if (online.length === 0) {
+        hint.innerHTML = `<span class="text-amber-300">⚠ Nenhum worker online agora.</span> O job vai ficar na fila até alguém abrir o worker no PC. Configure em <a href="/workers" class="underline">Workers</a>.`;
+      } else {
+        hint.innerHTML = `<strong class="text-emerald-300">${online.length} worker(s) online</strong> — o primeiro disponível pega o job.`;
+      }
+    } catch (e) {
+      sel.innerHTML = '<option value="">Erro ao carregar</option>';
+    }
+    document.getElementById('worker-modal').classList.remove('hidden');
+    if (window.lucide) lucide.createIcons();
+  }
+
+  function closeWorkerModal() {
+    document.getElementById('worker-modal').classList.add('hidden');
+  }
+
+  document.getElementById('worker-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (!currentVideo) return;
+    const fd = new FormData(e.target);
+    const account = fd.get('account');
+    if (!account) return;
+    try {
+      const r = await api('/api/remote-jobs', {
+        method: 'POST',
+        body: JSON.stringify({ video: currentVideo.name, account }),
+      });
+      toast(`Job enviado pra fila. Worker vai pegar em até 5s.`, 'success');
+      closeWorkerModal();
+      closeDetail();
+      setTimeout(() => location.href = `/jobs`, 400);
+    } catch (err) { toast(err.message, 'error'); }
+  });
 
   // ----- Schedule modal (depende do vídeo aberto no detail) -----
 

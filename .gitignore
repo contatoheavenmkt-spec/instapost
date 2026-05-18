@@ -15,6 +15,9 @@ users.json
 invites.json
 schedules.json
 links.json
+workers.json
+remote_jobs.json
 .secret.key
 .env
 data/
+.worker_tmp/

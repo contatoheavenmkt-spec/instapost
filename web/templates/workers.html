@@ -1,0 +1,227 @@
+{% extends "base.html" %}
+{% block title %}Workers · Insta Poster{% endblock %}
+{% block content %}
+
+<div class="flex items-end justify-between mb-6">
+  <div>
+    <h1 class="h-page">Workers</h1>
+    <p class="text-sm text-soft mt-1">PCs da equipe que executam disparos com IP residencial (anti-blacklist)</p>
+  </div>
+  <button class="btn btn-accent" onclick="openCreate()">
+    <i data-lucide="plus" class="icon"></i> Novo worker
+  </button>
+</div>
+
+<!-- Callout -->
+<div class="surface mb-5 p-4 flex items-start gap-3" style="border-left: 3px solid #3b82f6">
+  <i data-lucide="info" style="width:18px;height:18px;color:#3b82f6;margin-top:1px;flex-shrink:0"></i>
+  <div class="text-[13px] text-soft leading-relaxed">
+    Worker é um script Python que roda no <strong class="text-[var(--text)]">PC de cada membro</strong>. Conecta neste painel via token, recebe disparos atribuídos, posta no Instagram usando o IP residencial dele e reporta resultado. Cada token é único e revogável. Instruções de instalação: <a href="https://github.com/contatoheavenmkt-spec/instapost/blob/main/deploy/WORKER.md" target="_blank" class="underline">WORKER.md</a>.
+  </div>
+</div>
+
+<div class="surface overflow-hidden">
+  <table class="t">
+    <thead>
+      <tr>
+        <th>Nome</th>
+        <th style="width:130px">Status</th>
+        <th style="width:200px">Última atividade</th>
+        <th style="width:120px">IP</th>
+        <th style="width:140px">Plataforma</th>
+        <th style="width:140px" class="text-right pr-4">Ações</th>
+      </tr>
+    </thead>
+    <tbody id="workers-tbody"></tbody>
+  </table>
+  <div id="empty" class="hidden p-14 text-center">
+    <i data-lucide="monitor-off" style="width:36px;height:36px;color:var(--text-3);margin:0 auto 12px;display:block"></i>
+    <div class="text-sm font-medium text-[var(--text)] mb-1">Nenhum worker cadastrado</div>
+    <div class="text-xs text-muted">Clique em "Novo worker" pra gerar o primeiro token</div>
+  </div>
+</div>
+
+<!-- Create modal -->
+<div id="create-modal" class="modal-bg hidden" onclick="if(event.target===this) closeCreate()">
+  <div class="modal-card" style="max-width: 480px">
+    <div class="text-[15px] font-semibold mb-1">Novo worker</div>
+    <div class="text-[13px] text-soft mb-4">Dá um nome pro PC (ex: "Notebook do Edson")</div>
+    <form id="create-form" class="space-y-4">
+      <div>
+        <label class="label">Nome</label>
+        <input class="input" name="name" placeholder="ex: Notebook do Edson" required autofocus />
+      </div>
+      <div class="flex justify-end gap-2 pt-2 border-t border-line">
+        <button type="button" class="btn btn-ghost" onclick="closeCreate()">Cancelar</button>
+        <button type="submit" class="btn btn-accent"><i data-lucide="check" class="icon"></i> Gerar token</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Token reveal modal (1 vez só) -->
+<div id="token-modal" class="modal-bg hidden" onclick="if(event.target===this) closeToken()">
+  <div class="modal-card" style="max-width: 560px">
+    <div class="flex items-start gap-3 mb-3">
+      <i data-lucide="key-round" style="width:20px;height:20px;color:var(--accent);margin-top:2px"></i>
+      <div>
+        <div class="text-[15px] font-semibold">Worker criado</div>
+        <div class="text-[13px] text-soft mt-0.5" id="token-worker-name">—</div>
+      </div>
+    </div>
+
+    <div class="text-[13px] text-soft mb-3">
+      <strong class="text-amber-300">Copie esse token agora.</strong> Por segurança, ele não vai aparecer aqui de novo. Você cola ele no arquivo <span class="mono">.env</span> do worker.
+    </div>
+
+    <div class="surface-2 p-3 rounded-md mb-3">
+      <div class="text-[10px] uppercase tracking-wider text-muted font-semibold mb-1.5">Token</div>
+      <div class="flex items-center gap-2">
+        <code id="token-value" class="mono text-[11.5px] text-[var(--text)] flex-1 break-all"></code>
+        <button class="btn btn-ghost btn-sm" onclick="copyToken()">
+          <i data-lucide="copy" class="icon"></i> <span id="copy-label">Copiar</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="surface-2 p-3 rounded-md mb-3">
+      <div class="text-[10px] uppercase tracking-wider text-muted font-semibold mb-1.5">URL do servidor</div>
+      <code class="mono text-[12px] text-[var(--text)]" id="server-url">—</code>
+    </div>
+
+    <div class="text-[12px] text-soft mb-4 leading-relaxed">
+      <strong class="text-[var(--text)]">Como instalar o worker:</strong><br>
+      1. Baixa <a href="https://github.com/contatoheavenmkt-spec/instapost/blob/main/deploy/WORKER.md" target="_blank" class="underline">WORKER.md</a><br>
+      2. Cria <span class="mono">.env</span> com <span class="mono">WORKER_TOKEN</span> e <span class="mono">SERVER_URL</span><br>
+      3. Roda <span class="mono">python worker.py</span>
+    </div>
+
+    <div class="flex justify-end">
+      <button class="btn btn-primary" onclick="closeToken()">Entendi, fechei</button>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+  function escapeHtml(s) { return (s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+  function timeAgo(iso) {
+    if (!iso) return 'nunca';
+    const d = new Date(iso);
+    const s = Math.floor((Date.now() - d.getTime()) / 1000);
+    if (s < 60) return 'agora mesmo';
+    if (s < 3600) return `há ${Math.floor(s/60)} min`;
+    if (s < 86400) return `há ${Math.floor(s/3600)}h`;
+    return `há ${Math.floor(s/86400)}d`;
+  }
+
+  function render(workers) {
+    const tbody = document.getElementById('workers-tbody');
+    const empty = document.getElementById('empty');
+    if (!workers.length) {
+      tbody.innerHTML = '';
+      empty.classList.remove('hidden');
+      document.querySelector('table.t').classList.add('hidden');
+      return;
+    }
+    empty.classList.add('hidden');
+    document.querySelector('table.t').classList.remove('hidden');
+
+    tbody.innerHTML = workers.map(w => `
+      <tr>
+        <td>
+          <div class="font-medium text-[13px]">${escapeHtml(w.name)}</div>
+          <div class="text-[11px] text-muted mono mt-0.5">${w.id}</div>
+        </td>
+        <td>
+          ${w.online
+            ? '<span class="badge badge-success"><span class="dot dot-success dot-pulse"></span> online</span>'
+            : '<span class="badge badge-neutral"><span class="dot dot-muted"></span> offline</span>'}
+        </td>
+        <td class="text-[12px] text-soft mono">${timeAgo(w.last_seen)}</td>
+        <td class="text-[12px] mono text-soft">${w.last_ip || '<span class="text-muted">—</span>'}</td>
+        <td class="text-[12px] text-soft">${escapeHtml(w.platform) || '<span class="text-muted">—</span>'}</td>
+        <td class="text-right pr-4">
+          <button class="btn btn-danger btn-sm" onclick="onRevoke('${w.id}', '${escapeHtml(w.name)}')" title="Revogar token">
+            <i data-lucide="trash-2" class="icon"></i>
+          </button>
+        </td>
+      </tr>
+    `).join('');
+    if (window.lucide) lucide.createIcons();
+  }
+
+  async function load() {
+    try {
+      const list = await api('/api/workers');
+      render(list);
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  // ----- Create -----
+
+  function openCreate() {
+    document.getElementById('create-modal').classList.remove('hidden');
+    document.querySelector('#create-form [name=name]').focus();
+    if (window.lucide) lucide.createIcons();
+  }
+  function closeCreate() { document.getElementById('create-modal').classList.add('hidden'); }
+
+  document.getElementById('create-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    try {
+      const r = await api('/api/workers', { method: 'POST', body: JSON.stringify({ name: fd.get('name') }) });
+      closeCreate();
+      e.target.reset();
+      showToken(r.worker);
+      await load();
+    } catch (err) { toast(err.message, 'error'); }
+  });
+
+  // ----- Token reveal -----
+
+  function showToken(w) {
+    document.getElementById('token-worker-name').textContent = w.name;
+    document.getElementById('token-value').textContent = w.token;
+    document.getElementById('server-url').textContent = location.origin;
+    document.getElementById('copy-label').textContent = 'Copiar';
+    document.getElementById('token-modal').classList.remove('hidden');
+    if (window.lucide) lucide.createIcons();
+  }
+  function closeToken() { document.getElementById('token-modal').classList.add('hidden'); }
+
+  async function copyToken() {
+    const v = document.getElementById('token-value').textContent;
+    try {
+      await navigator.clipboard.writeText(v);
+      document.getElementById('copy-label').textContent = 'Copiado!';
+      toast('Token copiado', 'success');
+    } catch {
+      toast('Não consegui copiar — copia manual', 'error');
+    }
+  }
+
+  // ----- Revoke -----
+
+  async function onRevoke(id, name) {
+    const ok = await confirmModal({
+      title: `Revogar token de "${name}"?`,
+      message: 'O worker para de funcionar imediatamente. Não tem como desfazer — pra reativar, precisa criar outro.',
+      danger: true,
+      confirmText: 'Revogar',
+    });
+    if (!ok) return;
+    try {
+      await api(`/api/workers/${id}/revoke`, { method: 'POST' });
+      toast('Worker revogado', 'success');
+      await load();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  load();
+  setInterval(load, 10000);
+</script>
+{% endblock %}

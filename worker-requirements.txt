@@ -1,0 +1,4 @@
+# Dependências mínimas pro worker — bem menor que o server
+# (sem FastAPI, sem moviepy/pillow etc — só Insta + HTTP)
+instagrapi>=2.0.0
+requests>=2.31.0

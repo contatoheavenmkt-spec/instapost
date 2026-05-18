@@ -96,17 +96,40 @@
 
   function statusBadge(s) {
     if (s === 'running') return '<span class="badge badge-warning"><span class="dot dot-warning dot-pulse"></span> rodando</span>';
-    if (s === 'finished') return '<span class="badge badge-success"><span class="dot dot-success"></span> concluído</span>';
+    if (s === 'finished' || s === 'done') return '<span class="badge badge-success"><span class="dot dot-success"></span> concluído</span>';
     if (s === 'error') return '<span class="badge badge-danger"><span class="dot dot-danger"></span> erro</span>';
     if (s === 'cancelled') return '<span class="badge badge-neutral">cancelado</span>';
+    if (s === 'pending') return '<span class="badge badge-neutral">aguardando worker</span>';
+    if (s === 'claimed') return '<span class="badge badge-warning">worker pegou</span>';
     return `<span class="badge badge-neutral">${s}</span>`;
   }
 
   async function loadJobs() {
     try {
-      const jobs = await api('/api/jobs');
+      const [local, remote] = await Promise.all([
+        api('/api/jobs'),
+        api('/api/remote-jobs').catch(() => []),
+      ]);
+
+      // Normaliza pra um schema comum
+      const allJobs = [
+        ...local.map(j => ({
+          ...j,
+          _kind: 'local',
+          _time: j.started_at,
+          _desc: j.label,
+        })),
+        ...remote.map(r => ({
+          ...r,
+          _kind: 'remote',
+          _time: r.created_at,
+          _desc: `${r.video_name} → @${r.account_username}`,
+          kind: 'worker',
+        })),
+      ].sort((a, b) => (b._time || '').localeCompare(a._time || ''));
+
       const wrap = document.getElementById('jobs-table-wrap');
-      if (!jobs.length) {
+      if (!allJobs.length) {
         wrap.innerHTML = `<div class="p-12 text-center"><div class="text-sm text-soft">Nenhum disparo ainda</div></div>`;
         return;
       }
@@ -114,15 +137,21 @@
         <table class="t">
           <thead><tr><th>Início</th><th>Tipo</th><th>Descrição</th><th>Status</th><th></th></tr></thead>
           <tbody>
-            ${jobs.map(j => `
-              <tr class="cursor-pointer" onclick="location.href='/jobs/${j.id}'">
-                <td class="mono text-[11.5px] text-soft">${j.started_at || '—'}</td>
-                <td><span class="badge badge-neutral">${j.kind}</span></td>
-                <td>${j.label}</td>
+            ${allJobs.map(j => {
+              const clickable = j._kind === 'local';
+              const onclickAttr = clickable ? `onclick="location.href='/jobs/${j.id}'"` : '';
+              const typeBadge = j._kind === 'remote'
+                ? '<span class="badge badge-neutral"><i data-lucide="monitor" style="width:10px;height:10px"></i> worker</span>'
+                : `<span class="badge badge-neutral">${j.kind || 'local'}</span>`;
+              return `
+              <tr class="${clickable ? 'cursor-pointer' : ''}" ${onclickAttr}>
+                <td class="mono text-[11.5px] text-soft">${j._time || '—'}</td>
+                <td>${typeBadge}</td>
+                <td>${j._desc || ''}</td>
                 <td>${statusBadge(j.status)}</td>
-                <td class="text-right"><i data-lucide="chevron-right" style="width:14px;height:14px;color:var(--text-3)"></i></td>
+                <td class="text-right">${clickable ? '<i data-lucide="chevron-right" style="width:14px;height:14px;color:var(--text-3)"></i>' : ''}</td>
               </tr>
-            `).join('')}
+            `}).join('')}
           </tbody>
         </table>`;
       if (window.lucide) lucide.createIcons();

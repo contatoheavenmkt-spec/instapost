@@ -34,6 +34,8 @@ from web.jobs import manager as job_manager  # noqa: E402
 from web import auth  # noqa: E402
 from web import scheduler as scheduler_mod  # noqa: E402
 from web.shortener import manager as link_manager  # noqa: E402
+from web.workers import manager as worker_manager  # noqa: E402
+from web.remote_jobs import manager as rjob_manager  # noqa: E402
 from core.media import generate_thumbnail  # noqa: E402
 from core.paths import (  # noqa: E402
     ACCOUNTS_FILE, PENDING_DIR, POSTED_DIR, SESSIONS_DIR, LOGS_DIR,
@@ -52,8 +54,9 @@ app = FastAPI(title="Insta Poster", version="0.1.0")
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-# Rotas que dispensam login (login, signup via convite, estáticos, health, redirect curto)
-PUBLIC_PATH_PREFIXES = ("/login", "/signup/", "/static/", "/api/health", "/r/")
+# Rotas que dispensam login do PAINEL (login, signup, estáticos, health, redirect curto, API do worker)
+# API do worker tem auth própria via header X-Worker-Token (em vez de cookie de sessão)
+PUBLIC_PATH_PREFIXES = ("/login", "/signup/", "/static/", "/api/health", "/r/", "/api/worker/")
 
 
 class RequireLoginMiddleware(BaseHTTPMiddleware):
@@ -869,6 +872,229 @@ def public_redirect(slug: str, request: Request):
             status_code=404,
         )
     return RedirectResponse(target, status_code=302)
+
+
+# ---------- WORKERS (admin) ----------
+
+class WorkerIn(BaseModel):
+    name: str
+
+
+@app.get("/workers", response_class=HTMLResponse)
+def page_workers(request: Request, owner=Depends(auth.require_owner)):
+    return templates.TemplateResponse(
+        request, "workers.html", _ctx(request, active="workers"),
+    )
+
+
+@app.get("/api/workers")
+def api_list_workers(owner=Depends(auth.require_owner)):
+    # Hide token na listagem geral (mostra só quando cria — pra copiar uma vez)
+    return worker_manager.list(hide_token=True)
+
+
+@app.post("/api/workers")
+def api_create_worker(payload: WorkerIn, owner=Depends(auth.require_owner)):
+    w = worker_manager.create(name=payload.name, created_by=owner["email"])
+    # Retorna COM token (única vez que mostra)
+    return {"ok": True, "worker": w.to_dict(hide_token=False)}
+
+
+@app.post("/api/workers/{worker_id}/revoke")
+def api_revoke_worker(worker_id: str, owner=Depends(auth.require_owner)):
+    if not worker_manager.revoke(worker_id):
+        raise HTTPException(404, "Worker não encontrado")
+    return {"ok": True}
+
+
+# ---------- WORKER API (consumido pelos workers — auth via X-Worker-Token) ----------
+
+def _require_worker(request: Request):
+    """Dependency que valida X-Worker-Token e retorna o Worker."""
+    token = request.headers.get("X-Worker-Token", "").strip()
+    if not token:
+        raise HTTPException(401, "X-Worker-Token header obrigatório")
+    w = worker_manager.by_token(token)
+    if not w:
+        raise HTTPException(401, "Token inválido")
+    return w
+
+
+class WorkerHeartbeatIn(BaseModel):
+    platform: Optional[str] = None
+
+
+@app.post("/api/worker/heartbeat")
+def api_worker_heartbeat(payload: WorkerHeartbeatIn, request: Request):
+    token = request.headers.get("X-Worker-Token", "").strip()
+    if not token:
+        raise HTTPException(401, "X-Worker-Token header obrigatório")
+    ip = request.client.host if request.client else ""
+    w = worker_manager.heartbeat(token=token, ip=ip, platform=payload.platform or "")
+    if not w:
+        raise HTTPException(401, "Token inválido")
+    return {"ok": True, "worker_id": w.id, "name": w.name}
+
+
+@app.get("/api/worker/jobs/next")
+def api_worker_next_job(request: Request):
+    w = _require_worker(request)
+    job = rjob_manager.claim_next(worker_id=w.id)
+    if not job:
+        return {"job": None}
+    # Inclui credenciais (worker precisa pra logar no Insta)
+    d = job.to_dict(include_secrets=True, include_logs=False)
+    # Reescreve a media_url pra apontar pra rota worker (que aceita X-Worker-Token)
+    d["media_url"] = f"{str(request.base_url).rstrip('/')}/api/worker/media/{job.video_name}"
+    return {"job": d}
+
+
+@app.get("/api/worker/media/{name}")
+def api_worker_media(name: str, request: Request):
+    """Download de mídia pelo worker. Auth via X-Worker-Token."""
+    _require_worker(request)
+    name = safe_name(name)
+    # Tenta pending primeiro, depois posted (caso arquivado entre criação e execução)
+    for folder in (PENDING_DIR, POSTED_DIR):
+        media = folder / name
+        if media.exists():
+            ext = media.suffix.lower()
+            mime_map = {
+                ".mp4": "video/mp4",
+                ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".png": "image/png", ".webp": "image/webp",
+            }
+            from fastapi.responses import FileResponse
+            return FileResponse(media, media_type=mime_map.get(ext, "application/octet-stream"))
+    raise HTTPException(404, "Mídia não encontrada")
+
+
+class WorkerLogIn(BaseModel):
+    line: str
+
+
+@app.post("/api/worker/jobs/{job_id}/log")
+def api_worker_job_log(job_id: str, payload: WorkerLogIn, request: Request):
+    w = _require_worker(request)
+    if not rjob_manager.append_log(job_id=job_id, worker_id=w.id, line=payload.line):
+        raise HTTPException(404, "Job não encontrado ou não atribuído a esse worker")
+    return {"ok": True}
+
+
+@app.post("/api/worker/jobs/{job_id}/start")
+def api_worker_job_start(job_id: str, request: Request):
+    w = _require_worker(request)
+    if not rjob_manager.mark_running(job_id=job_id, worker_id=w.id):
+        raise HTTPException(404, "Job não encontrado ou não atribuído a esse worker")
+    return {"ok": True}
+
+
+class WorkerResultIn(BaseModel):
+    success: bool
+    media_id: Optional[str] = None
+    error_msg: Optional[str] = None
+
+
+@app.post("/api/worker/jobs/{job_id}/result")
+def api_worker_job_result(job_id: str, payload: WorkerResultIn, request: Request):
+    w = _require_worker(request)
+    ok = rjob_manager.report_result(
+        job_id=job_id, worker_id=w.id,
+        success=payload.success,
+        media_id=payload.media_id,
+        error_msg=payload.error_msg,
+    )
+    if not ok:
+        raise HTTPException(404, "Job não encontrado ou não atribuído a esse worker")
+    return {"ok": True}
+
+
+# ---------- REMOTE JOBS (criado pelo painel, executado por worker) ----------
+
+class RemoteJobIn(BaseModel):
+    video: str               # nome do arquivo em pending/
+    account: str             # username Instagram
+
+
+@app.get("/api/remote-jobs")
+def api_list_remote_jobs(user=Depends(auth.require_user)):
+    return rjob_manager.list()
+
+
+@app.get("/api/remote-jobs/{job_id}")
+def api_get_remote_job(job_id: str, user=Depends(auth.require_user)):
+    j = rjob_manager.get(job_id)
+    if not j:
+        raise HTTPException(404, "Job não encontrado")
+    return j.to_dict(include_secrets=False)
+
+
+@app.post("/api/remote-jobs")
+def api_create_remote_job(payload: RemoteJobIn, request: Request, user=Depends(auth.require_user)):
+    # Valida video
+    video_name = safe_name(payload.video)
+    media_path = PENDING_DIR / video_name
+    if not media_path.exists():
+        raise HTTPException(404, f"Mídia '{video_name}' não está em pending")
+
+    # Valida conta
+    accounts = load_accounts()
+    account = next((a for a in accounts if a["username"] == payload.account), None)
+    if not account:
+        raise HTTPException(404, f"Conta @{payload.account} não existe")
+
+    # Lê meta + caption do arquivo
+    from core.poster import load_meta, detect_media_kind, load_caption
+    meta = load_meta(str(media_path))
+    media_type = detect_media_kind(str(media_path))
+    caption = load_caption(str(media_path))
+
+    # Monta URL pública pro worker baixar a mídia
+    base = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/") or str(request.base_url).rstrip("/")
+    media_url = f"{base}/api/videos/pending/{video_name}/stream"
+
+    # Se for story+link, gera 1 short link pra essa conta (anti-cluster)
+    link_url = meta.get("link_url")
+    if meta.get("kind") == "story" and link_url:
+        try:
+            shortened = link_manager.create(
+                target_url=link_url,
+                label=f"story · @{payload.account}",
+                account=payload.account,
+                created_by=user["email"],
+            )
+            link_url = f"{base}/r/{shortened.slug}"
+        except Exception as e:
+            print(f"[remote_job] shortener falhou: {e} — usando URL original")
+
+    job = rjob_manager.create({
+        "account_username": account["username"],
+        "account_password": account["password"],
+        "account_totp_secret": account.get("totp_secret"),
+        "account_proxy": account.get("proxy"),
+        "video_name": video_name,
+        "media_type": media_type,
+        "kind": meta.get("kind", "reel"),
+        "caption": caption,
+        "link_url": link_url,
+        "media_url": media_url,
+        "created_by": user["email"],
+    })
+    return {"ok": True, "job": job.to_dict(include_secrets=False)}
+
+
+@app.post("/api/remote-jobs/{job_id}/cancel")
+def api_cancel_remote_job(job_id: str, user=Depends(auth.require_user)):
+    if not rjob_manager.cancel(job_id):
+        raise HTTPException(400, "Job não pode ser cancelado (já rodou ou foi removido)")
+    return {"ok": True}
+
+
+@app.post("/api/remote-jobs/{job_id}/delete")
+def api_delete_remote_job(job_id: str, user=Depends(auth.require_user)):
+    if not rjob_manager.delete(job_id):
+        raise HTTPException(404, "Job não encontrado")
+    return {"ok": True}
 
 
 # ---------- AUTH: pages ----------
