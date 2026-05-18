@@ -84,8 +84,8 @@
         <th>Conta</th>
         <th style="width:120px">Status</th>
         <th style="width:140px">Sessão</th>
-        <th>Proxy</th>
-        <th style="width:280px" class="text-right pr-4">Ações</th>
+        <th style="width:120px">Automações</th>
+        <th style="width:320px" class="text-right pr-4">Ações</th>
       </tr>
     </thead>
     <tbody id="accounts-tbody"></tbody>
@@ -94,6 +94,114 @@
     <i data-lucide="users" style="width:36px;height:36px;color:var(--text-3);margin:0 auto 12px;display:block"></i>
     <div class="text-sm text-soft mb-1">Nenhuma conta cadastrada</div>
     <div class="text-xs text-muted">Clique em "Nova conta" para começar</div>
+  </div>
+</div>
+
+<!-- Profile editor modal -->
+<div id="profile-modal" class="modal-bg hidden" onclick="if(event.target===this) closeProfileEditor()">
+  <div class="modal-card" style="max-width: 720px; width: 100%">
+    <div class="flex items-center justify-between mb-1">
+      <div class="text-[16px] font-semibold">Editar perfil + automações</div>
+      <button class="btn btn-ghost btn-sm" onclick="closeProfileEditor()"><i data-lucide="x" class="icon"></i></button>
+    </div>
+    <div class="text-[13px] text-soft mb-4" id="profile-username">—</div>
+
+    <div class="grid grid-cols-5 gap-5">
+      <!-- Foto -->
+      <div class="col-span-2 surface-2 p-3 rounded-md">
+        <div class="text-[11px] uppercase tracking-wider text-muted font-semibold mb-2">Foto de perfil</div>
+        <div class="aspect-square rounded-full overflow-hidden bg-[var(--surface)] flex items-center justify-center mb-3" style="max-width: 180px; margin: 0 auto">
+          <img id="profile-current-pic" src="" alt="" style="width:100%;height:100%;object-fit:cover" onerror="this.style.display='none'" />
+          <i data-lucide="user" id="profile-pic-placeholder" style="width:60px;height:60px;color:var(--text-3)"></i>
+        </div>
+        <input type="file" id="profile-pic-input" accept="image/jpeg,image/png" class="hidden" />
+        <button class="btn btn-ghost w-full justify-center" onclick="document.getElementById('profile-pic-input').click()">
+          <i data-lucide="upload" class="icon"></i> Trocar foto
+        </button>
+        <div id="profile-pic-name" class="text-[11px] text-muted mt-1 text-center"></div>
+      </div>
+
+      <!-- Bio + nome + link -->
+      <div class="col-span-3 space-y-3">
+        <div>
+          <label class="label">Nome de exibição</label>
+          <input id="profile-fullname" class="input" placeholder="Seu nome" maxlength="64" />
+        </div>
+        <div>
+          <label class="label">Bio</label>
+          <textarea id="profile-bio" class="textarea text-[12px]" rows="3" placeholder="Conta sobre você" maxlength="150"></textarea>
+          <div class="text-[10.5px] text-muted mt-0.5"><span id="bio-counter">0</span> / 150</div>
+        </div>
+        <div>
+          <label class="label">Link da bio (external_url)</label>
+          <input id="profile-link" class="input mono text-[12px]" placeholder="https://meusite.com" />
+        </div>
+
+        <!-- Stats (read-only) -->
+        <div id="profile-stats" class="grid grid-cols-3 gap-2 pt-2 border-t border-line text-center text-[11px] text-soft hidden">
+          <div><div class="font-semibold text-[14px] text-[var(--text)]" id="stat-posts">—</div><div>posts</div></div>
+          <div><div class="font-semibold text-[14px] text-[var(--text)]" id="stat-followers">—</div><div>seguidores</div></div>
+          <div><div class="font-semibold text-[14px] text-[var(--text)]" id="stat-following">—</div><div>seguindo</div></div>
+        </div>
+        <button class="btn btn-ghost btn-sm w-full" onclick="loadProfileInfo()">
+          <i data-lucide="refresh-cw" class="icon"></i> Buscar info atual
+        </button>
+      </div>
+    </div>
+
+    <!-- Automações -->
+    <div class="mt-5 pt-5 border-t border-line">
+      <div class="text-[14px] font-semibold mb-3 flex items-center gap-2">
+        <i data-lucide="zap" style="width:16px;height:16px;color:var(--accent)"></i>
+        Automações dessa conta
+      </div>
+      <div class="space-y-3">
+        <!-- Auto like -->
+        <div class="surface-2 p-3 rounded-md">
+          <div class="flex items-center justify-between mb-2">
+            <div>
+              <div class="text-[13px] font-medium">Auto-curtir comentários nos meus Reels</div>
+              <div class="text-[11px] text-soft">Worker passa pelos posts e curte comentários ainda não curtidos, espaçado ao longo do dia (7h–22h)</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="auto-like-toggle" />
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="flex items-center gap-2 text-[12px] text-soft">
+            <span>Limite diário:</span>
+            <input id="auto-like-max" type="number" min="0" max="100" class="input" style="width: 80px; padding: 4px 8px" value="40" />
+            <span class="text-muted">likes/dia (rec: 30–50)</span>
+          </div>
+        </div>
+
+        <!-- Auto follow back -->
+        <div class="surface-2 p-3 rounded-md">
+          <div class="flex items-center justify-between mb-2">
+            <div>
+              <div class="text-[13px] font-medium">Seguir de volta novos seguidores</div>
+              <div class="text-[11px] text-soft">Quando alguém te seguir, worker segue de volta. Só seguidores reais novos, espaçado ao longo do dia</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="auto-followback-toggle" />
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="flex items-center gap-2 text-[12px] text-soft">
+            <span>Limite diário:</span>
+            <input id="auto-followback-max" type="number" min="0" max="50" class="input" style="width: 80px; padding: 4px 8px" value="10" />
+            <span class="text-muted">follow-back/dia (rec: 5–15)</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="flex justify-end gap-2 pt-5 border-t border-line mt-5">
+      <button class="btn btn-ghost" onclick="closeProfileEditor()">Cancelar</button>
+      <button class="btn btn-accent" onclick="saveProfileEditor()">
+        <i data-lucide="check" class="icon"></i> Aplicar alterações
+      </button>
+    </div>
   </div>
 </div>
 
@@ -121,6 +229,17 @@
     return '<span class="badge badge-neutral">vazia</span>';
   }
 
+  function automationBadge(a) {
+    const parts = [];
+    if (a.auto_like_enabled) {
+      parts.push(`<span class="badge badge-success" title="Auto-like ligado (${a.auto_like_today_count}/${a.auto_like_max_per_day} hoje)"><i data-lucide="heart" style="width:11px;height:11px"></i> ${a.auto_like_today_count}/${a.auto_like_max_per_day}</span>`);
+    }
+    if (a.auto_follow_back_enabled) {
+      parts.push(`<span class="badge badge-success" title="Auto follow-back ligado (${a.auto_follow_back_today_count}/${a.auto_follow_back_max_per_day} hoje)"><i data-lucide="user-plus" style="width:11px;height:11px"></i> ${a.auto_follow_back_today_count}/${a.auto_follow_back_max_per_day}</span>`);
+    }
+    return parts.length ? `<div class="flex flex-wrap gap-1">${parts.join('')}</div>` : '<span class="text-muted text-[12px]">—</span>';
+  }
+
   function render() {
     const tbody = document.getElementById('accounts-tbody');
     const empty = document.getElementById('empty-state');
@@ -146,25 +265,22 @@
         </td>
         <td>${statusDot(a.active, a.session, a.connected_via_worker_name)}</td>
         <td>${sessionBadge(a.session, a.connected_via_worker_name)}</td>
-        <td class="mono text-[12px] text-soft">${a.proxy || '<span class="text-muted">—</span>'}</td>
+        <td>${automationBadge(a)}</td>
         <td class="text-right pr-4">
           <div class="inline-flex items-center gap-1.5">
             <label class="switch" title="${a.active ? 'Pausar' : 'Ativar'}">
               <input type="checkbox" ${a.active ? 'checked' : ''} onchange="onToggle('${a.username}')" />
               <span class="slider"></span>
             </label>
-            <button class="btn btn-subtle btn-sm" onclick="onConnectViaWorker('${a.username}')" title="Conecta a conta usando seu computador">
+            <button class="btn btn-subtle btn-sm" onclick="onConnectViaWorker('${a.username}')" title="Conectar conta">
               <i data-lucide="log-in" class="icon"></i> Conectar
+            </button>
+            <button class="btn btn-ghost btn-sm" onclick="onOpenProfileEditor('${a.username}')" title="Editar perfil e automações">
+              <i data-lucide="user-cog" class="icon"></i>
             </button>
             <button class="btn btn-ghost btn-sm" onclick="onEditTotp('${a.username}', ${a.has_totp})" title="${a.has_totp ? 'Atualizar' : 'Adicionar'} chave 2FA">
               <i data-lucide="shield" class="icon"></i>
             </button>
-            ${a.has_totp
-              ? `<button class="btn btn-ghost btn-sm" onclick="onShowTotp('${a.username}')" title="Ver código 2FA atual (pra conferir se a chave tá certa)"><i data-lucide="eye" class="icon"></i></button>`
-              : ''}
-            ${a.session === 'saved'
-              ? `<button class="btn btn-ghost btn-sm" onclick="onClearSession('${a.username}')" title="Apagar sessão salva"><i data-lucide="key-round" class="icon"></i></button>`
-              : ''}
             <button class="btn btn-danger btn-sm" onclick="onDelete('${a.username}')" title="Remover conta">
               <i data-lucide="trash-2" class="icon"></i>
             </button>
@@ -318,6 +434,155 @@
         body: JSON.stringify({ totp_secret: value }),
       });
       toast(r.has_totp ? `Chave 2FA salva pra @${username}` : `2FA removido de @${username}`, 'success');
+      await load();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  // ===== PROFILE EDITOR MODAL =====
+
+  let editingUsername = null;
+  let selectedPicFile = null;
+
+  function onOpenProfileEditor(username) {
+    const a = accounts.find(x => x.username === username);
+    if (!a) return;
+    editingUsername = username;
+    selectedPicFile = null;
+    document.getElementById('profile-username').textContent = `@${username}`;
+    document.getElementById('profile-fullname').value = '';
+    document.getElementById('profile-bio').value = '';
+    document.getElementById('profile-link').value = '';
+    document.getElementById('bio-counter').textContent = '0';
+    document.getElementById('profile-pic-name').textContent = '';
+    document.getElementById('profile-current-pic').src = '';
+    document.getElementById('profile-current-pic').style.display = 'none';
+    document.getElementById('profile-pic-placeholder').style.display = '';
+    document.getElementById('profile-stats').classList.add('hidden');
+    document.getElementById('auto-like-toggle').checked = !!a.auto_like_enabled;
+    document.getElementById('auto-like-max').value = a.auto_like_max_per_day || 40;
+    document.getElementById('auto-followback-toggle').checked = !!a.auto_follow_back_enabled;
+    document.getElementById('auto-followback-max').value = a.auto_follow_back_max_per_day || 10;
+    document.getElementById('profile-modal').classList.remove('hidden');
+    if (window.lucide) lucide.createIcons();
+  }
+
+  function closeProfileEditor() {
+    document.getElementById('profile-modal').classList.add('hidden');
+    editingUsername = null;
+    selectedPicFile = null;
+  }
+
+  document.getElementById('profile-bio').addEventListener('input', (e) => {
+    document.getElementById('bio-counter').textContent = e.target.value.length;
+  });
+
+  document.getElementById('profile-pic-input').addEventListener('change', (e) => {
+    const f = e.target.files[0];
+    if (f) {
+      selectedPicFile = f;
+      document.getElementById('profile-pic-name').textContent = f.name;
+      // Preview
+      const url = URL.createObjectURL(f);
+      const img = document.getElementById('profile-current-pic');
+      img.src = url;
+      img.style.display = '';
+      document.getElementById('profile-pic-placeholder').style.display = 'none';
+    }
+  });
+
+  async function loadProfileInfo() {
+    if (!editingUsername) return;
+    try {
+      toast(`Buscando info de @${editingUsername}…`, 'info');
+      const r = await api(`/api/accounts/${editingUsername}/profile-info`, { method: 'GET' });
+      // Aguarda worker processar (até 30s)
+      const jobId = r.job_id;
+      for (let i = 0; i < 15; i++) {
+        await new Promise(r => setTimeout(r, 2000));
+        const job = await api(`/api/remote-jobs/${jobId}`);
+        if (job.status === 'done' && job.result_data) {
+          const info = job.result_data;
+          document.getElementById('profile-fullname').value = info.full_name || '';
+          document.getElementById('profile-bio').value = info.biography || '';
+          document.getElementById('profile-link').value = info.external_url || '';
+          document.getElementById('bio-counter').textContent = (info.biography || '').length;
+          if (info.profile_pic_url) {
+            const img = document.getElementById('profile-current-pic');
+            img.src = info.profile_pic_url;
+            img.style.display = '';
+            document.getElementById('profile-pic-placeholder').style.display = 'none';
+          }
+          document.getElementById('stat-posts').textContent = info.media_count ?? '—';
+          document.getElementById('stat-followers').textContent = info.follower_count ?? '—';
+          document.getElementById('stat-following').textContent = info.following_count ?? '—';
+          document.getElementById('profile-stats').classList.remove('hidden');
+          toast('Info carregada', 'success');
+          return;
+        }
+        if (job.status === 'error') {
+          toast(`Falhou: ${job.error_msg}`, 'error');
+          return;
+        }
+      }
+      toast('Sem resposta do worker em 30s — está rodando?', 'error');
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  async function saveProfileEditor() {
+    if (!editingUsername) return;
+    const username = editingUsername;
+    const fullname = document.getElementById('profile-fullname').value.trim();
+    const bio = document.getElementById('profile-bio').value.trim();
+    const link = document.getElementById('profile-link').value.trim();
+    const autoLike = document.getElementById('auto-like-toggle').checked;
+    const autoLikeMax = parseInt(document.getElementById('auto-like-max').value) || 40;
+    const autoFb = document.getElementById('auto-followback-toggle').checked;
+    const autoFbMax = parseInt(document.getElementById('auto-followback-max').value) || 10;
+
+    let count = 0;
+    try {
+      // 1. Salvar automações (sempre, não vai pro worker)
+      await api(`/api/accounts/${username}/automations`, {
+        method: 'POST',
+        body: JSON.stringify({
+          auto_like_enabled: autoLike,
+          auto_like_max_per_day: autoLikeMax,
+          auto_follow_back_enabled: autoFb,
+          auto_follow_back_max_per_day: autoFbMax,
+        }),
+      });
+
+      // 2. Se editou perfil (bio/nome/link), cria job
+      if (fullname || bio || link) {
+        await api('/api/accounts/edit-profile', {
+          method: 'POST',
+          body: JSON.stringify({
+            accounts: [username],
+            full_name: fullname || null,
+            biography: bio || null,
+            external_url: link || null,
+          }),
+        });
+        count++;
+      }
+
+      // 3. Se trocou foto, cria job de upload
+      if (selectedPicFile) {
+        const fd = new FormData();
+        fd.append('accounts', JSON.stringify([username]));
+        fd.append('image', selectedPicFile);
+        const res = await fetch('/api/accounts/change-picture', { method: 'POST', body: fd });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `Erro ${res.status}`);
+        count++;
+      }
+
+      if (count > 0) {
+        toast(`Configurações salvas + ${count} job(s) enviado(s) pro worker`, 'success');
+      } else {
+        toast('Automações salvas', 'success');
+      }
+      closeProfileEditor();
       await load();
     } catch (e) { toast(e.message, 'error'); }
   }

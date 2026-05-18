@@ -105,13 +105,17 @@ def log_to_server(job_id: str, line: str):
         pass
 
 
-def report_result(job_id: str, success: bool, media_id: str = None, error_msg: str = None):
+def report_result(job_id: str, success: bool, media_id: str = None,
+                  error_msg: str = None, result_data: dict = None):
     try:
-        post(f"/api/worker/jobs/{job_id}/result", {
+        payload = {
             "success": success,
             "media_id": media_id,
             "error_msg": error_msg,
-        })
+        }
+        if result_data is not None:
+            payload["result_data"] = result_data
+        post(f"/api/worker/jobs/{job_id}/result", payload)
     except Exception as e:
         print(f"[result] falhou enviar: {e}")
 
@@ -141,6 +145,7 @@ def execute_job(job: dict):
     job_id = job["id"]
     username = job["account_username"]
     operation = job.get("operation", "post")
+    params = job.get("params") or {}
 
     def log(msg):
         print(f"[{job_id[:8]}] {msg}")
@@ -148,34 +153,167 @@ def execute_job(job: dict):
 
     mark_started(job_id)
 
-    # Importa core (mesmo pra test_login, precisa do get_client)
+    # Importa core
     try:
         from core.session import get_client
         from core.poster import post_reel, post_story_photo, post_story_video
+        from core.profile import (
+            get_profile_info, edit_profile_info, change_profile_picture,
+            auto_like_own_recent_comments, auto_follow_back_new_followers,
+        )
     except ImportError as e:
         log(f"❌ módulos core não encontrados: {e}")
         log("Rode o worker dentro da pasta do projeto: python worker.py")
         report_result(job_id, False, error_msg=f"import: {e}")
         return
 
+    # Helper: faz login do Instagram (compartilhado entre operations)
+    def do_login():
+        return get_client(
+            username=username,
+            password=job["account_password"],
+            proxy=job.get("account_proxy"),
+            totp_secret=job.get("account_totp_secret"),
+        )
+
     # =====================================================
-    # OPERAÇÃO: test_login (só valida login, não posta)
+    # OPERAÇÃO: test_login
     # =====================================================
     if operation == "test_login":
         log(f"conectando @{username} (apenas login, sem post)")
         try:
-            cl = get_client(
-                username=username,
-                password=job["account_password"],
-                proxy=job.get("account_proxy"),
-                totp_secret=job.get("account_totp_secret"),
-            )
-            # Valida que a sessão funciona
+            cl = do_login()
             info = cl.account_info()
             log(f"✅ conectado como @{info.username} ({info.full_name})")
             report_result(job_id, True, media_id="session_ok")
         except Exception as e:
             log(f"❌ falha conexão: {e}")
+            report_result(job_id, False, error_msg=str(e))
+        return
+
+    # =====================================================
+    # OPERAÇÃO: get_profile_info
+    # =====================================================
+    if operation == "get_profile_info":
+        log(f"buscando info do perfil @{username}")
+        try:
+            cl = do_login()
+            info = get_profile_info(cl)
+            if info.get("error"):
+                report_result(job_id, False, error_msg=info["error"])
+            else:
+                log(f"✓ {info.get('follower_count')} seguidores")
+                report_result(job_id, True, result_data=info)
+        except Exception as e:
+            log(f"❌ falha: {e}")
+            report_result(job_id, False, error_msg=str(e))
+        return
+
+    # =====================================================
+    # OPERAÇÃO: edit_profile (bio, nome, link)
+    # =====================================================
+    if operation == "edit_profile":
+        log(f"editando perfil @{username}")
+        try:
+            cl = do_login()
+            r = edit_profile_info(
+                cl,
+                biography=params.get("biography"),
+                full_name=params.get("full_name"),
+                external_url=params.get("external_url"),
+            )
+            if r.get("success"):
+                log("✅ perfil atualizado")
+                report_result(job_id, True)
+            else:
+                log(f"❌ {r.get('error')}")
+                report_result(job_id, False, error_msg=r.get("error"))
+        except Exception as e:
+            log(f"❌ exceção: {e}")
+            report_result(job_id, False, error_msg=str(e))
+        return
+
+    # =====================================================
+    # OPERAÇÃO: change_picture (foto de perfil)
+    # =====================================================
+    if operation == "change_picture":
+        media_url = params.get("image_url") or job.get("media_url")
+        if not media_url:
+            log("❌ image_url ausente nos params")
+            report_result(job_id, False, error_msg="image_url ausente")
+            return
+        log(f"trocando foto de perfil @{username}")
+        # Baixa a imagem
+        image_path = TMP_DIR / f"{job_id}_profile.jpg"
+        try:
+            download_media(media_url, image_path)
+            log(f"foto baixada ({image_path.stat().st_size // 1024} KB)")
+        except Exception as e:
+            log(f"❌ download falhou: {e}")
+            report_result(job_id, False, error_msg=f"download: {e}")
+            return
+        try:
+            cl = do_login()
+            r = change_profile_picture(cl, str(image_path))
+            if r.get("success"):
+                log("✅ foto de perfil atualizada")
+                report_result(job_id, True)
+            else:
+                log(f"❌ {r.get('error')}")
+                report_result(job_id, False, error_msg=r.get("error"))
+        except Exception as e:
+            log(f"❌ exceção: {e}")
+            report_result(job_id, False, error_msg=str(e))
+        finally:
+            try:
+                image_path.unlink()
+            except Exception:
+                pass
+        return
+
+    # =====================================================
+    # OPERAÇÃO: auto_like_own (curtir comentários nos próprios posts)
+    # =====================================================
+    if operation == "auto_like_own":
+        max_likes = int(params.get("max_likes", 3))
+        log(f"auto-like @{username} (máx {max_likes} comentários)")
+        try:
+            cl = do_login()
+            r = auto_like_own_recent_comments(cl, max_likes=max_likes)
+            if r.get("success"):
+                log(f"✅ {r.get('liked', 0)} likes (de {r.get('seen', 0)} comentários vistos)")
+                report_result(job_id, True, result_data=r)
+            else:
+                log(f"⚠️ {r.get('error', 'falhou')}")
+                report_result(job_id, False, error_msg=r.get("error"), result_data=r)
+        except Exception as e:
+            log(f"❌ exceção: {e}")
+            report_result(job_id, False, error_msg=str(e))
+        return
+
+    # =====================================================
+    # OPERAÇÃO: auto_follow_back (seguir de volta novos seguidores)
+    # =====================================================
+    if operation == "auto_follow_back":
+        max_follows = int(params.get("max_follows", 2))
+        seen = params.get("seen_followers") or []
+        log(f"auto-follow-back @{username} (máx {max_follows} novos)")
+        try:
+            cl = do_login()
+            r = auto_follow_back_new_followers(cl, seen_followers=seen, max_follows=max_follows)
+            if r.get("success"):
+                followed = r.get("followed", [])
+                if followed:
+                    names = ", ".join(f"@{x['username']}" for x in followed)
+                    log(f"✅ seguiu {len(followed)}: {names}")
+                else:
+                    log(f"✓ nenhum follow ({r.get('note', 'sem novos')})")
+                report_result(job_id, True, result_data=r)
+            else:
+                log(f"⚠️ {r.get('error', 'falhou')}")
+                report_result(job_id, False, error_msg=r.get("error"), result_data=r)
+        except Exception as e:
+            log(f"❌ exceção: {e}")
             report_result(job_id, False, error_msg=str(e))
         return
 

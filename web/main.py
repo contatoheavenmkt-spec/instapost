@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import shutil
 import socket
 import sys
@@ -38,7 +39,7 @@ from web.workers import manager as worker_manager  # noqa: E402
 from web.remote_jobs import manager as rjob_manager  # noqa: E402
 from core.media import generate_thumbnail  # noqa: E402
 from core.paths import (  # noqa: E402
-    ACCOUNTS_FILE, PENDING_DIR, POSTED_DIR, SESSIONS_DIR, LOGS_DIR,
+    ACCOUNTS_FILE, PENDING_DIR, POSTED_DIR, SESSIONS_DIR, LOGS_DIR, data_path,
 )
 
 # Inicia thread do scheduler
@@ -388,6 +389,13 @@ def _account_view(a: dict) -> dict:
         "connected_via_worker_id": a.get("connected_via_worker_id"),
         "connected_via_worker_name": a.get("connected_via_worker_name"),
         "connected_at": a.get("connected_at"),
+        # Automações
+        "auto_like_enabled": bool(a.get("auto_like_enabled", False)),
+        "auto_like_max_per_day": int(a.get("auto_like_max_per_day", 40)),
+        "auto_like_today_count": int(a.get("auto_like_today_count", 0)),
+        "auto_follow_back_enabled": bool(a.get("auto_follow_back_enabled", False)),
+        "auto_follow_back_max_per_day": int(a.get("auto_follow_back_max_per_day", 10)),
+        "auto_follow_back_today_count": int(a.get("auto_follow_back_today_count", 0)),
     }
 
 
@@ -502,6 +510,172 @@ def api_test_login(username: str):
         label=f"login @{username}",
     )
     return {"ok": True, "job_id": job.id}
+
+
+# --------- PROFILE / AUTOMATIONS via worker -----------
+
+PROFILE_PICS_DIR = data_path("profile_pics")
+PROFILE_PICS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+class EditProfileIn(BaseModel):
+    accounts: list[str]              # multi-conta
+    biography: Optional[str] = None
+    full_name: Optional[str] = None
+    external_url: Optional[str] = None
+
+
+@app.post("/api/accounts/edit-profile")
+def api_edit_profile(payload: EditProfileIn, user=Depends(auth.require_user)):
+    """Cria 1 remote_job de edit_profile pra cada conta da lista."""
+    if not payload.accounts:
+        raise HTTPException(400, "Lista de contas vazia")
+    accounts = load_accounts()
+    created = []
+    for uname in payload.accounts:
+        acc = next((a for a in accounts if a["username"] == uname), None)
+        if not acc:
+            continue
+        params = {}
+        if payload.biography is not None:
+            params["biography"] = payload.biography
+        if payload.full_name is not None:
+            params["full_name"] = payload.full_name
+        if payload.external_url is not None:
+            params["external_url"] = payload.external_url
+        rj = rjob_manager.create({
+            "operation": "edit_profile",
+            "params": params,
+            "account_username": acc["username"],
+            "account_password": acc["password"],
+            "account_totp_secret": acc.get("totp_secret"),
+            "account_proxy": acc.get("proxy"),
+            "created_by": user["email"],
+        })
+        created.append(rj.id)
+    return {"ok": True, "count": len(created), "job_ids": created}
+
+
+@app.post("/api/accounts/change-picture")
+async def api_change_picture(
+    request: Request,
+    accounts: str = Form(...),  # JSON list
+    image: UploadFile = File(...),
+    user=Depends(auth.require_user),
+):
+    """Recebe upload de foto + lista de contas. Salva foto + cria N jobs."""
+    try:
+        target_usernames = json.loads(accounts)
+        assert isinstance(target_usernames, list)
+    except Exception:
+        raise HTTPException(400, "campo 'accounts' deve ser JSON array de usernames")
+    if not target_usernames:
+        raise HTTPException(400, "Lista de contas vazia")
+
+    # Salva foto com timestamp
+    import time as _t
+    ext = Path(image.filename or "pic.jpg").suffix.lower() or ".jpg"
+    fname = f"pic_{int(_t.time())}_{secrets.token_hex(4)}{ext}"
+    target = PROFILE_PICS_DIR / fname
+    with target.open("wb") as f:
+        while chunk := await image.read(1024 * 1024):
+            f.write(chunk)
+
+    accounts_list = load_accounts()
+    base = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/") or str(request.base_url).rstrip("/")
+    image_url = f"{base}/api/worker/profile-pic/{fname}"
+
+    created = []
+    for uname in target_usernames:
+        acc = next((a for a in accounts_list if a["username"] == uname), None)
+        if not acc:
+            continue
+        rj = rjob_manager.create({
+            "operation": "change_picture",
+            "params": {"image_url": image_url},
+            "account_username": acc["username"],
+            "account_password": acc["password"],
+            "account_totp_secret": acc.get("totp_secret"),
+            "account_proxy": acc.get("proxy"),
+            "media_url": image_url,
+            "created_by": user["email"],
+        })
+        created.append(rj.id)
+    return {"ok": True, "count": len(created), "job_ids": created, "image_name": fname}
+
+
+@app.get("/api/worker/profile-pic/{name}")
+def api_worker_profile_pic(name: str):
+    """Serve foto pro worker baixar (rota pública sem auth — worker valida via token no header)."""
+    name = safe_name(name)
+    p = PROFILE_PICS_DIR / name
+    if not p.exists():
+        raise HTTPException(404, "Foto não encontrada")
+    from fastapi.responses import FileResponse
+    ext = p.suffix.lower()
+    mime = "image/jpeg" if ext in (".jpg", ".jpeg") else ("image/png" if ext == ".png" else "image/webp")
+    return FileResponse(p, media_type=mime)
+
+
+@app.get("/api/worker/media/{name}")
+def api_worker_media(name: str):
+    """Serve mídia (vídeo/foto pra Reel/Story) pro worker baixar."""
+    name = safe_name(name)
+    p = PENDING_DIR / name
+    if not p.exists():
+        # Pode ser que já foi arquivada
+        p = POSTED_DIR / name
+        if not p.exists():
+            raise HTTPException(404, "Mídia não encontrada")
+    from fastapi.responses import FileResponse
+    ext = p.suffix.lower()
+    mime_map = {".mp4": "video/mp4", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".png": "image/png", ".webp": "image/webp"}
+    return FileResponse(p, media_type=mime_map.get(ext, "application/octet-stream"))
+
+
+@app.get("/api/accounts/{username}/profile-info")
+def api_get_profile_info(username: str, user=Depends(auth.require_user)):
+    """Cria job pra worker buscar info atual do perfil."""
+    accounts = load_accounts()
+    acc = next((a for a in accounts if a["username"] == username), None)
+    if not acc:
+        raise HTTPException(404, "Conta não encontrada")
+    rj = rjob_manager.create({
+        "operation": "get_profile_info",
+        "account_username": acc["username"],
+        "account_password": acc["password"],
+        "account_totp_secret": acc.get("totp_secret"),
+        "account_proxy": acc.get("proxy"),
+        "created_by": user["email"],
+    })
+    return {"ok": True, "job_id": rj.id}
+
+
+class AutomationsIn(BaseModel):
+    auto_like_enabled: Optional[bool] = None
+    auto_like_max_per_day: Optional[int] = None
+    auto_follow_back_enabled: Optional[bool] = None
+    auto_follow_back_max_per_day: Optional[int] = None
+
+
+@app.post("/api/accounts/{username}/automations")
+def api_update_automations(username: str, payload: AutomationsIn, user=Depends(auth.require_user)):
+    """Liga/desliga automações da conta + limites diários."""
+    accounts = load_accounts()
+    for a in accounts:
+        if a["username"] == username:
+            if payload.auto_like_enabled is not None:
+                a["auto_like_enabled"] = bool(payload.auto_like_enabled)
+            if payload.auto_like_max_per_day is not None:
+                a["auto_like_max_per_day"] = max(0, min(100, int(payload.auto_like_max_per_day)))
+            if payload.auto_follow_back_enabled is not None:
+                a["auto_follow_back_enabled"] = bool(payload.auto_follow_back_enabled)
+            if payload.auto_follow_back_max_per_day is not None:
+                a["auto_follow_back_max_per_day"] = max(0, min(50, int(payload.auto_follow_back_max_per_day)))
+            save_accounts(accounts)
+            return {"ok": True, "account": _account_view(a)}
+    raise HTTPException(404, "Conta não encontrada")
 
 
 @app.post("/api/accounts/{username}/connect-via-worker")
@@ -1024,6 +1198,7 @@ class WorkerResultIn(BaseModel):
     success: bool
     media_id: Optional[str] = None
     error_msg: Optional[str] = None
+    result_data: Optional[dict] = None
 
 
 @app.post("/api/worker/jobs/{job_id}/result")
@@ -1035,13 +1210,14 @@ def api_worker_job_result(job_id: str, payload: WorkerResultIn, request: Request
         success=payload.success,
         media_id=payload.media_id,
         error_msg=payload.error_msg,
+        result_data=payload.result_data,
     )
     if not ok:
         raise HTTPException(404, "Job não encontrado ou não atribuído a esse worker")
 
-    # Side-effect: marca conta como "conectada via worker" quando o
-    # worker reporta sucesso em test_login ou em qualquer post.
-    # Assim o painel /accounts mostra status correto mesmo sem sessão na VPS.
+    # Side-effects pós-resultado:
+    # 1) Sucesso em qualquer op = marca conta como "conectada via worker"
+    # 2) auto_follow_back: atualiza cache seen_followers no accounts.json
     if payload.success and job:
         try:
             accounts = load_accounts()
@@ -1050,10 +1226,15 @@ def api_worker_job_result(job_id: str, payload: WorkerResultIn, request: Request
                     a["connected_via_worker_id"] = w.id
                     a["connected_via_worker_name"] = w.name
                     a["connected_at"] = scheduler_mod.now_local().isoformat(timespec="seconds")
+                    # auto_follow_back: salva novo cache de seen_followers
+                    if job.operation == "auto_follow_back" and payload.result_data:
+                        new_seen = payload.result_data.get("seen_followers")
+                        if isinstance(new_seen, list) and new_seen:
+                            a["auto_follow_back_seen_followers"] = new_seen
                     save_accounts(accounts)
                     break
         except Exception as e:
-            print(f"[worker_result] erro marcando conta conectada: {e}")
+            print(f"[worker_result] erro side-effects: {e}")
 
     return {"ok": True}
 

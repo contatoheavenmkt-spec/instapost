@@ -48,9 +48,12 @@ def parse_iso(s: Optional[str]) -> Optional[datetime]:
 class RemoteJob:
     def __init__(self, data: dict):
         self.id: str = data["id"]
-        # Operação: "post" (default) ou "test_login" (só valida conexão)
+        # Operação: "post" | "test_login" | "edit_profile" | "change_picture"
+        # | "auto_like_own" | "auto_follow_back" | "get_profile_info"
         self.operation: str = data.get("operation", "post")
-        # Payload da postagem (ou só auth, no caso de test_login)
+        # Params específicos por operation (dict livre)
+        self.params: dict = data.get("params", {}) or {}
+        # Auth da conta (sempre obrigatório)
         self.account_username: str = data["account_username"]
         self.account_password: str = data["account_password"]
         self.account_totp_secret: Optional[str] = data.get("account_totp_secret")
@@ -71,12 +74,14 @@ class RemoteJob:
         self.finished_at: Optional[str] = data.get("finished_at")
         self.media_id: Optional[str] = data.get("media_id")
         self.error_msg: Optional[str] = data.get("error_msg")
+        self.result_data: dict = data.get("result_data") or {}
         self.logs: list[str] = data.get("logs", [])
 
     def to_dict(self, include_secrets: bool = False, include_logs: bool = True) -> dict:
         d = {
             "id": self.id,
             "operation": self.operation,
+            "params": self.params,
             "account_username": self.account_username,
             "video_name": self.video_name,
             "media_type": self.media_type,
@@ -93,6 +98,7 @@ class RemoteJob:
             "finished_at": self.finished_at,
             "media_id": self.media_id,
             "error_msg": self.error_msg,
+            "result_data": self.result_data,
         }
         if include_secrets:
             d["account_password"] = self.account_password
@@ -212,7 +218,8 @@ class RemoteJobManager:
             return True
 
     def report_result(self, job_id: str, worker_id: str, success: bool,
-                      media_id: Optional[str] = None, error_msg: Optional[str] = None) -> bool:
+                      media_id: Optional[str] = None, error_msg: Optional[str] = None,
+                      result_data: Optional[dict] = None) -> bool:
         with self._lock:
             job = self._items.get(job_id)
             if not job or job.worker_id != worker_id:
@@ -220,6 +227,8 @@ class RemoteJobManager:
             job.status = "done" if success else "error"
             job.media_id = media_id
             job.error_msg = error_msg
+            if result_data:
+                job.result_data = result_data
             job.finished_at = now_iso()
             self._save()
             return True

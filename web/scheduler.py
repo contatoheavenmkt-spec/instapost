@@ -197,7 +197,12 @@ class ScheduleManager:
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._loop, daemon=True, name="scheduler")
         self._thread.start()
-        print(f"[scheduler] started (tick {TICK_SECONDS}s)")
+        # Thread separada pra automações (auto-like, auto-follow-back)
+        self._automation_thread = threading.Thread(
+            target=self._automation_loop, daemon=True, name="automation_scheduler"
+        )
+        self._automation_thread.start()
+        print(f"[scheduler] started (tick {TICK_SECONDS}s) + automations loop")
 
     def stop(self):
         self._stop_event.set()
@@ -394,6 +399,127 @@ class ScheduleManager:
         s.remote_job_ids = created_ids
         s.note = f"{len(created_ids)} remote_job(s) criados"
         print(f"[scheduler] dispatched {s.id} via worker -> {len(created_ids)} jobs")
+
+    # ===================== AUTOMAÇÕES =====================
+
+    def _automation_loop(self):
+        """Loop separado pra criar jobs de auto-like e auto-follow-back ao
+        longo do dia, espaçados aleatoriamente respeitando o limite diário."""
+        import time as _t, random as _r
+        # Espera 60s pra app subir
+        _t.sleep(60)
+        while not self._stop_event.is_set():
+            try:
+                self._automation_tick()
+            except Exception as e:
+                print(f"[automation] tick falhou: {e}")
+            # Acorda a cada 5-12 min (aleatório pra não criar padrão)
+            interval = _r.randint(5 * 60, 12 * 60)
+            self._stop_event.wait(interval)
+
+    def _automation_tick(self):
+        """Pra cada conta com automação ligada e que ainda não bateu o limite
+        do dia, com chance aleatória, cria 1 remote_job. Só age durante 'janela
+        ativa' (7h-22h horário do servidor) pra simular humano."""
+        import json as _json, random as _r
+        from datetime import datetime as _dt
+        from core.paths import ACCOUNTS_FILE
+
+        # Janela de atividade 07:00 - 22:00
+        hour = _dt.now().hour
+        if hour < 7 or hour >= 22:
+            return
+
+        try:
+            with open(ACCOUNTS_FILE, encoding="utf-8") as f:
+                accounts = _json.load(f)
+        except Exception:
+            return
+
+        try:
+            from web.remote_jobs import manager as rjob_manager
+        except Exception:
+            return
+
+        today_str = _dt.now().strftime("%Y-%m-%d")
+        changed = False
+
+        for acc in accounts:
+            # Pula contas inativas ou não conectadas via worker
+            if not acc.get("active", True):
+                continue
+            if not acc.get("connected_via_worker_id"):
+                continue
+
+            # Reseta contadores diários se o dia mudou
+            if acc.get("auto_like_today_date") != today_str:
+                acc["auto_like_today_date"] = today_str
+                acc["auto_like_today_count"] = 0
+                changed = True
+            if acc.get("auto_follow_back_today_date") != today_str:
+                acc["auto_follow_back_today_date"] = today_str
+                acc["auto_follow_back_today_count"] = 0
+                changed = True
+
+            # ------ AUTO LIKE ------
+            if acc.get("auto_like_enabled"):
+                limit = int(acc.get("auto_like_max_per_day", 0))
+                done = int(acc.get("auto_like_today_count", 0))
+                if done < limit:
+                    # Chance proporcional ao tempo do dia restante
+                    # Janela útil = ~15h (7h-22h). Por tick ~10min, são ~90 ticks.
+                    # Pra distribuir N likes em 90 ticks de forma uniforme, chance = N/90
+                    remaining = limit - done
+                    chance = remaining / 90.0
+                    if _r.random() < chance:
+                        # Cria job: o worker faz 1-3 likes nessa execução
+                        per_run = _r.randint(1, min(3, remaining))
+                        rj = rjob_manager.create({
+                            "operation": "auto_like_own",
+                            "params": {"max_likes": per_run},
+                            "account_username": acc["username"],
+                            "account_password": acc["password"],
+                            "account_totp_secret": acc.get("totp_secret"),
+                            "account_proxy": acc.get("proxy"),
+                            "created_by": "automation:like",
+                        })
+                        acc["auto_like_today_count"] = done + per_run
+                        changed = True
+                        print(f"[automation] auto_like_own @{acc['username']} +{per_run} (total dia: {acc['auto_like_today_count']}/{limit})")
+
+            # ------ AUTO FOLLOW BACK ------
+            if acc.get("auto_follow_back_enabled"):
+                limit_f = int(acc.get("auto_follow_back_max_per_day", 0))
+                done_f = int(acc.get("auto_follow_back_today_count", 0))
+                if done_f < limit_f:
+                    remaining_f = limit_f - done_f
+                    chance_f = remaining_f / 90.0
+                    if _r.random() < chance_f:
+                        per_run = _r.randint(1, min(2, remaining_f))
+                        rj = rjob_manager.create({
+                            "operation": "auto_follow_back",
+                            "params": {
+                                "max_follows": per_run,
+                                "seen_followers": acc.get("auto_follow_back_seen_followers", []),
+                            },
+                            "account_username": acc["username"],
+                            "account_password": acc["password"],
+                            "account_totp_secret": acc.get("totp_secret"),
+                            "account_proxy": acc.get("proxy"),
+                            "created_by": "automation:follow_back",
+                        })
+                        # Reserva os slots (worker vai atualizar count real depois)
+                        acc["auto_follow_back_today_count"] = done_f + per_run
+                        changed = True
+                        print(f"[automation] auto_follow_back @{acc['username']} +{per_run} (total dia: {acc['auto_follow_back_today_count']}/{limit_f})")
+
+        # Salva accounts.json se mudou
+        if changed:
+            try:
+                with open(ACCOUNTS_FILE, "w", encoding="utf-8") as f:
+                    _json.dump(accounts, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                print(f"[automation] erro salvando accounts: {e}")
 
     def _dispatch_via_server(self, s: Schedule):
         """Caminho LEGACY — dispara post.py local na VPS. Usa IP da VPS (vai falhar)."""
