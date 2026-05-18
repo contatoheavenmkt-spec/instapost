@@ -378,8 +378,13 @@ class ScheduleManager:
                 except Exception as e:
                     print(f"[scheduler] shortener falhou pra {acc['username']}: {e}")
 
+            highlight_title = None
+            if meta.get("kind") == "story" and acc.get("auto_highlight_enabled") and acc.get("auto_highlight_title"):
+                highlight_title = acc["auto_highlight_title"]
+
             rj = rjob_manager.create({
                 "operation": "post",
+                "params": {"auto_highlight_title": highlight_title} if highlight_title else {},
                 "account_username": acc["username"],
                 "account_password": acc["password"],
                 "account_totp_secret": acc.get("totp_secret"),

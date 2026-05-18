@@ -193,6 +193,27 @@
             <span class="text-muted">follow-back/dia (rec: 5–15)</span>
           </div>
         </div>
+
+        <!-- Auto highlight -->
+        <div class="surface-2 p-3 rounded-md">
+          <div class="flex items-center justify-between mb-2">
+            <div>
+              <div class="text-[13px] font-medium flex items-center gap-1.5">
+                <i data-lucide="bookmark" style="width:13px;height:13px"></i>
+                Adicionar Stories a destaque automaticamente
+              </div>
+              <div class="text-[11px] text-soft">Toda Story postada vai automaticamente pro destaque com o nome abaixo (cria se não existir)</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="auto-highlight-toggle" />
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="flex items-center gap-2 text-[12px] text-soft">
+            <span>Nome do destaque:</span>
+            <input id="auto-highlight-title" class="input" style="flex:1; padding: 4px 8px" placeholder="ex: Promoções, Cardápio, Catálogo" maxlength="30" />
+          </div>
+        </div>
       </div>
     </div>
 
@@ -236,6 +257,9 @@
     }
     if (a.auto_follow_back_enabled) {
       parts.push(`<span class="badge badge-success" title="Auto follow-back ligado (${a.auto_follow_back_today_count}/${a.auto_follow_back_max_per_day} hoje)"><i data-lucide="user-plus" style="width:11px;height:11px"></i> ${a.auto_follow_back_today_count}/${a.auto_follow_back_max_per_day}</span>`);
+    }
+    if (a.auto_highlight_enabled && a.auto_highlight_title) {
+      parts.push(`<span class="badge badge-success" title="Stories vão automaticamente pro destaque '${a.auto_highlight_title}'"><i data-lucide="bookmark" style="width:11px;height:11px"></i> ${escapeHtml(a.auto_highlight_title)}</span>`);
     }
     return parts.length ? `<div class="flex flex-wrap gap-1">${parts.join('')}</div>` : '<span class="text-muted text-[12px]">—</span>';
   }
@@ -462,6 +486,8 @@
     document.getElementById('auto-like-max').value = a.auto_like_max_per_day || 40;
     document.getElementById('auto-followback-toggle').checked = !!a.auto_follow_back_enabled;
     document.getElementById('auto-followback-max').value = a.auto_follow_back_max_per_day || 10;
+    document.getElementById('auto-highlight-toggle').checked = !!a.auto_highlight_enabled;
+    document.getElementById('auto-highlight-title').value = a.auto_highlight_title || '';
     document.getElementById('profile-modal').classList.remove('hidden');
     if (window.lucide) lucide.createIcons();
   }
@@ -538,6 +564,13 @@
     const autoLikeMax = parseInt(document.getElementById('auto-like-max').value) || 40;
     const autoFb = document.getElementById('auto-followback-toggle').checked;
     const autoFbMax = parseInt(document.getElementById('auto-followback-max').value) || 10;
+    const autoHl = document.getElementById('auto-highlight-toggle').checked;
+    const autoHlTitle = document.getElementById('auto-highlight-title').value.trim();
+
+    if (autoHl && !autoHlTitle) {
+      toast('Defina um nome pro destaque', 'error');
+      return;
+    }
 
     let count = 0;
     try {
@@ -549,6 +582,8 @@
           auto_like_max_per_day: autoLikeMax,
           auto_follow_back_enabled: autoFb,
           auto_follow_back_max_per_day: autoFbMax,
+          auto_highlight_enabled: autoHl,
+          auto_highlight_title: autoHlTitle,
         }),
       });
 

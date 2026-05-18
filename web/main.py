@@ -396,6 +396,9 @@ def _account_view(a: dict) -> dict:
         "auto_follow_back_enabled": bool(a.get("auto_follow_back_enabled", False)),
         "auto_follow_back_max_per_day": int(a.get("auto_follow_back_max_per_day", 10)),
         "auto_follow_back_today_count": int(a.get("auto_follow_back_today_count", 0)),
+        # Destaques automáticos
+        "auto_highlight_enabled": bool(a.get("auto_highlight_enabled", False)),
+        "auto_highlight_title": a.get("auto_highlight_title", ""),
     }
 
 
@@ -657,6 +660,8 @@ class AutomationsIn(BaseModel):
     auto_like_max_per_day: Optional[int] = None
     auto_follow_back_enabled: Optional[bool] = None
     auto_follow_back_max_per_day: Optional[int] = None
+    auto_highlight_enabled: Optional[bool] = None
+    auto_highlight_title: Optional[str] = None
 
 
 @app.post("/api/accounts/{username}/automations")
@@ -673,6 +678,10 @@ def api_update_automations(username: str, payload: AutomationsIn, user=Depends(a
                 a["auto_follow_back_enabled"] = bool(payload.auto_follow_back_enabled)
             if payload.auto_follow_back_max_per_day is not None:
                 a["auto_follow_back_max_per_day"] = max(0, min(50, int(payload.auto_follow_back_max_per_day)))
+            if payload.auto_highlight_enabled is not None:
+                a["auto_highlight_enabled"] = bool(payload.auto_highlight_enabled)
+            if payload.auto_highlight_title is not None:
+                a["auto_highlight_title"] = (payload.auto_highlight_title or "").strip()[:30]
             save_accounts(accounts)
             return {"ok": True, "account": _account_view(a)}
     raise HTTPException(404, "Conta não encontrada")
@@ -1321,8 +1330,14 @@ def api_create_remote_job(payload: RemoteJobIn, request: Request, user=Depends(a
             except Exception as e:
                 print(f"[remote_job] shortener falhou pra {acc['username']}: {e}")
 
+        # Se conta tem auto-highlight ligado, passa o título pro worker
+        highlight_title = None
+        if meta.get("kind") == "story" and acc.get("auto_highlight_enabled") and acc.get("auto_highlight_title"):
+            highlight_title = acc["auto_highlight_title"]
+
         job = rjob_manager.create({
             "operation": "post",
+            "params": {"auto_highlight_title": highlight_title} if highlight_title else {},
             "account_username": acc["username"],
             "account_password": acc["password"],
             "account_totp_secret": acc.get("totp_secret"),

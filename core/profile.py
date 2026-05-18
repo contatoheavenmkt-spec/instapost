@@ -131,6 +131,46 @@ def auto_like_own_recent_comments(cl, max_likes: int = 5, recent_posts: int = 10
         return {"success": False, "error": str(e)}
 
 
+def add_story_to_highlight(cl, story_pk, title: str) -> dict:
+    """Adiciona um story (recém-postado) a um destaque (highlight).
+    Se existe destaque com `title` (case-insensitive), adiciona o story.
+    Senão, cria destaque novo com esse story como capa.
+
+    Args:
+        cl: Client instagrapi
+        story_pk: pk da Story já postada
+        title: nome do destaque (ex: 'Promoções', 'Cardápio')
+    """
+    if not title:
+        return {"success": False, "error": "title vazio"}
+    try:
+        # Lista destaques atuais da conta
+        highlights = cl.user_highlights(cl.user_id)
+        title_norm = title.strip().lower()
+        target = next(
+            (h for h in highlights if (getattr(h, "title", "") or "").strip().lower() == title_norm),
+            None,
+        )
+        if target:
+            cl.highlight_add_stories(target.pk, [int(story_pk)])
+            return {
+                "success": True,
+                "action": "added_to_existing",
+                "highlight_pk": str(target.pk),
+                "highlight_title": target.title,
+            }
+        else:
+            h = cl.highlight_create(title=title.strip(), story_ids=[int(story_pk)])
+            return {
+                "success": True,
+                "action": "created_new",
+                "highlight_pk": str(h.pk),
+                "highlight_title": h.title,
+            }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 def auto_follow_back_new_followers(cl, seen_followers: list,
                                      max_follows: int = 2) -> dict:
     """

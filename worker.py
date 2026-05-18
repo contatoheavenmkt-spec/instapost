@@ -160,6 +160,7 @@ def execute_job(job: dict):
         from core.profile import (
             get_profile_info, edit_profile_info, change_profile_picture,
             auto_like_own_recent_comments, auto_follow_back_new_followers,
+            add_story_to_highlight,
         )
     except ImportError as e:
         log(f"❌ módulos core não encontrados: {e}")
@@ -372,7 +373,29 @@ def execute_job(job: dict):
 
         if result.get("success"):
             log(f"✅ postado! media_id={result.get('media_id')}")
-            report_result(job_id, True, media_id=result.get("media_id"))
+
+            # Se foi Story + tem destaque configurado, adiciona ao destaque
+            highlight_info = None
+            if kind == "story":
+                highlight_title = params.get("auto_highlight_title") or job.get("auto_highlight_title")
+                if highlight_title and result.get("media_id"):
+                    log(f"📌 adicionando ao destaque '{highlight_title}'")
+                    try:
+                        hr = add_story_to_highlight(cl, result["media_id"], highlight_title)
+                        if hr.get("success"):
+                            acao = "criado novo" if hr.get("action") == "created_new" else "adicionado ao existente"
+                            log(f"✅ destaque {acao}: '{hr.get('highlight_title')}'")
+                            highlight_info = hr
+                        else:
+                            log(f"⚠️ destaque falhou: {hr.get('error')}")
+                    except Exception as e:
+                        log(f"⚠️ destaque exception: {e}")
+
+            report_result(
+                job_id, True,
+                media_id=result.get("media_id"),
+                result_data={"highlight": highlight_info} if highlight_info else None,
+            )
         else:
             log(f"❌ post falhou: {result.get('error')}")
             report_result(job_id, False, error_msg=result.get("error"))
