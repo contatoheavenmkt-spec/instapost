@@ -270,3 +270,64 @@ docker compose -f docker-compose.nginx.yml up -d --build
 ```bash
 tar czf backup-$(date +%F).tar.gz /opt/instapost/data
 ```
+
+---
+
+## Sessões "aquecidas" no IP residencial (anti-blacklist)
+
+**Problema:** o Instagram bloqueia logins vindos de IPs de datacenter (Hostinger/AWS/etc). Se você cadastrar conta no painel da VPS e clicar "Conectar", o login sai do IP da VPS — flagged.
+
+**Solução sem proxy:** loga as contas **no seu PC** (IP residencial/4G aceito), copia o arquivo `sessions/CONTA.json` pra VPS, sistema na VPS reaproveita.
+
+### Como funciona
+
+```
+1. PC seu (4G)   → Instagram → login com 2FA → sessions/conta.json gerado
+2. scp sessions/ → VPS
+3. VPS usa a sessão existente → Instagram aceita os posts
+```
+
+O Instagram pode mostrar uma notificação "Você logou de um lugar novo?" na primeira postagem — confirma "Sim" no app/email **uma vez** e nunca mais pede.
+
+### Passo a passo
+
+**1. No seu PC, conecta as contas localmente:**
+```powershell
+cd C:\Users\tutif\Desktop\insta-poster
+.\venv\Scripts\python.exe run.py
+# Abre http://127.0.0.1:8000 → Contas → adiciona + Conectar
+# Repete pra cada conta
+```
+
+Confirma que os arquivos foram gerados:
+```powershell
+dir sessions\
+```
+
+**2. Sobe as sessões pra VPS (1 comando):**
+```powershell
+.\deploy\sync-sessions.ps1
+```
+
+Vai listar as sessões + pedir confirmação + senha SSH da VPS.
+
+**3. No painel da VPS** (`https://instapost.shop`):
+- Adiciona as MESMAS contas (mesmos email/senha/chave 2FA)
+- **NÃO clica em "Conectar"** — sistema já vai usar a sessão copiada
+- Pode disparar posts direto
+
+### Equipe inteira no mesmo esquema
+
+Cada membro da equipe pode:
+1. Clonar o repo no PC
+2. Conectar as contas DELE localmente
+3. Rodar `sync-sessions.ps1` apontando pra VPS
+4. As contas vão entrar no painel central com sessão real
+
+Assim a "frota" de IPs residenciais alimenta o sistema central — sem proxy pago.
+
+### Quando precisa renovar a sessão
+
+Sessão Instagram dura semanas/meses, mas eventualmente expira (ou ele "desloga" remoto). Quando isso acontecer, você verá no log do disparo: `Sessão expirada, fazendo login novo` → na VPS isso falha (IP blacklisted).
+
+Faz o mesmo processo de novo: conecta no PC → roda `sync-sessions.ps1`.
