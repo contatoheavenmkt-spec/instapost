@@ -160,7 +160,7 @@ def execute_job(job: dict):
         from core.profile import (
             get_profile_info, edit_profile_info, change_profile_picture,
             auto_like_own_recent_comments, auto_follow_back_new_followers,
-            add_story_to_highlight,
+            add_story_to_highlight, get_latest_own_story_pk,
         )
     except ImportError as e:
         log(f"❌ módulos core não encontrados: {e}")
@@ -387,17 +387,24 @@ def execute_job(job: dict):
                 log(f"✅ postado! media_id={mid}")
 
             # Se foi Story + tem destaque configurado, adiciona ao destaque
-            # (só funciona se temos media_id — phantom errors NÃO têm)
             highlight_info = None
             if kind == "story":
                 highlight_title = params.get("auto_highlight_title") or job.get("auto_highlight_title")
                 if highlight_title:
-                    if not mid:
-                        log(f"⚠️ destaque não foi adicionado: post veio sem media_id (verifica no app)")
-                    else:
+                    # Fallback: se phantom error (sem mid), busca o último story ativo
+                    story_pk_for_highlight = mid
+                    if not story_pk_for_highlight:
+                        log(f"🔍 buscando ID do story recém-postado (fallback phantom error)")
+                        story_pk_for_highlight = get_latest_own_story_pk(cl)
+                        if story_pk_for_highlight:
+                            log(f"✓ encontrado story pk={story_pk_for_highlight}")
+                        else:
+                            log(f"⚠️ não consegui achar story recente — destaque pulado")
+
+                    if story_pk_for_highlight:
                         log(f"📌 adicionando ao destaque '{highlight_title}'")
                         try:
-                            hr = add_story_to_highlight(cl, mid, highlight_title)
+                            hr = add_story_to_highlight(cl, story_pk_for_highlight, highlight_title)
                             if hr.get("success"):
                                 acao = "criado novo" if hr.get("action") == "created_new" else "adicionado ao existente"
                                 log(f"✅ destaque {acao}: '{hr.get('highlight_title')}'")

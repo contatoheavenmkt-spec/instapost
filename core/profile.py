@@ -131,6 +131,29 @@ def auto_like_own_recent_comments(cl, max_likes: int = 5, recent_posts: int = 10
         return {"success": False, "error": str(e)}
 
 
+def get_latest_own_story_pk(cl) -> Optional[str]:
+    """Retorna o pk do Story mais recente da conta (últimas 24h).
+    Útil pra casos onde post_story_* retornou success mas sem media_id
+    (phantom error) — fallback pra adicionar a destaque automaticamente."""
+    try:
+        # Sleep curto pra dar tempo do Story aparecer no feed após post
+        import time as _t
+        _t.sleep(2)
+        # user_stories retorna lista de Story ativos
+        stories = cl.user_stories(cl.user_id, amount=5)
+        if not stories:
+            return None
+        # Mais recente primeiro
+        try:
+            latest = max(stories, key=lambda s: getattr(s, "taken_at", 0))
+        except Exception:
+            latest = stories[0]
+        return str(latest.pk)
+    except Exception as e:
+        print(f"[latest_story] falhou: {e}")
+        return None
+
+
 def add_story_to_highlight(cl, story_pk, title: str) -> dict:
     """Adiciona um story (recém-postado) a um destaque (highlight).
     Se existe destaque com `title` (case-insensitive), adiciona o story.
