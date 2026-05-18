@@ -380,28 +380,36 @@ def execute_job(job: dict):
                 result = post_reel(cl, str(media_path), caption)
 
         if result.get("success"):
-            log(f"✅ postado! media_id={result.get('media_id')}")
+            mid = result.get("media_id")
+            if result.get("warning"):
+                log(f"⚠️  postado COM RESSALVA: {result.get('warning')}")
+            else:
+                log(f"✅ postado! media_id={mid}")
 
             # Se foi Story + tem destaque configurado, adiciona ao destaque
+            # (só funciona se temos media_id — phantom errors NÃO têm)
             highlight_info = None
             if kind == "story":
                 highlight_title = params.get("auto_highlight_title") or job.get("auto_highlight_title")
-                if highlight_title and result.get("media_id"):
-                    log(f"📌 adicionando ao destaque '{highlight_title}'")
-                    try:
-                        hr = add_story_to_highlight(cl, result["media_id"], highlight_title)
-                        if hr.get("success"):
-                            acao = "criado novo" if hr.get("action") == "created_new" else "adicionado ao existente"
-                            log(f"✅ destaque {acao}: '{hr.get('highlight_title')}'")
-                            highlight_info = hr
-                        else:
-                            log(f"⚠️ destaque falhou: {hr.get('error')}")
-                    except Exception as e:
-                        log(f"⚠️ destaque exception: {e}")
+                if highlight_title:
+                    if not mid:
+                        log(f"⚠️ destaque não foi adicionado: post veio sem media_id (verifica no app)")
+                    else:
+                        log(f"📌 adicionando ao destaque '{highlight_title}'")
+                        try:
+                            hr = add_story_to_highlight(cl, mid, highlight_title)
+                            if hr.get("success"):
+                                acao = "criado novo" if hr.get("action") == "created_new" else "adicionado ao existente"
+                                log(f"✅ destaque {acao}: '{hr.get('highlight_title')}'")
+                                highlight_info = hr
+                            else:
+                                log(f"⚠️ destaque falhou: {hr.get('error')}")
+                        except Exception as e:
+                            log(f"⚠️ destaque exception: {e}")
 
             report_result(
                 job_id, True,
-                media_id=result.get("media_id"),
+                media_id=mid,
                 result_data={"highlight": highlight_info} if highlight_info else None,
             )
         else:

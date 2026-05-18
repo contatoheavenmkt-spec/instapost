@@ -232,6 +232,12 @@
   let accounts = [];
   let selection = new Set();
 
+  function escapeHtml(s) {
+    return (s || '').replace(/[&<>"']/g, c => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[c]));
+  }
+
   function toggleAddForm(show) {
     const w = document.getElementById('add-form-wrap');
     w.classList.toggle('hidden', !show);

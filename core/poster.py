@@ -57,6 +57,18 @@ def _build_story_links(link_url: Optional[str], link_text: Optional[str] = None)
         return []
 
 
+def _is_phantom_error(error_str: str) -> bool:
+    """Detecta erros do instagrapi onde o post FOI feito mas a resposta veio
+    incompleta. Nesses casos, a postagem aparece no Instagram normalmente —
+    só o instagrapi não conseguiu fazer parse do retorno final."""
+    err = (error_str or "").lower()
+    return any(s in err for s in [
+        "configure succeeded without media payload",
+        "succeeded without media",
+        "without media payload",
+    ])
+
+
 def post_story_video(cl: Client, video_path: str, caption: str = "",
                      link_url: Optional[str] = None, link_text: Optional[str] = None) -> dict:
     """Posta vídeo no Story. Link é aplicado como tappable na tela inteira."""
@@ -73,6 +85,9 @@ def post_story_video(cl: Client, video_path: str, caption: str = "",
         media = cl.video_upload_to_story(**kwargs)
         return {"success": True, "media_id": str(media.pk), "error": None}
     except Exception as e:
+        if _is_phantom_error(str(e)):
+            return {"success": True, "media_id": None, "error": None,
+                    "warning": "Instagram retornou sem media_id mas o post foi feito"}
         return {"success": False, "media_id": None, "error": str(e)}
 
 
@@ -92,6 +107,9 @@ def post_story_photo(cl: Client, photo_path: str, caption: str = "",
         media = cl.photo_upload_to_story(**kwargs)
         return {"success": True, "media_id": str(media.pk), "error": None}
     except Exception as e:
+        if _is_phantom_error(str(e)):
+            return {"success": True, "media_id": None, "error": None,
+                    "warning": "Instagram retornou sem media_id mas o post foi feito"}
         return {"success": False, "media_id": None, "error": str(e)}
 
 
