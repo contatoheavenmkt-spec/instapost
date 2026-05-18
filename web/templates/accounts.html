@@ -314,6 +314,9 @@
             <button class="btn btn-ghost btn-sm" onclick="onEditTotp('${a.username}', ${a.has_totp})" title="${a.has_totp ? 'Atualizar' : 'Adicionar'} chave 2FA">
               <i data-lucide="shield" class="icon"></i>
             </button>
+            ${a.has_totp ? `<button class="btn btn-ghost btn-sm" onclick="onShowTotp('${a.username}')" title="Ver código 2FA atual (pra comparar com 2fa.ac)">
+              <i data-lucide="eye" class="icon"></i>
+            </button>` : ''}
             <button class="btn btn-danger btn-sm" onclick="onDelete('${a.username}')" title="Remover conta">
               <i data-lucide="trash-2" class="icon"></i>
             </button>
