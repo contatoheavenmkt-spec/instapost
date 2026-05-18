@@ -1,0 +1,25 @@
+# Variante pra VPS que JÁ TEM Nginx (ou outro reverse proxy) rodando no host.
+# Sobe APENAS o app — quem faz HTTPS e roteia pra cá é o Nginx do host.
+#
+# Uso:
+#   docker compose -f docker-compose.nginx.yml up -d --build
+#
+# O Nginx no host fala com http://127.0.0.1:8000 (porta só local, não exposta na internet).
+
+services:
+  app:
+    build: .
+    image: insta-poster:latest
+    container_name: insta-poster-app
+    restart: unless-stopped
+    environment:
+      DATA_DIR: /data
+      HTTPS_ONLY: "1"
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
+      TZ: America/Sao_Paulo
+    volumes:
+      - ./data:/data
+    ports:
+      # Bind só em 127.0.0.1 — fica invisível pra internet,
+      # só o Nginx do host consegue acessar.
+      - "127.0.0.1:8000:8000"

@@ -1,6 +1,11 @@
-# Deploy em VPS (Hostinger Brasil + Docker + Caddy)
+# Deploy em VPS
 
-Guia prático pra subir o Insta Poster numa VPS com HTTPS automático.
+Guia prático pra subir o Insta Poster. Há dois modos:
+
+- **Modo A — VPS limpa** (Caddy embutido no compose, HTTPS automático)
+- **Modo B — VPS com Nginx já rodando** (proxy via Nginx existente do host) ← se você já tem outros sites na mesma máquina
+
+Os dois modos compartilham as etapas 1-2 (preparar VPS + DNS).
 
 ---
 
@@ -186,3 +191,82 @@ ufw --force enable
 
 ### Sessões Instagram somem após restart
 - **Não deveriam!** São salvas em `data/sessions/`. Confirma que o volume `./data:/data` no `docker-compose.yml` está correto e que existe a pasta `data/sessions/` no host
+
+---
+
+## Modo B — VPS com Nginx existente
+
+Se sua VPS já tem **Nginx** servindo outros sites, **NÃO use o Caddy** do compose padrão — ele conflitaria nas portas 80/443. Use o arquivo `docker-compose.nginx.yml` (já incluso) que sobe **só o app** ouvindo em `127.0.0.1:8000`, e configura o Nginx existente como reverse proxy.
+
+### B.1. Instalar Docker (se não tiver)
+```bash
+apt update && apt install -y docker.io docker-compose-plugin git
+systemctl enable --now docker
+```
+
+### B.2. Clonar e configurar
+```bash
+mkdir -p /opt && cd /opt
+git clone https://github.com/contatoheavenmkt-spec/instapost.git
+cd instapost
+cp .env.example .env
+nano .env
+```
+
+Preenche `.env`:
+```env
+DOMAIN=instapost.shop
+EMAIL=seu@email.com
+PUBLIC_BASE_URL=https://instapost.shop
+```
+
+### B.3. Subir o app (sem Caddy)
+```bash
+docker compose -f docker-compose.nginx.yml up -d --build
+```
+
+Confere:
+```bash
+docker compose -f docker-compose.nginx.yml ps
+curl http://127.0.0.1:8000/api/health   # deve retornar {"ok":true,...}
+```
+
+### B.4. Configurar Nginx do host
+
+Copia o template incluso:
+```bash
+cp /opt/instapost/deploy/nginx-instapost.conf /etc/nginx/sites-available/instapost.shop
+```
+
+Edita o `server_name` se for usar outro domínio (default é `instapost.shop www.instapost.shop`).
+
+Habilita o site:
+```bash
+ln -s /etc/nginx/sites-available/instapost.shop /etc/nginx/sites-enabled/
+nginx -t              # testa config (tem que dizer "ok" e "test successful")
+systemctl reload nginx
+```
+
+### B.5. HTTPS via Let's Encrypt (Certbot)
+
+```bash
+apt install -y certbot python3-certbot-nginx
+certbot --nginx -d instapost.shop -d www.instapost.shop \
+  --non-interactive --agree-tos -m seu@email.com --redirect
+```
+
+Certbot edita o config do Nginx sozinho, baixa o cert e configura renovação automática.
+
+Pronto — abre `https://instapost.shop` no navegador.
+
+### Atualizar depois (Modo B)
+```bash
+cd /opt/instapost
+git pull
+docker compose -f docker-compose.nginx.yml up -d --build
+```
+
+### Backup (Modo B — igual)
+```bash
+tar czf backup-$(date +%F).tar.gz /opt/instapost/data
+```
