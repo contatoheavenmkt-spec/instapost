@@ -102,9 +102,9 @@
 <!-- Worker dispatch modal -->
 <div id="worker-modal" class="modal-bg hidden" style="z-index:60" onclick="if(event.target===this) closeWorkerModal()">
   <div class="modal-card" style="max-width: 540px">
-    <div class="text-[15px] font-semibold mb-1">Postar via worker</div>
+    <div class="text-[15px] font-semibold mb-1">Postar</div>
     <div class="text-[13px] text-soft mb-1" id="worker-video-name">—</div>
-    <div class="text-[12px] text-muted mb-4">Worker posta usando IP residencial. Selecione 1 ou várias contas — cada conta gera 1 job na fila.</div>
+    <div class="text-[12px] text-muted mb-4">Selecione 1 ou várias contas — cada conta gera 1 postagem.</div>
     <form id="worker-form" class="space-y-4">
       <div>
         <label class="label flex items-center justify-between">
@@ -241,11 +241,8 @@
           <button class="btn btn-ghost w-full" onclick="saveAll()">
             <i data-lucide="save" class="icon"></i> Salvar alterações
           </button>
-          <button class="btn btn-accent w-full" onclick="postNow()">
-            <i data-lucide="send" class="icon"></i> Postar agora (servidor)
-          </button>
-          <button class="btn btn-ghost w-full" onclick="openWorkerModal()" title="Posta usando worker (PC residencial) — anti-blacklist">
-            <i data-lucide="monitor" class="icon"></i> Postar via worker (IP residencial)
+          <button class="btn btn-accent w-full" onclick="openWorkerModal()">
+            <i data-lucide="send" class="icon"></i> Postar agora
           </button>
           <button class="btn btn-ghost w-full" onclick="openScheduleModal()">
             <i data-lucide="calendar-clock" class="icon"></i> Agendar postagem
@@ -565,9 +562,9 @@
       const online = workers.filter(w => w.online);
       const hint = document.getElementById('worker-status-hint');
       if (online.length === 0) {
-        hint.innerHTML = `<span class="text-amber-300">⚠ Nenhum worker online.</span> Os jobs vão pra fila até alguém abrir o worker.`;
+        hint.innerHTML = `<span class="text-amber-300">⚠ Seu computador está desligado.</span> A postagem vai esperar na fila. Abre o app no PC ou veja em <a href="/workers" class="underline">Meu PC</a>.`;
       } else {
-        hint.innerHTML = `<strong class="text-emerald-300">${online.length} worker(s) online</strong> — distribui os jobs entre eles em até 5s.`;
+        hint.innerHTML = `<strong class="text-emerald-300">${online.length} computador(es) conectado(s)</strong> — as postagens serão executadas em até 5s.`;
       }
     } catch (e) {
       wrap.innerHTML = `<div class="text-[12px] text-red-300 text-center py-3">${e.message}</div>`;

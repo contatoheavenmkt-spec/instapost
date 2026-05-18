@@ -111,14 +111,13 @@
 
   function statusDot(active, session, workerName) {
     if (!active) return '<span class="dot dot-muted"></span> <span class="text-soft text-[12.5px]">pausada</span>';
-    if (session === 'saved') return '<span class="dot dot-success"></span> <span class="text-[12.5px]">conectada (servidor)</span>';
-    if (workerName) return `<span class="dot dot-success"></span> <span class="text-[12.5px]">conectada (worker)</span>`;
+    if (session === 'saved' || workerName) return '<span class="dot dot-success"></span> <span class="text-[12.5px]">conectada</span>';
     return '<span class="dot dot-warning"></span> <span class="text-[12.5px]">não conectada</span>';
   }
 
   function sessionBadge(session, workerName) {
-    if (session === 'saved') return '<span class="badge badge-success"><i data-lucide="shield-check" style="width:11px;height:11px"></i> servidor</span>';
-    if (workerName) return `<span class="badge badge-success" title="Sessão salva no worker: ${workerName}"><i data-lucide="monitor" style="width:11px;height:11px"></i> ${workerName}</span>`;
+    if (workerName) return `<span class="badge badge-success" title="Conta conectada via: ${workerName}"><i data-lucide="monitor" style="width:11px;height:11px"></i> ${workerName}</span>`;
+    if (session === 'saved') return '<span class="badge badge-success"><i data-lucide="shield-check" style="width:11px;height:11px"></i> ativa</span>';
     return '<span class="badge badge-neutral">vazia</span>';
   }
 
@@ -154,11 +153,8 @@
               <input type="checkbox" ${a.active ? 'checked' : ''} onchange="onToggle('${a.username}')" />
               <span class="slider"></span>
             </label>
-            <button class="btn btn-subtle btn-sm" onclick="onConnectViaWorker('${a.username}')" title="Conecta usando worker (PC com IP residencial) — recomendado">
-              <i data-lucide="monitor" class="icon"></i> Conectar (worker)
-            </button>
-            <button class="btn btn-ghost btn-sm" onclick="onTestLogin('${a.username}')" title="Conectar pelo servidor — só use se a conta já tem sessão pré-aquecida">
-              <i data-lucide="server" class="icon"></i>
+            <button class="btn btn-subtle btn-sm" onclick="onConnectViaWorker('${a.username}')" title="Conecta a conta usando seu computador">
+              <i data-lucide="log-in" class="icon"></i> Conectar
             </button>
             <button class="btn btn-ghost btn-sm" onclick="onEditTotp('${a.username}', ${a.has_totp})" title="${a.has_totp ? 'Atualizar' : 'Adicionar'} chave 2FA">
               <i data-lucide="shield" class="icon"></i>
@@ -294,22 +290,21 @@
   }
 
   async function onConnectViaWorker(username) {
-    // Antes de mandar, alerta se não tem worker online
     try {
       const workers = await api('/api/workers').catch(() => []);
       const online = workers.filter(w => w.online);
       if (!online.length) {
-        const ok = await confirmModal({
-          title: 'Nenhum worker online',
-          message: 'Nenhum worker está rodando no momento. O job vai ficar na fila até alguém abrir o worker no PC. Continuar?',
-          confirmText: 'Continuar mesmo assim',
+        await confirmModal({
+          title: 'Seu computador está desligado',
+          message: 'Pra conectar contas, você precisa ter o app rodando no seu PC. Abra o PowerShell, rode <span class="mono">python worker.py</span> e tenta de novo.<br><br>Já configurou? Vai em <a href="/workers" class="underline">Meu PC</a>.',
+          confirmText: 'Entendi',
         });
-        if (!ok) return;
+        return;
       }
       await api(`/api/accounts/${username}/connect-via-worker`, { method: 'POST' });
-      toast(`@${username} entrou na fila do worker. Em até 5s o worker vai logar.`, 'success');
-      // Aguarda um momento e recarrega pra mostrar status atualizado
-      setTimeout(load, 8000);
+      toast(`Conectando @${username}…`, 'info');
+      // Recarrega após uns segundos pra refletir status
+      setTimeout(() => { load(); if (window.refreshWorkerStatus) refreshWorkerStatus(); }, 8000);
     } catch (e) { toast(e.message, 'error'); }
   }
 

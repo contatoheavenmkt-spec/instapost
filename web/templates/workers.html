@@ -4,11 +4,11 @@
 
 <div class="flex items-end justify-between mb-6">
   <div>
-    <h1 class="h-page">Workers</h1>
-    <p class="text-sm text-soft mt-1">PCs da equipe que executam disparos com IP residencial (anti-blacklist)</p>
+    <h1 class="h-page">Meu PC</h1>
+    <p class="text-sm text-soft mt-1">Computadores conectados ao painel — são eles que executam as postagens</p>
   </div>
   <button class="btn btn-accent" onclick="openCreate()">
-    <i data-lucide="plus" class="icon"></i> Novo worker
+    <i data-lucide="plus" class="icon"></i> Cadastrar computador
   </button>
 </div>
 
@@ -16,7 +16,7 @@
 <div class="surface mb-5 p-4 flex items-start gap-3" style="border-left: 3px solid #3b82f6">
   <i data-lucide="info" style="width:18px;height:18px;color:#3b82f6;margin-top:1px;flex-shrink:0"></i>
   <div class="text-[13px] text-soft leading-relaxed">
-    Worker é um script Python que roda no <strong class="text-[var(--text)]">PC de cada membro</strong>. Conecta neste painel via token, recebe disparos atribuídos, posta no Instagram usando o IP residencial dele e reporta resultado. Cada token é único e revogável. Instruções de instalação: <a href="https://github.com/contatoheavenmkt-spec/instapost/blob/main/deploy/WORKER.md" target="_blank" class="underline">WORKER.md</a>.
+    O Instagram bloqueia logins vindos da VPS. Pra resolver, você roda um pequeno app no seu PC (ou nos PCs da equipe) que faz o login com IP residencial e posta. Aqui você cadastra o computador uma vez, copia o token e cola no PC. Instruções: <a href="https://github.com/contatoheavenmkt-spec/instapost/blob/main/deploy/WORKER.md" target="_blank" class="underline">guia de instalação</a>.
   </div>
 </div>
 

@@ -173,7 +173,7 @@
       {% if is_owner %}
       <div class="nav-group">Admin</div>
       <a class="nav-link {% if active == 'team' %}active{% endif %}" href="/team"><i data-lucide="users" class="icon"></i> Equipe</a>
-      <a class="nav-link {% if active == 'workers' %}active{% endif %}" href="/workers"><i data-lucide="monitor" class="icon"></i> Workers</a>
+      <a class="nav-link {% if active == 'workers' %}active{% endif %}" href="/workers"><i data-lucide="monitor" class="icon"></i> Meu PC</a>
       {% endif %}
     </nav>
     <div class="border-t border-line">
@@ -194,8 +194,15 @@
         </div>
       </div>
       {% endif %}
-      <div class="px-3 py-2 border-t border-line">
-        <div class="text-[10.5px] text-muted mono" id="host-info">—</div>
+      <div class="px-3 py-2.5 border-t border-line">
+        <a href="/workers" class="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-[var(--surface-2)]" id="worker-status-link" title="Status do seu computador">
+          <span class="dot dot-muted" id="worker-status-dot"></span>
+          <div class="flex-1 min-w-0">
+            <div class="text-[11.5px] font-medium leading-none" id="worker-status-text">Computador desligado</div>
+            <div class="text-[10px] text-muted mt-0.5" id="worker-status-sub">verificando…</div>
+          </div>
+        </a>
+        <div class="text-[10.5px] text-muted mono mt-1.5" id="host-info">—</div>
       </div>
     </div>
   </aside>
@@ -259,6 +266,35 @@
   fetch('/api/health').then(r => r.json()).then(j => {
     document.getElementById('host-info').textContent = j.host_ip ? `LAN: ${j.host_ip}:8000` : '127.0.0.1:8000';
   }).catch(() => {});
+
+  // Status do worker — polling pra mostrar se tem PC ligado
+  async function refreshWorkerStatus() {
+    try {
+      const workers = await fetch('/api/workers').then(r => r.ok ? r.json() : []);
+      const online = workers.filter(w => w.online);
+      const dot = document.getElementById('worker-status-dot');
+      const txt = document.getElementById('worker-status-text');
+      const sub = document.getElementById('worker-status-sub');
+      if (!dot) return;
+      if (online.length > 0) {
+        dot.className = 'dot dot-success dot-pulse';
+        txt.textContent = online.length === 1 ? 'Computador conectado' : `${online.length} computadores conectados`;
+        sub.textContent = online.map(w => w.name).join(' · ');
+      } else if (workers.length > 0) {
+        dot.className = 'dot dot-warning';
+        txt.textContent = 'Computador desligado';
+        sub.textContent = 'abra o worker no PC';
+      } else {
+        dot.className = 'dot dot-muted';
+        txt.textContent = 'Sem computador';
+        sub.textContent = 'cadastre em /workers';
+      }
+    } catch {}
+  }
+  refreshWorkerStatus();
+  setInterval(refreshWorkerStatus, 15000);
+  // Expõe pra outras telas poderem chamar
+  window.refreshWorkerStatus = refreshWorkerStatus;
 
   // User menu toggle
   window.toggleUserMenu = function() {
