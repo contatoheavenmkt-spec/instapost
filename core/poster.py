@@ -34,44 +34,16 @@ def post_reel(cl: Client, video_path: str, caption: str) -> dict:
 
 # ----------- STORIES -----------
 
-def _build_story_link_sticker(link_url: Optional[str], link_text: Optional[str] = None):
-    """Constrói um StorySticker custom de link visível.
-
-    NOTA: A versão do instagrapi instalada (2.6.x) usa StoryLink simples que vira
-    'tappable area' invisível em algumas contas. Pra forçar SEMPRE renderizar como
-    BOTÃO VISÍVEL com texto, construímos um StorySticker manualmente.
-
-    Posicionamento: centro horizontal, ~70% da altura, ~50% largura.
-    """
-    if not link_url:
-        return None
-    text = (link_text or "Clique aqui").strip()
-    try:
-        from instagrapi.types import StorySticker
-        return StorySticker(
-            type="story_link",
-            x=0.5,           # centro horizontal
-            y=0.7,           # área inferior
-            z=0,
-            width=0.5,       # 50% da largura
-            height=0.07,     # 7% da altura (~ tamanho real do botão)
-            rotation=0.0,
-            extra={
-                "link_type": "web",
-                "url": link_url,
-                "tap_state_str_id": "link_sticker_default",
-                "display_type": "link_sticker_default",
-                "custom_cta": text,    # algumas versões da API aceitam isso pra texto custom
-            },
-        )
-    except Exception as e:
-        print(f"[story_link_sticker] falhou: {e}")
-        return None
-
-
 def _build_story_links(link_url: Optional[str], link_text: Optional[str] = None) -> list:
-    """Wrapper que mantém compat com a assinatura antiga (`links=[...]`).
-    Retorna lista de StoryLink simples (instagram aceita) — fallback se sticker custom falhar."""
+    """Cria StoryLink que o instagrapi converte em sticker de link.
+
+    LIMITAÇÃO CONHECIDA: a versão do instagrapi instalada (2.6.x) NÃO tem
+    o campo 'linkText' no StoryLink, então não dá pra customizar o texto
+    do botão programaticamente — o Instagram usa o texto padrão dele
+    (geralmente o domínio da URL ou "Saiba mais").
+
+    O link funciona como **tappable area**: toca na tela do Story → abre o link.
+    """
     if not link_url:
         return []
     try:
@@ -82,25 +54,23 @@ def _build_story_links(link_url: Optional[str], link_text: Optional[str] = None)
             width=0.5, height=0.07,
             rotation=0.0,
         )]
-    except Exception:
+    except Exception as e:
+        print(f"[story_links] falhou: {e}")
         return []
 
 
 def post_story_video(cl: Client, video_path: str, caption: str = "",
                      link_url: Optional[str] = None, link_text: Optional[str] = None) -> dict:
     """Posta vídeo no Story (até 60s, vertical 9:16). Se link_url for passada,
-    adiciona como link sticker visível com texto custom (default: 'Clique aqui')."""
+    adiciona como tappable link (toca na tela pra abrir).
+    NOTA: link_text é aceito mas ignorado pela versão atual do instagrapi."""
     try:
         video = Path(video_path)
         if not video.exists():
             return {"success": False, "media_id": None, "error": f"Arquivo não encontrado: {video_path}"}
 
         kwargs = {"path": video, "caption": caption or ""}
-        # Sticker visível custom (tem texto) + StoryLink padrão (faz validate_reel_url)
-        sticker = _build_story_link_sticker(link_url, link_text)
         links = _build_story_links(link_url, link_text)
-        if sticker:
-            kwargs["stickers"] = [sticker]
         if links:
             kwargs["links"] = links
 
@@ -112,17 +82,15 @@ def post_story_video(cl: Client, video_path: str, caption: str = "",
 
 def post_story_photo(cl: Client, photo_path: str, caption: str = "",
                      link_url: Optional[str] = None, link_text: Optional[str] = None) -> dict:
-    """Posta foto no Story com link sticker visível + texto custom opcional."""
+    """Posta foto no Story. Se link_url for passada, vira tappable link
+    (toca na tela pra abrir o link)."""
     try:
         photo = Path(photo_path)
         if not photo.exists():
             return {"success": False, "media_id": None, "error": f"Arquivo não encontrado: {photo_path}"}
 
         kwargs = {"path": photo, "caption": caption or ""}
-        sticker = _build_story_link_sticker(link_url, link_text)
         links = _build_story_links(link_url, link_text)
-        if sticker:
-            kwargs["stickers"] = [sticker]
         if links:
             kwargs["links"] = links
 
