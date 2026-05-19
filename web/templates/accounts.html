@@ -62,6 +62,19 @@
   </div>
 </div>
 
+<!-- Banner de contas bloqueadas -->
+<div id="blocked-banner" class="surface px-4 py-3 mb-3 hidden" style="border-left: 3px solid var(--danger); background: rgba(239,68,68,0.06)">
+  <div class="flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <i data-lucide="alert-triangle" style="width:18px;height:18px;color:var(--danger)"></i>
+      <div>
+        <div class="text-[13px] font-semibold"><span id="blocked-count">0</span> conta(s) bloqueada(s) pelo Instagram</div>
+        <div class="text-[11.5px] text-soft">Instagram pediu verificação, checkpoint ou marcou atividade suspeita. Faça login manual no app, resolva o challenge, depois clique em "Resolvi" na linha da conta.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Bulk actions toolbar (visible when there's selection) -->
 <div id="bulk-bar" class="surface px-4 py-2.5 mb-3 flex items-center justify-between hidden">
   <div class="text-sm">
@@ -313,12 +326,23 @@
     empty.classList.add('hidden');
     document.querySelector('table.t').classList.remove('hidden');
 
-    tbody.innerHTML = accounts.map(a => `
-      <tr data-username="${a.username}">
+    tbody.innerHTML = accounts.map(a => {
+      const blockedRow = a.blocked ? 'style="background: rgba(239,68,68,0.06); border-left: 3px solid var(--danger)"' : '';
+      const blockedBadge = a.blocked
+        ? `<span class="badge badge-danger" title="Bloqueada em ${(a.blocked_at||'').slice(0,16).replace('T',' ')} - ${(a.blocked_reason||'').slice(0,140)}"><i data-lucide="alert-triangle" style="width:11px;height:11px"></i> BLOQUEADA</span>`
+        : '';
+      const clearBtn = a.blocked
+        ? `<button class="btn btn-subtle btn-sm" onclick="onClearBlock('${a.username}')" title="Marcar como resolvido (desbloqueie a conta manualmente antes)" style="color: #6ee7b7">
+            <i data-lucide="check-circle-2" class="icon"></i> Resolvi
+          </button>`
+        : '';
+      return `
+      <tr data-username="${a.username}" ${blockedRow}>
         <td><input type="checkbox" class="check row-check" value="${a.username}" ${selection.has(a.username) ? 'checked' : ''} onchange="onSelect(this)" /></td>
         <td>
-          <div class="flex items-center gap-2">
+          <div class="flex items-center gap-2 flex-wrap">
             <div class="font-medium mono text-[13px]">@${a.username}</div>
+            ${blockedBadge}
             ${a.has_totp
               ? '<span class="badge badge-success" title="2FA cadastrado"><i data-lucide="shield-check" style="width:11px;height:11px"></i> 2FA</span>'
               : '<span class="badge badge-neutral" title="Sem chave 2FA — se a conta tem 2FA ativo, conectar vai falhar"><i data-lucide="shield-off" style="width:11px;height:11px"></i> sem 2FA</span>'}
@@ -329,6 +353,7 @@
         <td>${automationBadge(a)}</td>
         <td class="text-right pr-4">
           <div class="inline-flex items-center gap-1.5">
+            ${clearBtn}
             <label class="switch" title="${a.active ? 'Pausar' : 'Ativar'}">
               <input type="checkbox" ${a.active ? 'checked' : ''} onchange="onToggle('${a.username}')" />
               <span class="slider"></span>
@@ -351,9 +376,38 @@
           </div>
         </td>
       </tr>
-    `).join('');
+    `;}).join('');
     if (window.lucide) lucide.createIcons();
     updateBulkBar();
+    updateBlockedBanner();
+  }
+
+  function updateBlockedBanner() {
+    const blocked = accounts.filter(a => a.blocked);
+    const banner = document.getElementById('blocked-banner');
+    if (!banner) return;
+    if (blocked.length) {
+      document.getElementById('blocked-count').textContent = blocked.length;
+      banner.classList.remove('hidden');
+    } else {
+      banner.classList.add('hidden');
+    }
+  }
+
+  async function onClearBlock(username) {
+    const ok = await confirmModal({
+      title: `Desbloquear @${username}?`,
+      message: 'Use isso DEPOIS de resolver o challenge manualmente (login no app, passou na verificação). Vou desmarcar o alerta e o sistema vai tentar postar de novo na próxima vez.',
+      confirmText: 'Sim, marcar como resolvido',
+    });
+    if (!ok) return;
+    try {
+      await api(`/api/accounts/${username}/clear-block`, { method: 'POST' });
+      toast(`@${username} desmarcada como bloqueada`, 'success');
+      await load();
+    } catch (e) {
+      toast(e.message, 'error');
+    }
   }
 
   function updateBulkBar() {

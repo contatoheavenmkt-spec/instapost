@@ -165,7 +165,11 @@
       <a class="nav-link {% if active == 'links' %}active{% endif %}" href="/links"><i data-lucide="link-2" class="icon"></i> Links</a>
 
       <div class="nav-group">Operação</div>
-      <a class="nav-link {% if active == 'accounts' %}active{% endif %}" href="/accounts"><i data-lucide="at-sign" class="icon"></i> Contas Insta</a>
+      <a class="nav-link {% if active == 'accounts' %}active{% endif %}" href="/accounts" id="nav-accounts-link">
+        <i data-lucide="at-sign" class="icon"></i>
+        <span class="flex-1">Contas Insta</span>
+        <span id="nav-blocked-badge" class="hidden badge badge-danger" style="padding: 1px 5px; font-size: 10px"></span>
+      </a>
       <a class="nav-link {% if active == 'schedule' %}active{% endif %}" href="/schedule"><i data-lucide="calendar-clock" class="icon"></i> Agenda</a>
       <a class="nav-link {% if active == 'jobs' %}active{% endif %}" href="/jobs"><i data-lucide="play-circle" class="icon"></i> Disparos</a>
       <a class="nav-link {% if active == 'logs' %}active{% endif %}" href="/logs"><i data-lucide="file-text" class="icon"></i> Logs</a>
@@ -298,6 +302,31 @@
   setInterval(refreshWorkerStatus, 15000);
   // Expõe pra outras telas poderem chamar
   window.refreshWorkerStatus = refreshWorkerStatus;
+
+  // Badge persistente de contas bloqueadas
+  let _lastBlockedKnown = -1;  // pra disparar toast só quando AUMENTA
+  async function refreshBlockedBadge() {
+    try {
+      const accs = await fetch('/api/accounts').then(r => r.ok ? r.json() : []);
+      const blocked = accs.filter(a => a.blocked);
+      const badge = document.getElementById('nav-blocked-badge');
+      if (!badge) return;
+      if (blocked.length) {
+        badge.textContent = blocked.length;
+        badge.classList.remove('hidden');
+      } else {
+        badge.classList.add('hidden');
+      }
+      // Toast só se subiu (nova detecção)
+      if (_lastBlockedKnown >= 0 && blocked.length > _lastBlockedKnown) {
+        const novas = blocked.length - _lastBlockedKnown;
+        toast(`⚠ ${novas} conta(s) bloqueada(s) detectada(s) — veja em Contas`, 'error');
+      }
+      _lastBlockedKnown = blocked.length;
+    } catch {}
+  }
+  refreshBlockedBadge();
+  setInterval(refreshBlockedBadge, 30000);
 
   // User menu toggle
   window.toggleUserMenu = function() {

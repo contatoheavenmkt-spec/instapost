@@ -406,7 +406,37 @@ def _account_view(a: dict) -> dict:
         "sync_last_post_at": a.get("sync_last_post_at"),
         "sync_completed": bool(a.get("sync_completed", False)),
         "posted_media_count": len(a.get("posted_media", []) or []),
+        # Bloqueio detectado
+        "blocked": bool(a.get("blocked", False)),
+        "blocked_at": a.get("blocked_at"),
+        "blocked_reason": a.get("blocked_reason"),
     }
+
+
+# ---------- DETECÇÃO DE BLOQUEIO ----------
+
+BLOCK_PATTERNS = (
+    "challenge_required", "challenge",
+    "checkpoint_required", "checkpoint",
+    "feedback_required",
+    "login_required",
+    "please_wait", "please wait",
+    "try_again_later", "try again later",
+    "account_disabled", "account disabled",
+    "user_has_logged_out",
+    "instagram bloqueou",  # nossa string custom em core/profile.py
+)
+
+
+def _is_block_error(error_msg: Optional[str]) -> Optional[str]:
+    """Retorna o padrão casado se for erro de bloqueio, senão None."""
+    if not error_msg:
+        return None
+    low = error_msg.lower()
+    for pat in BLOCK_PATTERNS:
+        if pat in low:
+            return pat
+    return None
 
 
 @app.get("/api/accounts")
@@ -798,6 +828,21 @@ def api_clear_session(username: str):
     if session_file.exists():
         session_file.unlink()
     return {"ok": True}
+
+
+@app.post("/api/accounts/{username}/clear-block")
+def api_clear_block(username: str, user=Depends(auth.require_user)):
+    """Desmarca a conta como bloqueada — use quando resolver o bloqueio manualmente
+    (passou no challenge, mudou senha, etc)."""
+    accounts = load_accounts()
+    for a in accounts:
+        if a["username"] == username:
+            a["blocked"] = False
+            a["blocked_at"] = None
+            a["blocked_reason"] = None
+            save_accounts(accounts)
+            return {"ok": True, "account": _account_view(a)}
+    raise HTTPException(404, "Conta não encontrada")
 
 
 # ---------- API: videos ----------
@@ -1327,6 +1372,23 @@ def api_worker_job_result(job_id: str, payload: WorkerResultIn, request: Request
         raise HTTPException(404, "Job não encontrado ou não atribuído a esse worker")
 
     # Side-effects pós-resultado:
+    # Failure: se error_msg casa com padrão de bloqueio, marca conta como blocked
+    if (not payload.success) and job and payload.error_msg:
+        pattern = _is_block_error(payload.error_msg)
+        if pattern:
+            try:
+                accounts = load_accounts()
+                for a in accounts:
+                    if a["username"] == job.account_username:
+                        a["blocked"] = True
+                        a["blocked_at"] = scheduler_mod.now_local().isoformat(timespec="seconds")
+                        a["blocked_reason"] = f"{pattern} — {payload.error_msg[:200]}"
+                        save_accounts(accounts)
+                        print(f"[block] @{a['username']} marcada como bloqueada ({pattern})")
+                        break
+            except Exception as e:
+                print(f"[worker_result] erro marcando bloqueio: {e}")
+
     # 1) Sucesso em qualquer op = marca conta como "conectada via worker"
     # 2) auto_follow_back: atualiza cache seen_followers no accounts.json
     # 3) post: registra mídia em posted_media (pra dedup + sync)
@@ -1338,6 +1400,12 @@ def api_worker_job_result(job_id: str, payload: WorkerResultIn, request: Request
                     a["connected_via_worker_id"] = w.id
                     a["connected_via_worker_name"] = w.name
                     a["connected_at"] = scheduler_mod.now_local().isoformat(timespec="seconds")
+                    # Se estava marcada como bloqueada e voltou a funcionar, limpa
+                    if a.get("blocked"):
+                        a["blocked"] = False
+                        a["blocked_at"] = None
+                        a["blocked_reason"] = None
+                        print(f"[block] @{a['username']} desmarcada (voltou a funcionar)")
                     if job.operation == "auto_follow_back" and payload.result_data:
                         new_seen = payload.result_data.get("seen_followers")
                         if isinstance(new_seen, list) and new_seen:
