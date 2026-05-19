@@ -202,7 +202,12 @@ class ScheduleManager:
             target=self._automation_loop, daemon=True, name="automation_scheduler"
         )
         self._automation_thread.start()
-        print(f"[scheduler] started (tick {TICK_SECONDS}s) + automations loop")
+        # Thread separada pra sync/backfill (contas novas pegando feed antigo)
+        self._sync_thread = threading.Thread(
+            target=self._sync_loop, daemon=True, name="sync_scheduler"
+        )
+        self._sync_thread.start()
+        print(f"[scheduler] started (tick {TICK_SECONDS}s) + automations + sync loops")
 
     def stop(self):
         self._stop_event.set()
@@ -525,6 +530,184 @@ class ScheduleManager:
                     _json.dump(accounts, f, ensure_ascii=False, indent=2)
             except Exception as e:
                 print(f"[automation] erro salvando accounts: {e}")
+
+    # ===================== SYNC / BACKFILL =====================
+
+    def _sync_loop(self):
+        """Loop que vê contas com sync_enabled e cria 1 remote_job de backfill
+        pra próxima mídia do pool central que essa conta ainda não postou,
+        respeitando sync_interval_hours por conta. Auto-desliga quando termina."""
+        import time as _t
+        _t.sleep(90)  # espera app subir
+        while not self._stop_event.is_set():
+            try:
+                self._sync_tick()
+            except Exception as e:
+                print(f"[sync] tick falhou: {e}")
+            # Tick a cada 10 min — granularidade fina o bastante pra intervalos curtos
+            self._stop_event.wait(10 * 60)
+
+    def _sync_tick(self):
+        import json as _json, os as _os
+        from datetime import datetime as _dt
+        from core.paths import ACCOUNTS_FILE, PENDING_DIR, POSTED_DIR
+        from core.poster import load_meta, detect_media_kind, load_caption
+        from web.remote_jobs import manager as rjob_manager
+        from web.shortener import manager as link_manager
+
+        # Janela de atividade 07:00 - 22:00 (mesmo da automation_loop)
+        hour = _dt.now().hour
+        if hour < 7 or hour >= 22:
+            return
+
+        try:
+            with open(ACCOUNTS_FILE, encoding="utf-8") as f:
+                accounts = _json.load(f)
+        except Exception:
+            return
+
+        # Constrói o pool central (união das posted_media de todas as contas)
+        pool: dict[str, dict] = {}
+        for a in accounts:
+            for item in (a.get("posted_media") or []):
+                name = item.get("name")
+                if not name:
+                    continue
+                posted_at = item.get("posted_at") or ""
+                if name not in pool:
+                    pool[name] = {
+                        "name": name,
+                        "kind": item.get("kind", "reel"),
+                        "first_posted_at": posted_at,
+                    }
+                elif posted_at and (not pool[name]["first_posted_at"] or posted_at < pool[name]["first_posted_at"]):
+                    pool[name]["first_posted_at"] = posted_at
+
+        pool_sorted = sorted(pool.values(), key=lambda x: x["first_posted_at"] or "")
+        if not pool_sorted:
+            return  # nada postado no sistema ainda
+
+        now = now_local()
+        base = _os.environ.get("PUBLIC_BASE_URL", "").rstrip("/") or "http://127.0.0.1:8000"
+        changed = False
+
+        for acc in accounts:
+            if not acc.get("active", True):
+                continue
+            if not acc.get("sync_enabled"):
+                continue
+            if not acc.get("connected_via_worker_id"):
+                continue
+
+            already = {p.get("name") for p in (acc.get("posted_media") or [])}
+            pending_pool = [m for m in pool_sorted if m["name"] not in already]
+            # Filtra só mídias que ainda existem em disco
+            pending_pool = [
+                m for m in pending_pool
+                if (PENDING_DIR / m["name"]).exists() or (POSTED_DIR / m["name"]).exists()
+            ]
+
+            if not pending_pool:
+                # Conta alcançou o feed — auto-desliga
+                if not acc.get("sync_completed"):
+                    acc["sync_completed"] = True
+                    acc["sync_enabled"] = False
+                    changed = True
+                    print(f"[sync] @{acc['username']} alcançou feed central — sync desligado")
+                continue
+
+            # Já tem job de sync pendente/rodando pra essa conta? Pula.
+            has_active = any(
+                j.account_username == acc["username"]
+                and j.operation == "post"
+                and (j.created_by or "").startswith("sync:")
+                and j.status in ("pending", "claimed", "running")
+                for j in rjob_manager._items.values()
+            )
+            if has_active:
+                continue
+
+            # Respeita intervalo
+            interval_h = int(acc.get("sync_interval_hours", 8))
+            last_iso = acc.get("sync_last_post_at")
+            if last_iso:
+                try:
+                    last_dt = datetime.fromisoformat(last_iso)
+                    if last_dt.tzinfo is None:
+                        last_dt = last_dt.astimezone()
+                    elapsed_h = (now - last_dt).total_seconds() / 3600.0
+                    if elapsed_h < interval_h:
+                        continue
+                except Exception:
+                    pass
+
+            # Pega a PRÓXIMA mídia da fila (cronológica)
+            next_media = pending_pool[0]
+            media_name = next_media["name"]
+            # Pega o arquivo onde estiver (pending OU posted)
+            media_path = PENDING_DIR / media_name
+            if not media_path.exists():
+                media_path = POSTED_DIR / media_name
+            if not media_path.exists():
+                continue
+
+            try:
+                meta = load_meta(str(media_path))
+                media_type = detect_media_kind(str(media_path))
+                caption = load_caption(str(media_path))
+            except Exception as e:
+                print(f"[sync] erro lendo meta de {media_name}: {e}")
+                continue
+
+            media_url = f"{base}/api/worker/media/{media_name}"
+            link_url = meta.get("link_url")
+            link_text = meta.get("link_text") or "Clique aqui"
+
+            # Story+link: encurta por conta (anti-cluster)
+            if meta.get("kind") == "story" and link_url:
+                try:
+                    short = link_manager.create(
+                        target_url=link_url,
+                        label=f"sync · @{acc['username']}",
+                        account=acc["username"],
+                        created_by="sync",
+                    )
+                    link_url = f"{base}/r/{short.slug}"
+                except Exception as e:
+                    print(f"[sync] shortener falhou pra {acc['username']}: {e}")
+
+            highlight_title = None
+            if meta.get("kind") == "story" and acc.get("auto_highlight_enabled") and acc.get("auto_highlight_title"):
+                highlight_title = acc["auto_highlight_title"]
+
+            rjob_manager.create({
+                "operation": "post",
+                "params": {"auto_highlight_title": highlight_title} if highlight_title else {},
+                "account_username": acc["username"],
+                "account_password": acc["password"],
+                "account_totp_secret": acc.get("totp_secret"),
+                "account_proxy": acc.get("proxy"),
+                "video_name": media_name,
+                "media_type": media_type,
+                "kind": meta.get("kind", "reel"),
+                "caption": caption,
+                "link_url": link_url,
+                "link_text": link_text,
+                "media_url": media_url,
+                "created_by": f"sync:{acc['username']}",
+            })
+            # Marca tentativa (mesmo que falhe, evita spamar; sync_last_post_at real
+            # vai ser sobrescrito quando worker reportar success)
+            acc["sync_last_post_at"] = now.isoformat(timespec="seconds")
+            changed = True
+            print(f"[sync] @{acc['username']} backfill -> {media_name} ({len(already)+1}/{len(pool_sorted)})")
+
+        if changed:
+            try:
+                with open(ACCOUNTS_FILE, "w", encoding="utf-8") as f:
+                    _json.dump(accounts, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                print(f"[sync] erro salvando accounts: {e}")
 
     def _dispatch_via_server(self, s: Schedule):
         """Caminho LEGACY — dispara post.py local na VPS. Usa IP da VPS (vai falhar)."""

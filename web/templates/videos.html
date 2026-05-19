@@ -589,7 +589,11 @@
         method: 'POST',
         body: JSON.stringify({ video: currentVideo.name, accounts: checked }),
       });
-      toast(`${r.count} job(s) na fila. Worker(s) vão pegar em até 5s.`, 'success');
+      let msg = `${r.count} job(s) na fila. Worker(s) vão pegar em até 5s.`;
+      if (r.skipped && r.skipped.length) {
+        msg += ` (${r.skipped.length} pulada(s): já postaram essa mídia)`;
+      }
+      toast(msg, 'success');
       closeWorkerModal();
       closeDetail();
       setTimeout(() => location.href = `/jobs`, 400);

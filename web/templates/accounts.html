@@ -217,6 +217,29 @@
             <input id="auto-highlight-title" class="input" style="flex:1; padding: 4px 8px" placeholder="ex: Promoções, Cardápio, Catálogo" maxlength="30" />
           </div>
         </div>
+
+        <!-- Sync com feed central (backfill) -->
+        <div class="surface-2 p-3 rounded-md border border-[var(--accent)]/30">
+          <div class="flex items-center justify-between mb-2">
+            <div>
+              <div class="text-[13px] font-medium flex items-center gap-1.5">
+                <i data-lucide="git-merge" style="width:13px;height:13px;color:var(--accent)"></i>
+                Sincronizar com feed central
+              </div>
+              <div class="text-[11px] text-soft">Conta nova posta as mídias já publicadas em outras contas, da mais antiga pra mais nova, no intervalo abaixo. Desliga sozinho quando alcança o feed.</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="sync-toggle" />
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="flex items-center gap-2 text-[12px] text-soft mb-2">
+            <span>Intervalo:</span>
+            <input id="sync-interval" type="number" min="1" max="72" class="input" style="width: 70px; padding: 4px 8px" value="8" />
+            <span class="text-muted">horas entre cada post de backfill</span>
+          </div>
+          <div id="sync-status" class="text-[11.5px] text-muted mt-1.5 leading-tight"></div>
+        </div>
       </div>
     </div>
 
@@ -269,6 +292,11 @@
     }
     if (a.auto_highlight_enabled && a.auto_highlight_title) {
       parts.push(`<span class="badge badge-success" title="Stories vão automaticamente pro destaque '${a.auto_highlight_title}'"><i data-lucide="bookmark" style="width:11px;height:11px"></i> ${escapeHtml(a.auto_highlight_title)}</span>`);
+    }
+    if (a.sync_enabled) {
+      parts.push(`<span class="badge badge-accent" title="Sincronizando com feed central a cada ${a.sync_interval_hours}h — já postou ${a.posted_media_count} mídia(s)"><i data-lucide="git-merge" style="width:11px;height:11px"></i> sync ${a.sync_interval_hours}h</span>`);
+    } else if (a.sync_completed) {
+      parts.push(`<span class="badge badge-neutral" title="Alcançou o feed central — sync finalizado"><i data-lucide="check" style="width:11px;height:11px"></i> sync ok</span>`);
     }
     return parts.length ? `<div class="flex flex-wrap gap-1">${parts.join('')}</div>` : '<span class="text-muted text-[12px]">—</span>';
   }
@@ -500,8 +528,39 @@
     document.getElementById('auto-followback-max').value = a.auto_follow_back_max_per_day || 10;
     document.getElementById('auto-highlight-toggle').checked = !!a.auto_highlight_enabled;
     document.getElementById('auto-highlight-title').value = a.auto_highlight_title || '';
+    document.getElementById('sync-toggle').checked = !!a.sync_enabled;
+    document.getElementById('sync-interval').value = a.sync_interval_hours || 8;
+    document.getElementById('sync-status').textContent = 'Carregando status do sync…';
     document.getElementById('profile-modal').classList.remove('hidden');
     if (window.lucide) lucide.createIcons();
+    loadSyncInfo(username);
+  }
+
+  async function loadSyncInfo(username) {
+    try {
+      const info = await api(`/api/accounts/${username}/sync-info`);
+      const el = document.getElementById('sync-status');
+      if (!el) return;
+      const pool = info.pool_total;
+      const posted = info.posted_count;
+      const pending = info.pending_available_count;
+      let msg = `📊 Pool central: ${pool} mídia(s) — essa conta já postou ${posted}, restam ${pending} pra sincronizar`;
+      if (info.sync_completed) {
+        msg += ' ✓ alcançou o feed (sync desligado automaticamente)';
+      } else if (info.sync_enabled && info.next_media && info.next_media.length) {
+        msg += `\nPróximas: ${info.next_media.slice(0, 3).join(', ')}`;
+      } else if (info.sync_enabled && pending === 0) {
+        msg += '\n(nada pendente no momento)';
+      }
+      if (info.sync_last_post_at) {
+        msg += `\nÚltimo backfill: ${info.sync_last_post_at.replace('T', ' ').slice(0, 16)}`;
+      }
+      el.textContent = msg;
+      el.style.whiteSpace = 'pre-line';
+    } catch (e) {
+      const el = document.getElementById('sync-status');
+      if (el) el.textContent = '';
+    }
   }
 
   function closeProfileEditor() {
@@ -578,6 +637,8 @@
     const autoFbMax = parseInt(document.getElementById('auto-followback-max').value) || 10;
     const autoHl = document.getElementById('auto-highlight-toggle').checked;
     const autoHlTitle = document.getElementById('auto-highlight-title').value.trim();
+    const syncOn = document.getElementById('sync-toggle').checked;
+    const syncInterval = parseInt(document.getElementById('sync-interval').value) || 8;
 
     if (autoHl && !autoHlTitle) {
       toast('Defina um nome pro destaque', 'error');
@@ -596,6 +657,8 @@
           auto_follow_back_max_per_day: autoFbMax,
           auto_highlight_enabled: autoHl,
           auto_highlight_title: autoHlTitle,
+          sync_enabled: syncOn,
+          sync_interval_hours: syncInterval,
         }),
       });
 

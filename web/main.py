@@ -399,6 +399,12 @@ def _account_view(a: dict) -> dict:
         # Destaques automáticos
         "auto_highlight_enabled": bool(a.get("auto_highlight_enabled", False)),
         "auto_highlight_title": a.get("auto_highlight_title", ""),
+        # Sync com feed central
+        "sync_enabled": bool(a.get("sync_enabled", False)),
+        "sync_interval_hours": int(a.get("sync_interval_hours", 8)),
+        "sync_last_post_at": a.get("sync_last_post_at"),
+        "sync_completed": bool(a.get("sync_completed", False)),
+        "posted_media_count": len(a.get("posted_media", []) or []),
     }
 
 
@@ -662,6 +668,8 @@ class AutomationsIn(BaseModel):
     auto_follow_back_max_per_day: Optional[int] = None
     auto_highlight_enabled: Optional[bool] = None
     auto_highlight_title: Optional[str] = None
+    sync_enabled: Optional[bool] = None
+    sync_interval_hours: Optional[int] = None
 
 
 @app.post("/api/accounts/{username}/automations")
@@ -682,9 +690,80 @@ def api_update_automations(username: str, payload: AutomationsIn, user=Depends(a
                 a["auto_highlight_enabled"] = bool(payload.auto_highlight_enabled)
             if payload.auto_highlight_title is not None:
                 a["auto_highlight_title"] = (payload.auto_highlight_title or "").strip()[:30]
+            if payload.sync_enabled is not None:
+                a["sync_enabled"] = bool(payload.sync_enabled)
+                # Reset completed flag se o usuário religar manualmente
+                if payload.sync_enabled:
+                    a["sync_completed"] = False
+            if payload.sync_interval_hours is not None:
+                a["sync_interval_hours"] = max(1, min(72, int(payload.sync_interval_hours)))
             save_accounts(accounts)
             return {"ok": True, "account": _account_view(a)}
     raise HTTPException(404, "Conta não encontrada")
+
+
+# ---------- SYNC / BACKFILL ----------
+
+def _build_media_pool(accounts: list[dict]) -> list[dict]:
+    """Constrói o 'pool central' de mídias = união das posted_media de TODAS as contas,
+    ordenado pela 1ª vez que cada nome apareceu (cronológico — mais antigo primeiro).
+
+    Cada item: {name, kind, first_posted_at, posted_by_count}
+    """
+    pool: dict[str, dict] = {}
+    for a in accounts:
+        for item in (a.get("posted_media") or []):
+            name = item.get("name")
+            if not name:
+                continue
+            posted_at = item.get("posted_at") or ""
+            if name not in pool:
+                pool[name] = {
+                    "name": name,
+                    "kind": item.get("kind", "reel"),
+                    "first_posted_at": posted_at,
+                    "posted_by_count": 1,
+                }
+            else:
+                pool[name]["posted_by_count"] += 1
+                # Mantém a data mais antiga
+                if posted_at and (not pool[name]["first_posted_at"] or posted_at < pool[name]["first_posted_at"]):
+                    pool[name]["first_posted_at"] = posted_at
+                    pool[name]["kind"] = item.get("kind", pool[name]["kind"])
+    return sorted(pool.values(), key=lambda x: x["first_posted_at"] or "")
+
+
+def _account_posted_names(a: dict) -> set[str]:
+    return {item["name"] for item in (a.get("posted_media") or []) if item.get("name")}
+
+
+@app.get("/api/accounts/{username}/sync-info")
+def api_sync_info(username: str, user=Depends(auth.require_user)):
+    """Retorna pool central + progresso de sync da conta + próximas mídias da fila."""
+    accounts = load_accounts()
+    acc = next((a for a in accounts if a["username"] == username), None)
+    if not acc:
+        raise HTTPException(404, "Conta não encontrada")
+    pool = _build_media_pool(accounts)
+    already = _account_posted_names(acc)
+    pending_in_pool = [m for m in pool if m["name"] not in already]
+    # Só conta mídias que ainda existem no servidor (pending ou posted)
+    pending_available = [
+        m for m in pending_in_pool
+        if (PENDING_DIR / m["name"]).exists() or (POSTED_DIR / m["name"]).exists()
+    ]
+    return {
+        "username": username,
+        "sync_enabled": bool(acc.get("sync_enabled", False)),
+        "sync_interval_hours": int(acc.get("sync_interval_hours", 8)),
+        "sync_last_post_at": acc.get("sync_last_post_at"),
+        "sync_completed": bool(acc.get("sync_completed", False)),
+        "pool_total": len(pool),
+        "posted_count": len(already),
+        "pending_count": len(pending_in_pool),
+        "pending_available_count": len(pending_available),
+        "next_media": [m["name"] for m in pending_available[:5]],
+    }
 
 
 @app.post("/api/accounts/{username}/connect-via-worker")
@@ -1227,6 +1306,7 @@ def api_worker_job_result(job_id: str, payload: WorkerResultIn, request: Request
     # Side-effects pós-resultado:
     # 1) Sucesso em qualquer op = marca conta como "conectada via worker"
     # 2) auto_follow_back: atualiza cache seen_followers no accounts.json
+    # 3) post: registra mídia em posted_media (pra dedup + sync)
     if payload.success and job:
         try:
             accounts = load_accounts()
@@ -1235,11 +1315,23 @@ def api_worker_job_result(job_id: str, payload: WorkerResultIn, request: Request
                     a["connected_via_worker_id"] = w.id
                     a["connected_via_worker_name"] = w.name
                     a["connected_at"] = scheduler_mod.now_local().isoformat(timespec="seconds")
-                    # auto_follow_back: salva novo cache de seen_followers
                     if job.operation == "auto_follow_back" and payload.result_data:
                         new_seen = payload.result_data.get("seen_followers")
                         if isinstance(new_seen, list) and new_seen:
                             a["auto_follow_back_seen_followers"] = new_seen
+                    if job.operation == "post" and job.video_name:
+                        posted = a.get("posted_media") or []
+                        if not any(p.get("name") == job.video_name for p in posted):
+                            posted.append({
+                                "name": job.video_name,
+                                "kind": job.kind or "reel",
+                                "posted_at": scheduler_mod.now_local().isoformat(timespec="seconds"),
+                                "media_id": payload.media_id,
+                            })
+                            a["posted_media"] = posted
+                        # Se veio do sync_loop, atualiza marcador
+                        if (job.created_by or "").startswith("sync:"):
+                            a["sync_last_post_at"] = scheduler_mod.now_local().isoformat(timespec="seconds")
                     save_accounts(accounts)
                     break
         except Exception as e:
@@ -1254,6 +1346,7 @@ class RemoteJobIn(BaseModel):
     video: str                       # nome do arquivo em pending/
     account: Optional[str] = None    # username (legacy single-conta)
     accounts: Optional[list[str]] = None  # multi-conta: cria N jobs (1 por conta)
+    skip_duplicates: bool = True     # pula contas que já postaram essa mídia
 
 
 @app.get("/api/remote-jobs")
@@ -1301,6 +1394,17 @@ def api_create_remote_job(payload: RemoteJobIn, request: Request, user=Depends(a
         if not a:
             raise HTTPException(404, f"Conta @{uname} não existe")
         targets.append(a)
+
+    # Filtra duplicatas (contas que já postaram essa mídia)
+    skipped = []
+    if payload.skip_duplicates:
+        filtered = []
+        for acc in targets:
+            if video_name in _account_posted_names(acc):
+                skipped.append(acc["username"])
+            else:
+                filtered.append(acc)
+        targets = filtered
 
     # Lê meta + caption do arquivo
     from core.poster import load_meta, detect_media_kind, load_caption
@@ -1358,6 +1462,7 @@ def api_create_remote_job(payload: RemoteJobIn, request: Request, user=Depends(a
         "count": len(created),
         "job_ids": created,
         "first_job_id": created[0] if created else None,
+        "skipped": skipped,
     }
 
 
