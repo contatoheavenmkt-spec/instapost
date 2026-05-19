@@ -215,6 +215,12 @@ class ScheduleManager:
     def _loop(self):
         # Primeira passada rápida pra processar pendentes antigos
         time.sleep(2)
+        # Auto-rescue: na partida do servidor, reagenda missed + pending atrasados
+        # mantendo intervalo entre eles, começando a partir de agora+5min.
+        try:
+            self._rescue_late_schedules()
+        except Exception as e:
+            print(f"[scheduler] rescue falhou: {e}")
         while not self._stop_event.is_set():
             try:
                 self._tick()
@@ -222,6 +228,50 @@ class ScheduleManager:
                 print(f"[scheduler] tick falhou: {e}")
             # Espera, mas acorda se stop foi pedido
             self._stop_event.wait(TICK_SECONDS)
+
+    def _rescue_late_schedules(self, buffer_minutes: int = 5):
+        """Reagenda schedules 'missed' e 'pending no passado' mantendo o intervalo
+        original entre eles, começando em now + buffer_minutes.
+
+        Roda 1x no startup do scheduler (servidor caiu/voltou).
+        """
+        now = now_local()
+        with self._lock:
+            late = []
+            for s in self._items:
+                if s.status == "missed":
+                    late.append(s)
+                elif s.status == "pending":
+                    try:
+                        if s.scheduled_dt < now:
+                            late.append(s)
+                    except Exception:
+                        continue
+            if not late:
+                return
+
+            late.sort(key=lambda s: s.scheduled_at)
+
+            # Calcula deltas relativos
+            origins = [s.scheduled_dt for s in late]
+            deltas = [0.0]
+            for i in range(1, len(origins)):
+                deltas.append((origins[i] - origins[i-1]).total_seconds())
+
+            base = now + timedelta(minutes=buffer_minutes)
+            offset = 0.0
+            for i, s in enumerate(late):
+                offset += deltas[i]
+                new_dt = base + timedelta(seconds=offset)
+                old_iso = s.scheduled_at
+                s.scheduled_at = new_dt.isoformat(timespec="seconds")
+                s.status = "pending"
+                s.note = f"auto-reagendado (era {old_iso[:16]})"
+                s.remote_job_ids = []
+                s.job_id = None
+
+            self._save()
+            print(f"[scheduler] rescue: {len(late)} schedules reagendados a partir de {base.isoformat(timespec='seconds')}")
 
     def _tick(self):
         now = now_local()

@@ -1,0 +1,333 @@
+{% extends "base.html" %}
+{% block title %}Financeiro · Insta Poster{% endblock %}
+{% block content %}
+
+<div class="flex items-end justify-between mb-6">
+  <div>
+    <h1 class="h-page">Financeiro</h1>
+    <p class="text-sm text-soft mt-1">Lance custos (compra de conta, proxy, ferramenta) e vendas pra acompanhar o saldo.</p>
+  </div>
+  <div class="flex items-center gap-2">
+    <select id="month-filter" class="select" style="width: 180px"></select>
+    <button class="btn btn-accent" onclick="openAddModal()">
+      <i data-lucide="plus" class="icon"></i> Novo lançamento
+    </button>
+  </div>
+</div>
+
+<!-- Cards de resumo -->
+<div class="grid grid-cols-4 gap-4 mb-6">
+  <div class="surface p-4">
+    <div class="text-[11px] uppercase tracking-wider text-muted font-semibold">Custos</div>
+    <div class="text-[26px] font-semibold mt-1.5 text-[#fca5a5]" id="card-custos">R$ 0,00</div>
+    <div class="text-[11px] text-muted mt-1" id="card-custos-count">0 lançamentos</div>
+  </div>
+  <div class="surface p-4">
+    <div class="text-[11px] uppercase tracking-wider text-muted font-semibold">Vendas</div>
+    <div class="text-[26px] font-semibold mt-1.5 text-[#6ee7b7]" id="card-vendas">R$ 0,00</div>
+    <div class="text-[11px] text-muted mt-1" id="card-vendas-count">0 lançamentos</div>
+  </div>
+  <div class="surface p-4">
+    <div class="text-[11px] uppercase tracking-wider text-muted font-semibold">Saldo</div>
+    <div class="text-[26px] font-semibold mt-1.5" id="card-saldo">R$ 0,00</div>
+    <div class="text-[11px] text-muted mt-1">vendas − custos</div>
+  </div>
+  <div class="surface p-4">
+    <div class="text-[11px] uppercase tracking-wider text-muted font-semibold">ROI</div>
+    <div class="text-[26px] font-semibold mt-1.5" id="card-roi">—</div>
+    <div class="text-[11px] text-muted mt-1">retorno sobre custo</div>
+  </div>
+</div>
+
+<!-- Quebra por categoria -->
+<div class="grid grid-cols-2 gap-4 mb-6">
+  <div class="surface p-4">
+    <div class="h-section mb-3 text-[#fca5a5]">Custos por categoria</div>
+    <div id="custos-by-cat" class="space-y-2"></div>
+  </div>
+  <div class="surface p-4">
+    <div class="h-section mb-3 text-[#6ee7b7]">Vendas por categoria</div>
+    <div id="vendas-by-cat" class="space-y-2"></div>
+  </div>
+</div>
+
+<!-- Tabela de lançamentos -->
+<div class="surface overflow-hidden">
+  <div class="px-5 py-3.5 border-b border-line flex items-center justify-between">
+    <div class="h-section">Lançamentos</div>
+    <div class="flex items-center gap-2">
+      <button class="btn btn-ghost btn-sm" data-filter="" onclick="setFilter(this, '')">Todos</button>
+      <button class="btn btn-ghost btn-sm" data-filter="custo" onclick="setFilter(this, 'custo')">Custos</button>
+      <button class="btn btn-ghost btn-sm" data-filter="venda" onclick="setFilter(this, 'venda')">Vendas</button>
+    </div>
+  </div>
+  <table class="t">
+    <thead>
+      <tr>
+        <th>Data</th>
+        <th>Tipo</th>
+        <th>Categoria</th>
+        <th>Descrição</th>
+        <th class="text-right">Valor</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody id="finance-tbody">
+      <tr><td colspan="6" class="text-center py-8 text-muted">Carregando…</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- Modal: novo lançamento -->
+<div id="add-modal" class="modal-bg hidden" onclick="if(event.target===this) closeAddModal()">
+  <div class="modal-card" style="max-width: 480px">
+    <div class="flex items-center justify-between mb-4">
+      <div class="text-[15px] font-semibold">Novo lançamento</div>
+      <button class="btn btn-ghost btn-sm" onclick="closeAddModal()"><i data-lucide="x" class="icon"></i></button>
+    </div>
+    <form id="add-form" class="space-y-3" onsubmit="event.preventDefault(); submitEntry()">
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="label">Tipo</label>
+          <select id="f-type" class="select" onchange="updateCategoryOptions()">
+            <option value="custo">Custo</option>
+            <option value="venda">Venda</option>
+          </select>
+        </div>
+        <div>
+          <label class="label">Categoria</label>
+          <select id="f-category" class="select"></select>
+        </div>
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="label">Valor (R$)</label>
+          <input id="f-amount" class="input" type="number" step="0.01" min="0" placeholder="0,00" required />
+        </div>
+        <div>
+          <label class="label">Data</label>
+          <input id="f-date" class="input" type="date" required />
+        </div>
+      </div>
+      <div>
+        <label class="label">Descrição</label>
+        <input id="f-description" class="input" placeholder="Ex: compra conta @luana_xyz com login+2FA" maxlength="200" />
+      </div>
+      <div>
+        <label class="label">Observação (opcional)</label>
+        <textarea id="f-notes" class="textarea" rows="2" placeholder="Detalhes extras…" maxlength="500"></textarea>
+      </div>
+      <div class="flex justify-end gap-2 pt-3 border-t border-line mt-4">
+        <button type="button" class="btn btn-ghost" onclick="closeAddModal()">Cancelar</button>
+        <button type="submit" class="btn btn-accent">
+          <i data-lucide="check" class="icon"></i> Adicionar
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+  const CATEGORIES = {{ categories|tojson }};
+  let entries = [];
+  let currentFilter = '';
+  let currentMonth = '';
+
+  function fmtBRL(v) {
+    return 'R$ ' + (Number(v) || 0).toFixed(2).replace('.', ',');
+  }
+
+  function escapeHtml(s) {
+    return (s || '').replace(/[&<>"']/g, c => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[c]));
+  }
+
+  function buildMonthOptions() {
+    const sel = document.getElementById('month-filter');
+    const now = new Date();
+    const opts = ['<option value="">Todos os meses</option>'];
+    for (let i = 0; i < 12; i++) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      const label = d.toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' });
+      opts.push(`<option value="${ym}">${label}</option>`);
+    }
+    sel.innerHTML = opts.join('');
+    sel.addEventListener('change', e => { currentMonth = e.target.value; load(); });
+  }
+
+  function updateCategoryOptions() {
+    const type = document.getElementById('f-type').value;
+    const sel = document.getElementById('f-category');
+    sel.innerHTML = CATEGORIES[type].map(c => `<option value="${c}">${c}</option>`).join('');
+  }
+
+  function openAddModal() {
+    document.getElementById('f-type').value = 'custo';
+    document.getElementById('f-amount').value = '';
+    document.getElementById('f-description').value = '';
+    document.getElementById('f-notes').value = '';
+    const today = new Date().toISOString().slice(0, 10);
+    document.getElementById('f-date').value = today;
+    updateCategoryOptions();
+    document.getElementById('add-modal').classList.remove('hidden');
+    setTimeout(() => document.getElementById('f-amount').focus(), 50);
+    if (window.lucide) lucide.createIcons();
+  }
+
+  function closeAddModal() {
+    document.getElementById('add-modal').classList.add('hidden');
+  }
+
+  async function submitEntry() {
+    const payload = {
+      type: document.getElementById('f-type').value,
+      category: document.getElementById('f-category').value,
+      amount: parseFloat(document.getElementById('f-amount').value),
+      description: document.getElementById('f-description').value.trim(),
+      date: document.getElementById('f-date').value,
+      notes: document.getElementById('f-notes').value.trim() || null,
+    };
+    if (!payload.amount || payload.amount <= 0) {
+      toast('Valor precisa ser maior que zero', 'error');
+      return;
+    }
+    try {
+      await api('/api/finance', { method: 'POST', body: JSON.stringify(payload) });
+      toast('Lançamento adicionado', 'success');
+      closeAddModal();
+      await load();
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  }
+
+  function setFilter(btn, value) {
+    currentFilter = value;
+    document.querySelectorAll('[data-filter]').forEach(b => b.classList.remove('btn-accent', 'btn-ghost'));
+    document.querySelectorAll('[data-filter]').forEach(b => b.classList.add(b === btn ? 'btn-accent' : 'btn-ghost'));
+    render();
+  }
+
+  async function deleteEntry(id) {
+    const ok = await confirmModal({
+      title: 'Remover lançamento?',
+      message: 'Essa ação não pode ser desfeita.',
+      danger: true,
+      confirmText: 'Remover',
+    });
+    if (!ok) return;
+    try {
+      await api(`/api/finance/${id}/delete`, { method: 'POST' });
+      toast('Lançamento removido', 'success');
+      await load();
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  }
+
+  function render() {
+    // Filtra entries pelo currentFilter
+    const filtered = currentFilter ? entries.filter(e => e.type === currentFilter) : entries;
+    const tbody = document.getElementById('finance-tbody');
+    if (!filtered.length) {
+      tbody.innerHTML = `<tr><td colspan="6" class="text-center py-8 text-muted">Nenhum lançamento ainda. Aperte "Novo lançamento" pra começar.</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = filtered.map(e => {
+      const dateBr = e.date ? e.date.split('-').reverse().join('/') : '—';
+      const typeBadge = e.type === 'custo'
+        ? '<span class="badge badge-danger">CUSTO</span>'
+        : '<span class="badge badge-success">VENDA</span>';
+      const amountColor = e.type === 'custo' ? 'text-[#fca5a5]' : 'text-[#6ee7b7]';
+      const sign = e.type === 'custo' ? '−' : '+';
+      return `
+        <tr>
+          <td class="mono text-[12.5px]">${dateBr}</td>
+          <td>${typeBadge}</td>
+          <td><span class="badge badge-neutral">${escapeHtml(e.category)}</span></td>
+          <td>${escapeHtml(e.description) || '<span class="text-muted">—</span>'}</td>
+          <td class="text-right mono font-medium ${amountColor}">${sign} ${fmtBRL(e.amount)}</td>
+          <td class="text-right">
+            <button class="btn btn-ghost btn-sm" onclick="deleteEntry('${e.id}')" title="Remover">
+              <i data-lucide="trash-2" class="icon"></i>
+            </button>
+          </td>
+        </tr>
+      `;
+    }).join('');
+    if (window.lucide) lucide.createIcons();
+  }
+
+  function renderSummary(summary) {
+    document.getElementById('card-custos').textContent = fmtBRL(summary.total_custos);
+    document.getElementById('card-vendas').textContent = fmtBRL(summary.total_vendas);
+    document.getElementById('card-saldo').textContent = fmtBRL(summary.saldo);
+    document.getElementById('card-custos-count').textContent = `${summary.count_custos} lançamento(s)`;
+    document.getElementById('card-vendas-count').textContent = `${summary.count_vendas} lançamento(s)`;
+
+    const saldoEl = document.getElementById('card-saldo');
+    saldoEl.classList.remove('text-[#6ee7b7]', 'text-[#fca5a5]');
+    if (summary.saldo > 0) saldoEl.classList.add('text-[#6ee7b7]');
+    else if (summary.saldo < 0) saldoEl.classList.add('text-[#fca5a5]');
+
+    const roiEl = document.getElementById('card-roi');
+    if (summary.total_custos > 0) {
+      const roi = ((summary.saldo / summary.total_custos) * 100).toFixed(0);
+      roiEl.textContent = `${roi}%`;
+      roiEl.classList.remove('text-[#6ee7b7]', 'text-[#fca5a5]');
+      roiEl.classList.add(summary.saldo >= 0 ? 'text-[#6ee7b7]' : 'text-[#fca5a5]');
+    } else {
+      roiEl.textContent = '—';
+    }
+
+    // Por categoria
+    const renderCats = (data, target) => {
+      const entries = Object.entries(data || {}).sort((a, b) => b[1] - a[1]);
+      if (!entries.length) {
+        target.innerHTML = '<div class="text-[12px] text-muted">Nenhum lançamento</div>';
+        return;
+      }
+      const total = entries.reduce((s, [_, v]) => s + v, 0);
+      target.innerHTML = entries.map(([cat, val]) => {
+        const pct = total > 0 ? ((val / total) * 100).toFixed(0) : 0;
+        return `
+          <div>
+            <div class="flex items-center justify-between text-[12.5px] mb-1">
+              <span class="text-soft">${escapeHtml(cat)}</span>
+              <span class="mono font-medium">${fmtBRL(val)} <span class="text-muted">(${pct}%)</span></span>
+            </div>
+            <div class="h-1 bg-[var(--surface-2)] rounded-full overflow-hidden">
+              <div class="h-full bg-[var(--accent)]" style="width: ${pct}%"></div>
+            </div>
+          </div>
+        `;
+      }).join('');
+    };
+    renderCats(summary.by_category.custo, document.getElementById('custos-by-cat'));
+    renderCats(summary.by_category.venda, document.getElementById('vendas-by-cat'));
+  }
+
+  async function load() {
+    try {
+      const params = currentMonth ? `?month=${currentMonth}` : '';
+      const [list, summary] = await Promise.all([
+        api(`/api/finance${params}`),
+        api(`/api/finance/summary${params}`),
+      ]);
+      entries = list;
+      render();
+      renderSummary(summary);
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  }
+
+  buildMonthOptions();
+  updateCategoryOptions();
+  load();
+</script>
+{% endblock %}

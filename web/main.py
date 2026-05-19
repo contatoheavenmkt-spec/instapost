@@ -37,6 +37,7 @@ from web import scheduler as scheduler_mod  # noqa: E402
 from web.shortener import manager as link_manager  # noqa: E402
 from web.workers import manager as worker_manager  # noqa: E402
 from web.remote_jobs import manager as rjob_manager  # noqa: E402
+from web.finance import manager as finance_manager, CATEGORIES as FINANCE_CATEGORIES  # noqa: E402
 from core.media import generate_thumbnail  # noqa: E402
 from core.paths import (  # noqa: E402
     ACCOUNTS_FILE, PENDING_DIR, POSTED_DIR, SESSIONS_DIR, LOGS_DIR, data_path,
@@ -1477,6 +1478,56 @@ def api_cancel_remote_job(job_id: str, user=Depends(auth.require_user)):
 def api_delete_remote_job(job_id: str, user=Depends(auth.require_user)):
     if not rjob_manager.delete(job_id):
         raise HTTPException(404, "Job não encontrado")
+    return {"ok": True}
+
+
+# ---------- FINANÇAS ----------
+
+class FinanceIn(BaseModel):
+    type: str  # "custo" | "venda"
+    category: str
+    amount: float
+    description: Optional[str] = ""
+    date: Optional[str] = None  # YYYY-MM-DD; default hoje
+    notes: Optional[str] = None
+
+
+@app.get("/financeiro", response_class=HTMLResponse)
+def page_finance(request: Request, user=Depends(auth.require_user)):
+    return templates.TemplateResponse(
+        request,
+        "financeiro.html",
+        _ctx(request, active="financeiro", categories=FINANCE_CATEGORIES),
+    )
+
+
+@app.get("/api/finance")
+def api_finance_list(
+    type: Optional[str] = None,
+    month: Optional[str] = None,
+    user=Depends(auth.require_user),
+):
+    return finance_manager.list(type_filter=type, month=month)
+
+
+@app.get("/api/finance/summary")
+def api_finance_summary(month: Optional[str] = None, user=Depends(auth.require_user)):
+    return finance_manager.summary(month=month)
+
+
+@app.post("/api/finance")
+def api_finance_create(payload: FinanceIn, user=Depends(auth.require_user)):
+    try:
+        entry = finance_manager.create(payload.model_dump(), created_by=user["email"])
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, "entry": entry.to_dict()}
+
+
+@app.post("/api/finance/{entry_id}/delete")
+def api_finance_delete(entry_id: str, user=Depends(auth.require_user)):
+    if not finance_manager.delete(entry_id):
+        raise HTTPException(404, "Lançamento não encontrado")
     return {"ok": True}
 
 
