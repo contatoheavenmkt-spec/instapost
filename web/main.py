@@ -891,6 +891,12 @@ def api_delete_video(name: str):
         sib = PENDING_DIR / sib_name
         if sib.exists():
             sib.unlink()
+    # Limpa variantes anti-cluster (variantes por conta)
+    try:
+        from core.anticluster import cleanup_variants_for
+        cleanup_variants_for(name)
+    except Exception:
+        pass
     return {"ok": True}
 
 
@@ -1238,20 +1244,36 @@ def api_worker_next_job(request: Request):
         return {"job": None}
     # Inclui credenciais (worker precisa pra logar no Insta)
     d = job.to_dict(include_secrets=True, include_logs=False)
-    # Reescreve a media_url pra apontar pra rota worker (que aceita X-Worker-Token)
-    d["media_url"] = f"{str(request.base_url).rstrip('/')}/api/worker/media/{job.video_name}"
+    # Reescreve a media_url pra apontar pra rota worker (com ?account= pra disparar variante anti-cluster)
+    if job.video_name:
+        d["media_url"] = (
+            f"{str(request.base_url).rstrip('/')}/api/worker/media/{job.video_name}"
+            f"?account={job.account_username}"
+        )
     return {"job": d}
 
 
 @app.get("/api/worker/media/{name}")
-def api_worker_media(name: str, request: Request):
-    """Download de mídia pelo worker. Auth via X-Worker-Token."""
+def api_worker_media(name: str, request: Request, account: Optional[str] = None):
+    """Download de mídia pelo worker. Auth via X-Worker-Token.
+
+    Se ?account=<username> for passado, devolve a VARIANTE única daquela conta
+    (anti-cluster: cada conta recebe um arquivo levemente diferente).
+    Sem ?account=, devolve o original (legacy / preview).
+    """
     _require_worker(request)
     name = safe_name(name)
     # Tenta pending primeiro, depois posted (caso arquivado entre criação e execução)
     for folder in (PENDING_DIR, POSTED_DIR):
         media = folder / name
         if media.exists():
+            # Se conta foi passada, gera/serve variante anti-cluster
+            if account:
+                try:
+                    from core.anticluster import variant_for_account
+                    media = variant_for_account(media, account.strip())
+                except Exception as e:
+                    print(f"[worker_media] anticluster falhou pra {account}/{name}: {e}")
             ext = media.suffix.lower()
             mime_map = {
                 ".mp4": "video/mp4",
@@ -1414,13 +1436,14 @@ def api_create_remote_job(payload: RemoteJobIn, request: Request, user=Depends(a
     caption = load_caption(str(media_path))
 
     base = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/") or str(request.base_url).rstrip("/")
-    media_url = f"{base}/api/worker/media/{video_name}"
 
     raw_link = meta.get("link_url")
     link_text = meta.get("link_text") or "Clique aqui"
     created = []
 
     for acc in targets:
+        # media_url COM ?account= pra disparar a variante anti-cluster por conta
+        media_url = f"{base}/api/worker/media/{video_name}?account={acc['username']}"
         # Se for story+link, gera 1 short link único por conta (anti-cluster)
         link_url = raw_link
         if meta.get("kind") == "story" and raw_link:

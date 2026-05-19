@@ -27,6 +27,7 @@ SESSIONS_DIR = data_path("sessions")
 LOGS_DIR = data_path("logs")
 PENDING_DIR = data_path("content", "pending")
 POSTED_DIR = data_path("content", "posted")
+VARIANTS_DIR = data_path("content", "variants")  # cache anti-cluster por conta
 ACCOUNTS_FILE = data_path("accounts.json")
 USERS_FILE = data_path("users.json")
 INVITES_FILE = data_path("invites.json")
@@ -36,5 +37,5 @@ JOBS_FILE = data_path("logs", "jobs.json")
 SECRET_FILE = data_path(".secret.key")
 
 # Garante estrutura mínima
-for d in (SESSIONS_DIR, LOGS_DIR, PENDING_DIR, POSTED_DIR):
+for d in (SESSIONS_DIR, LOGS_DIR, PENDING_DIR, POSTED_DIR, VARIANTS_DIR):
     d.mkdir(parents=True, exist_ok=True)

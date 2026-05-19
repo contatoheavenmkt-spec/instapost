@@ -415,10 +415,11 @@ class ScheduleManager:
 
         # URL pública pro worker baixar
         base = _os.environ.get("PUBLIC_BASE_URL", "").rstrip("/") or "http://127.0.0.1:8000"
-        media_url = f"{base}/api/worker/media/{s.video}"
 
         created_ids = []
         for acc in targets:
+            # media_url COM ?account= pra disparar variante anti-cluster
+            media_url = f"{base}/api/worker/media/{s.video}?account={acc['username']}"
             # Encurta link se for story
             this_link = link_url
             if meta.get("kind") == "story" and link_url:
@@ -709,7 +710,8 @@ class ScheduleManager:
                 print(f"[sync] erro lendo meta de {media_name}: {e}")
                 continue
 
-            media_url = f"{base}/api/worker/media/{media_name}"
+            # media_url COM ?account= pra disparar variante anti-cluster
+            media_url = f"{base}/api/worker/media/{media_name}?account={acc['username']}"
             link_url = meta.get("link_url")
             link_text = meta.get("link_text") or "Clique aqui"
 
