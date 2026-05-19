@@ -830,6 +830,38 @@ def api_clear_session(username: str):
     return {"ok": True}
 
 
+@app.post("/api/accounts/check-all")
+def api_check_all_accounts(user=Depends(auth.require_user)):
+    """Dispara test_login em todas as contas ativas E conectadas via worker.
+    Resultado de cada job passa pelo api_worker_job_result, que detecta padrões
+    de bloqueio e marca a conta automaticamente. Sem auto-schedule — só manual."""
+    accounts = load_accounts()
+    targets = [
+        a for a in accounts
+        if a.get("active", True) and a.get("connected_via_worker_id")
+    ]
+    if not targets:
+        raise HTTPException(400, "Nenhuma conta ativa conectada via worker")
+
+    created = []
+    for acc in targets:
+        rj = rjob_manager.create({
+            "operation": "test_login",
+            "account_username": acc["username"],
+            "account_password": acc["password"],
+            "account_totp_secret": acc.get("totp_secret"),
+            "account_proxy": acc.get("proxy"),
+            "created_by": user["email"],
+        })
+        created.append(rj.id)
+    return {
+        "ok": True,
+        "count": len(created),
+        "job_ids": created,
+        "checked_usernames": [a["username"] for a in targets],
+    }
+
+
 @app.post("/api/accounts/{username}/clear-block")
 def api_clear_block(username: str, user=Depends(auth.require_user)):
     """Desmarca a conta como bloqueada — use quando resolver o bloqueio manualmente
