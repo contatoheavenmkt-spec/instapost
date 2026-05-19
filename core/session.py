@@ -83,13 +83,18 @@ def get_client(
         else:
             client.login(username, password)
 
-    # Tentativa 1: usar sessão salva
+    # Tentativa 1: usar sessão salva (SEM refazer login)
+    # Bugfix: antes chamava _do_login mesmo com sessão válida, forçando TOTP
+    # toda vez. Agora só testa se a sessão ainda funciona via API call leve.
     if session_file.exists():
         try:
             cl.load_settings(session_file)
-            _do_login(cl)
+            # Set creds pra que, em LoginRequired, o instagrapi possa relogar sozinho
+            cl.username = username
+            cl.password = password
+            # Teste leve da sessão. Se válida, segue sem TOTP.
             cl.get_timeline_feed()
-            print(f"[{username}] Sessão restaurada ✓")
+            print(f"[{username}] Sessão restaurada ✓ (sem relogin)")
             return cl
         except LoginRequired:
             print(f"[{username}] Sessão expirou, fazendo login novo...")

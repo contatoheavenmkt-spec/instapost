@@ -657,23 +657,6 @@ def api_worker_profile_pic(name: str):
     return FileResponse(p, media_type=mime)
 
 
-@app.get("/api/worker/media/{name}")
-def api_worker_media(name: str):
-    """Serve mídia (vídeo/foto pra Reel/Story) pro worker baixar."""
-    name = safe_name(name)
-    p = PENDING_DIR / name
-    if not p.exists():
-        # Pode ser que já foi arquivada
-        p = POSTED_DIR / name
-        if not p.exists():
-            raise HTTPException(404, "Mídia não encontrada")
-    from fastapi.responses import FileResponse
-    ext = p.suffix.lower()
-    mime_map = {".mp4": "video/mp4", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-                ".png": "image/png", ".webp": "image/webp"}
-    return FileResponse(p, media_type=mime_map.get(ext, "application/octet-stream"))
-
-
 @app.get("/api/accounts/{username}/profile-info")
 def api_get_profile_info(username: str, user=Depends(auth.require_user)):
     """Cria job pra worker buscar info atual do perfil."""
@@ -1371,6 +1354,19 @@ def api_worker_job_log(job_id: str, payload: WorkerLogIn, request: Request):
     w = _require_worker(request)
     if not rjob_manager.append_log(job_id=job_id, worker_id=w.id, line=payload.line):
         raise HTTPException(404, "Job não encontrado ou não atribuído a esse worker")
+    return {"ok": True}
+
+
+class WorkerStepIn(BaseModel):
+    step: str  # downloading | logging | posting | finishing
+
+
+@app.post("/api/worker/jobs/{job_id}/step")
+def api_worker_job_step(job_id: str, payload: WorkerStepIn, request: Request):
+    """Worker reporta a etapa atual do job (pra Kanban granular)."""
+    w = _require_worker(request)
+    if not rjob_manager.set_step(job_id=job_id, worker_id=w.id, step=payload.step):
+        raise HTTPException(404, "Job não encontrado, etapa inválida ou não atribuído a esse worker")
     return {"ok": True}
 
 

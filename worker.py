@@ -21,8 +21,10 @@ from __future__ import annotations
 
 import os
 import platform
+import random
 import socket
 import sys
+import threading
 import time
 import traceback
 from pathlib import Path
@@ -53,9 +55,62 @@ POLL_INTERVAL_SECONDS = 5
 HEARTBEAT_INTERVAL_SECONDS = 30
 HTTP_TIMEOUT = 30
 
+# Quantas threads processam jobs em paralelo. Default 1 (serial — modo seguro).
+# Subir pra 2 acelera ~2x quando há contas diferentes na fila, com risco moderado de
+# flag por logins simultâneos do mesmo IP. Nunca processa 2 jobs da MESMA conta em
+# paralelo (lock por username garante isso).
+WORKER_CONCURRENCY = max(1, min(3, int(os.environ.get("WORKER_CONCURRENCY", "1"))))
+
+# Cache do Client instagrapi por conta. Se o próximo job for da mesma @, reusa o
+# Client em vez de fazer load_settings + get_timeline_feed de novo (economiza 3-8s).
+CLIENT_CACHE_TTL_SECONDS = 10 * 60
+
 # Diretório temp pra baixar mídia
 TMP_DIR = Path(__file__).resolve().parent / ".worker_tmp"
 TMP_DIR.mkdir(exist_ok=True)
+
+# Estado global compartilhado entre threads de jobs
+_stop_flag = threading.Event()
+_account_locks: dict[str, threading.Lock] = {}
+_account_locks_meta_lock = threading.Lock()
+_client_cache: dict[str, tuple[object, float]] = {}  # username -> (Client, last_used_ts)
+_client_cache_lock = threading.Lock()
+
+
+def get_account_lock(username: str) -> threading.Lock:
+    """Lock por conta — garante que 2 threads do worker nunca postam na mesma @ em paralelo."""
+    with _account_locks_meta_lock:
+        lock = _account_locks.get(username)
+        if lock is None:
+            lock = threading.Lock()
+            _account_locks[username] = lock
+        return lock
+
+
+def get_cached_client(username: str):
+    """Devolve Client cacheado se ainda fresco, senão None."""
+    now = time.time()
+    with _client_cache_lock:
+        entry = _client_cache.get(username)
+        if not entry:
+            return None
+        cl, last_used = entry
+        if now - last_used >= CLIENT_CACHE_TTL_SECONDS:
+            _client_cache.pop(username, None)
+            return None
+        # Bump last_used
+        _client_cache[username] = (cl, now)
+        return cl
+
+
+def store_client(username: str, cl) -> None:
+    with _client_cache_lock:
+        _client_cache[username] = (cl, time.time())
+
+
+def invalidate_client(username: str) -> None:
+    with _client_cache_lock:
+        _client_cache.pop(username, None)
 
 
 # ----------- HTTP -----------
@@ -127,6 +182,15 @@ def mark_started(job_id: str):
         pass
 
 
+def report_step(job_id: str, step: str):
+    """Notifica o servidor da etapa atual (downloading|logging|posting|finishing).
+    Best-effort: se falhar, segue sem quebrar o job."""
+    try:
+        post(f"/api/worker/jobs/{job_id}/step", {"step": step})
+    except Exception:
+        pass
+
+
 # ----------- Download media -----------
 
 def download_media(url: str, dest: Path):
@@ -169,13 +233,22 @@ def execute_job(job: dict):
         return
 
     # Helper: faz login do Instagram (compartilhado entre operations)
+    # Reusa Client cacheado se a mesma conta foi usada nos últimos 10min — economiza
+    # load_settings + get_timeline_feed (3-8s por job).
     def do_login():
-        return get_client(
+        cached = get_cached_client(username)
+        if cached is not None:
+            log(f"♻️ sessão Insta em cache (sem relogin)")
+            return cached
+        report_step(job_id, "logging")
+        cl = get_client(
             username=username,
             password=job["account_password"],
             proxy=job.get("account_proxy"),
             totp_secret=job.get("account_totp_secret"),
         )
+        store_client(username, cl)
+        return cl
 
     # =====================================================
     # OPERAÇÃO: test_login
@@ -324,6 +397,7 @@ def execute_job(job: dict):
     log(f"iniciando job: {job['video_name']} ({job['kind']}) -> @{username}")
 
     # Baixa mídia
+    report_step(job_id, "downloading")
     media_name = job["video_name"]
     media_path = TMP_DIR / f"{job_id}_{media_name}"
     try:
@@ -335,22 +409,31 @@ def execute_job(job: dict):
         report_result(job_id, False, error_msg=f"download: {e}")
         return
 
-    # Login Instagram
-    try:
-        log(f"fazendo login no Instagram (sessão local, se existir)")
-        cl = get_client(
-            username=username,
-            password=job["account_password"],
-            proxy=job.get("account_proxy"),
-            totp_secret=job.get("account_totp_secret"),
-        )
-        log(f"✓ logado como @{username}")
-    except Exception as e:
-        log(f"❌ falha login: {e}")
-        report_result(job_id, False, error_msg=f"login: {e}")
-        return
+    # Login Instagram (usa cache se a mesma conta foi usada recentemente)
+    cached = get_cached_client(username)
+    if cached is not None:
+        cl = cached
+        log(f"♻️ sessão Insta em cache (sem relogin)")
+    else:
+        report_step(job_id, "logging")
+        try:
+            log(f"fazendo login no Instagram (sessão local, se existir)")
+            cl = get_client(
+                username=username,
+                password=job["account_password"],
+                proxy=job.get("account_proxy"),
+                totp_secret=job.get("account_totp_secret"),
+            )
+            store_client(username, cl)
+            log(f"✓ logado como @{username}")
+        except Exception as e:
+            invalidate_client(username)
+            log(f"❌ falha login: {e}")
+            report_result(job_id, False, error_msg=f"login: {e}")
+            return
 
     # Posta
+    report_step(job_id, "posting")
     try:
         kind = job.get("kind", "reel")
         media_type = job.get("media_type", "video")
@@ -391,6 +474,7 @@ def execute_job(job: dict):
             if kind == "story":
                 highlight_title = params.get("auto_highlight_title") or job.get("auto_highlight_title")
                 if highlight_title:
+                    report_step(job_id, "finishing")
                     # Fallback: se phantom error (sem mid), busca o último story ativo
                     story_pk_for_highlight = mid
                     if not story_pk_for_highlight:
@@ -437,6 +521,52 @@ def execute_job(job: dict):
 
 # ----------- Loop principal -----------
 
+def _periodic_heartbeat():
+    """Roda em thread separada — heartbeat a cada HEARTBEAT_INTERVAL_SECONDS."""
+    while not _stop_flag.is_set():
+        heartbeat()
+        # Acorda se stop foi pedido
+        if _stop_flag.wait(HEARTBEAT_INTERVAL_SECONDS):
+            return
+
+
+def _worker_loop(thread_id: int):
+    """Loop independente: claim → execute → repeat. Roda N vezes em paralelo
+    quando WORKER_CONCURRENCY > 1. Lock por conta garante que 2 threads nunca
+    processam a mesma @ em paralelo."""
+    while not _stop_flag.is_set():
+        try:
+            job = fetch_next_job()
+            if not job:
+                # Sem trabalho — dorme com jitter pra não bater todo polling juntos
+                _stop_flag.wait(POLL_INTERVAL_SECONDS + random.uniform(0, 2))
+                continue
+
+            username = job.get("account_username", "")
+            lock = get_account_lock(username)
+            # Se outra thread já está nessa conta, espera serializar
+            acquired_now = lock.acquire(blocking=False)
+            if not acquired_now:
+                if WORKER_CONCURRENCY > 1:
+                    print(f"[T{thread_id}] @{username} ocupada por outra thread, serializando…")
+                lock.acquire()
+            try:
+                # Stagger anti-detecção quando há paralelismo: cada thread espera
+                # 15-45s antes de começar (evita 2 logins exatos no mesmo segundo).
+                if WORKER_CONCURRENCY > 1:
+                    jitter = random.uniform(15, 45)
+                    print(f"[T{thread_id}] aguarda {jitter:.0f}s antes de iniciar (stagger)")
+                    if _stop_flag.wait(jitter):
+                        return
+                execute_job(job)
+            finally:
+                lock.release()
+        except Exception as e:
+            print(f"[T{thread_id}] exceção no loop: {e}")
+            traceback.print_exc()
+            _stop_flag.wait(POLL_INTERVAL_SECONDS)
+
+
 def main():
     # Força UTF-8 no stdout (Windows usa cp1252)
     try:
@@ -455,9 +585,10 @@ def main():
     print(f"=" * 60)
     print(f"  Insta Poster Worker")
     print(f"=" * 60)
-    print(f"  Server:   {SERVER_URL}")
-    print(f"  Nome:     {WORKER_NAME}")
-    print(f"  Platform: {PLATFORM}")
+    print(f"  Server:      {SERVER_URL}")
+    print(f"  Nome:        {WORKER_NAME}")
+    print(f"  Platform:    {PLATFORM}")
+    print(f"  Concurrency: {WORKER_CONCURRENCY} thread(s)")
     print(f"=" * 60)
     print()
 
@@ -467,35 +598,33 @@ def main():
         print("Heartbeat inicial falhou. Verifica SERVER_URL e WORKER_TOKEN.")
         sys.exit(2)
     print(f"✓ Conectado (worker_id: {info.get('worker_id')})")
-    print(f"  Aguardando jobs... (poll {POLL_INTERVAL_SECONDS}s)")
+    print(f"  Aguardando jobs… ({WORKER_CONCURRENCY} thread(s), poll {POLL_INTERVAL_SECONDS}s)")
     print()
 
-    last_heartbeat = time.time()
+    # Heartbeat em thread dedicada (não bloqueia o claim)
+    hb_thread = threading.Thread(target=_periodic_heartbeat, daemon=True, name="heartbeat")
+    hb_thread.start()
 
-    while True:
-        try:
-            # Heartbeat periódico
-            if time.time() - last_heartbeat > HEARTBEAT_INTERVAL_SECONDS:
-                heartbeat()
-                last_heartbeat = time.time()
+    # N threads de execução de jobs
+    workers: list[threading.Thread] = []
+    for i in range(WORKER_CONCURRENCY):
+        t = threading.Thread(target=_worker_loop, args=(i,), daemon=True, name=f"worker-{i}")
+        t.start()
+        workers.append(t)
+        # Stagger no startup também — não inicia 2 polls no mesmo instante
+        if i < WORKER_CONCURRENCY - 1:
+            time.sleep(random.uniform(3, 8))
 
-            # Pega próximo job (claim)
-            job = fetch_next_job()
-            if job:
-                execute_job(job)
-                # Após executar, manda heartbeat imediato
-                heartbeat()
-                last_heartbeat = time.time()
-            else:
-                time.sleep(POLL_INTERVAL_SECONDS)
-
-        except KeyboardInterrupt:
-            print("\n[worker] encerrando…")
-            sys.exit(0)
-        except Exception as e:
-            print(f"[loop] exceção: {e}")
-            traceback.print_exc()
-            time.sleep(POLL_INTERVAL_SECONDS)
+    try:
+        while not _stop_flag.is_set():
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\n[worker] encerrando…")
+        _stop_flag.set()
+        # Dá 3s pras threads finalizarem polling
+        for t in workers:
+            t.join(timeout=3)
+        sys.exit(0)
 
 
 if __name__ == "__main__":

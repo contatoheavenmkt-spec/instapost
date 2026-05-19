@@ -67,6 +67,10 @@ class RemoteJob:
         self.media_url: str = data.get("media_url", "")
         # Estado
         self.status: str = data.get("status", "pending")
+        # Etapa fina dentro de claimed/running pro Kanban:
+        # queued | downloading | logging | posting | finishing | done
+        self.step: str = data.get("step", "queued")
+        self.step_at: Optional[str] = data.get("step_at")
         self.worker_id: Optional[str] = data.get("worker_id")
         self.created_at: str = data.get("created_at") or now_iso()
         self.created_by: Optional[str] = data.get("created_by")
@@ -91,6 +95,8 @@ class RemoteJob:
             "link_text": self.link_text,
             "media_url": self.media_url,
             "status": self.status,
+            "step": self.step,
+            "step_at": self.step_at,
             "worker_id": self.worker_id,
             "created_at": self.created_at,
             "created_by": self.created_by,
@@ -203,6 +209,24 @@ class RemoteJobManager:
             if not job or job.worker_id != worker_id:
                 return False
             job.status = "running"
+            # Se worker ainda não reportou step, assume downloading (1ª etapa do flow)
+            if job.step == "queued":
+                job.step = "downloading"
+                job.step_at = now_iso()
+            self._save()
+            return True
+
+    VALID_STEPS = ("queued", "downloading", "logging", "posting", "finishing", "done")
+
+    def set_step(self, job_id: str, worker_id: str, step: str) -> bool:
+        if step not in self.VALID_STEPS:
+            return False
+        with self._lock:
+            job = self._items.get(job_id)
+            if not job or job.worker_id != worker_id:
+                return False
+            job.step = step
+            job.step_at = now_iso()
             self._save()
             return True
 
@@ -225,6 +249,8 @@ class RemoteJobManager:
             if not job or job.worker_id != worker_id:
                 return False
             job.status = "done" if success else "error"
+            job.step = "done"
+            job.step_at = now_iso()
             job.media_id = media_id
             job.error_msg = error_msg
             if result_data:

@@ -2,163 +2,423 @@
 {% block title %}Disparos · Insta Poster{% endblock %}
 {% block content %}
 
-<div class="flex items-end justify-between mb-7">
+<style>
+  .kanban-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+  .kanban-col { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; min-height: 280px; display: flex; flex-direction: column; }
+  .kanban-col-header { padding: 11px 14px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .kanban-col-title { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--text-2); display: flex; align-items: center; gap: 7px; }
+  .kanban-col-count { background: var(--surface-2); color: var(--text-2); font-size: 11px; padding: 1px 7px; border-radius: 999px; font-weight: 600; min-width: 22px; text-align: center; }
+  .kanban-col-body { padding: 10px; display: flex; flex-direction: column; gap: 8px; max-height: calc(100vh - 360px); overflow-y: auto; flex: 1; }
+  .kanban-col-body::-webkit-scrollbar { width: 6px; }
+  .kanban-col-body::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 999px; }
+
+  .kanban-card { background: var(--surface-2); border: 1px solid var(--border); border-radius: 7px; padding: 9px 11px; cursor: pointer; transition: border-color .12s, transform .08s; position: relative; }
+  .kanban-card:hover { border-color: var(--border-2); }
+  .kanban-card:active { transform: scale(.99); }
+  .kanban-card .video-name { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .kanban-card .account { font-size: 13px; font-weight: 500; margin-top: 3px; color: var(--text); }
+  .kanban-card .meta-row { display: flex; align-items: center; justify-content: space-between; margin-top: 6px; gap: 6px; }
+  .kanban-card .step-row { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-2); }
+  .kanban-card .err-msg { font-size: 11px; color: #fca5a5; margin-top: 5px; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.4; }
+  .kanban-card .time-ago { font-size: 10.5px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+
+  .col-empty { color: var(--text-3); font-size: 12px; text-align: center; padding: 40px 12px; }
+
+  .step-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+  .step-downloading { background: #60a5fa; box-shadow: 0 0 0 2px rgba(96,165,250,.15); animation: pulse 1.5s ease-in-out infinite; }
+  .step-logging { background: var(--warning); box-shadow: 0 0 0 2px rgba(245,158,11,.15); animation: pulse 1.5s ease-in-out infinite; }
+  .step-posting { background: var(--accent); box-shadow: 0 0 0 2px rgba(236,72,153,.18); animation: pulse 1.2s ease-in-out infinite; }
+  .step-finishing { background: #a78bfa; box-shadow: 0 0 0 2px rgba(167,139,250,.18); animation: pulse 1.2s ease-in-out infinite; }
+
+  /* Multi-select dropdown estilizado igual aos selects */
+  details.acc-picker > summary { cursor: pointer; }
+  details.acc-picker > summary::-webkit-details-marker { display: none; }
+  details.acc-picker > summary::marker { display: none; }
+</style>
+
+<div class="flex items-end justify-between mb-6">
   <div>
     <h1 class="h-page">Disparos</h1>
-    <p class="text-sm text-soft mt-1">Configure os filtros e rode o post.py. Cada execução vira um job.</p>
+    <p class="text-sm text-soft mt-1">Acompanhe cada conta em tempo real conforme o worker processa.</p>
+  </div>
+  <div class="flex items-center gap-2">
+    <div class="text-[11.5px] text-muted">atualiza a cada 3s</div>
+    <button class="btn btn-ghost btn-sm" onclick="loadKanban(true)"><i data-lucide="refresh-cw" class="icon"></i> Atualizar</button>
   </div>
 </div>
 
-<div class="grid grid-cols-3 gap-5">
-  <div class="surface p-5">
-    <div class="h-section mb-4">Novo disparo</div>
-    {% if accounts %}
-    <form id="run-form" class="space-y-4">
-      <div>
-        <label class="label">Conta</label>
-        <select name="account" class="select">
-          <option value="">— todas conectadas ({{ accounts|length }}) —</option>
-          {% for a in accounts %}<option value="{{ a.username }}">@{{ a.username }}</option>{% endfor %}
-        </select>
-        {% if total_active > accounts|length %}
-        <div class="text-[11px] text-muted mt-1.5 flex items-start gap-1.5">
-          <i data-lucide="info" style="width:11px;height:11px;margin-top:2px;flex-shrink:0;color:var(--warning)"></i>
-          <span>{{ total_active - accounts|length }} conta(s) ativa(s) sem sessão — ocultas. <a href="/accounts" class="underline hover:text-[var(--text)]">Conectar agora</a>.</span>
-        </div>
-        {% endif %}
-      </div>
-      <div>
-        <label class="label">Vídeo</label>
-        <select name="video" class="select">
-          <option value="">— todos pendentes ({{ videos|length }}) —</option>
-          {% for v in videos %}<option value="{{ v.name }}">{{ v.name }}</option>{% endfor %}
-        </select>
-      </div>
-      <label class="flex items-start gap-3 p-3 surface-2 cursor-pointer">
-        <input type="checkbox" name="dry_run" class="check mt-0.5" checked />
-        <div>
-          <div class="text-[13px] font-medium">Dry-run</div>
-          <div class="text-[11.5px] text-soft mt-0.5">Simula sem postar de verdade. Útil pra conferir o plano.</div>
-        </div>
-      </label>
-      <button type="submit" class="btn btn-accent w-full">
-        <i data-lucide="play" class="icon"></i> Disparar
-      </button>
-    </form>
-    <div class="mt-4 pt-4 border-t border-line text-[11.5px] text-soft leading-relaxed">
-      Delays automáticos: <span class="mono text-[var(--text)]">60-180s</span> entre contas, <span class="mono text-[var(--text)]">5-15min</span> entre vídeos.
-      Pode fechar a aba — o servidor continua rodando.
-    </div>
-    {% else %}
-    <div class="text-center py-8">
-      <i data-lucide="plug" style="width:32px;height:32px;color:var(--text-3);margin:0 auto 10px;display:block"></i>
-      <div class="text-[14px] font-medium mb-1">Nenhuma conta conectada</div>
-      <div class="text-[12px] text-soft mb-4">
-        {% if total_active %}
-        Você tem {{ total_active }} conta(s) ativa(s), mas nenhuma conectou ainda.
-        {% else %}
-        Adicione contas e conecte cada uma antes de disparar.
-        {% endif %}
-      </div>
-      <a href="/accounts" class="btn btn-accent inline-flex">
-        <i data-lucide="arrow-right" class="icon"></i> Ir para Contas
-      </a>
-    </div>
-    {% endif %}
+<!-- Novo disparo (compacto, em linha) -->
+<div class="surface p-4 mb-5">
+  <div class="flex items-center gap-2 mb-3">
+    <i data-lucide="zap" style="width:14px;height:14px;color:var(--accent)"></i>
+    <div class="h-section">Novo disparo</div>
+    <div class="text-[11px] text-muted">{{ accounts|length }} conta(s) prontas · {{ videos|length }} mídia(s) na fila</div>
   </div>
 
-  <div class="surface col-span-2 overflow-hidden">
-    <div class="px-5 py-3.5 border-b border-line flex items-center justify-between">
-      <div class="h-section">Histórico</div>
-      <button class="btn btn-ghost btn-sm" onclick="loadJobs()"><i data-lucide="refresh-cw" class="icon"></i> Atualizar</button>
+  {% if accounts %}
+  <form id="run-form" class="grid grid-cols-12 gap-3 items-end">
+    <div class="col-span-5">
+      <label class="label">Mídia</label>
+      <select name="video" class="select" required>
+        <option value="">— escolha uma mídia pendente —</option>
+        {% for v in videos %}<option value="{{ v.name }}">{{ v.name }}{% if v.kind == 'story' %} · story{% else %} · reel{% endif %}</option>{% endfor %}
+      </select>
     </div>
-    <div id="jobs-table-wrap"></div>
+    <div class="col-span-5">
+      <label class="label">Contas alvo</label>
+      <select name="account_mode" class="select" id="account-mode">
+        <option value="__all_worker__">Todas conectadas via worker ({{ accounts|length }})</option>
+        {% for a in accounts %}<option value="{{ a.username }}">Só @{{ a.username }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="col-span-2 flex flex-col gap-2">
+      <button type="submit" class="btn btn-accent w-full"><i data-lucide="play" class="icon"></i> Disparar</button>
+    </div>
+    <div class="col-span-12 flex items-center gap-4 pt-1">
+      <label class="flex items-center gap-2 cursor-pointer text-[12px] text-soft">
+        <input type="checkbox" name="skip_duplicates" class="check" checked />
+        Pular contas que já postaram essa mídia
+      </label>
+      <label class="flex items-center gap-2 cursor-pointer text-[12px] text-soft">
+        <input type="checkbox" name="use_server" class="check" />
+        Usar servidor (post.py legado — serial)
+      </label>
+      <div class="ml-auto text-[11px] text-muted">Worker: cria 1 job por conta. Servidor: roda o post.py em sequência.</div>
+    </div>
+  </form>
+  {% else %}
+  <div class="text-center py-6">
+    <i data-lucide="plug" style="width:28px;height:28px;color:var(--text-3);margin:0 auto 8px;display:block"></i>
+    <div class="text-[13px] font-medium mb-1">Nenhuma conta conectada</div>
+    <div class="text-[11.5px] text-soft mb-3">
+      {% if total_active %}Você tem {{ total_active }} conta(s) ativa(s) mas nenhuma conectou ainda.{% else %}Adicione contas e conecte cada uma antes de disparar.{% endif %}
+    </div>
+    <a href="/accounts" class="btn btn-accent btn-sm inline-flex"><i data-lucide="arrow-right" class="icon"></i> Ir para Contas</a>
+  </div>
+  {% endif %}
+</div>
+
+<!-- Kanban -->
+<div class="kanban-grid">
+  <div class="kanban-col">
+    <div class="kanban-col-header">
+      <div class="kanban-col-title"><span class="dot dot-muted"></span> Na fila</div>
+      <div class="kanban-col-count" id="count-queue">0</div>
+    </div>
+    <div class="kanban-col-body" id="col-queue"></div>
+  </div>
+  <div class="kanban-col">
+    <div class="kanban-col-header">
+      <div class="kanban-col-title"><span class="dot dot-warning dot-pulse"></span> Postando</div>
+      <div class="kanban-col-count" id="count-posting">0</div>
+    </div>
+    <div class="kanban-col-body" id="col-posting"></div>
+  </div>
+  <div class="kanban-col">
+    <div class="kanban-col-header">
+      <div class="kanban-col-title"><span class="dot dot-success"></span> Concluído</div>
+      <div class="kanban-col-count" id="count-done">0</div>
+    </div>
+    <div class="kanban-col-body" id="col-done"></div>
+  </div>
+  <div class="kanban-col">
+    <div class="kanban-col-header">
+      <div class="kanban-col-title"><span class="dot dot-danger"></span> Erro</div>
+      <div class="kanban-col-count" id="count-error">0</div>
+    </div>
+    <div class="kanban-col-body" id="col-error"></div>
+  </div>
+</div>
+
+<!-- Histórico legacy (post.py local) — só se houver -->
+<div id="legacy-jobs-wrap" class="surface mt-5 hidden">
+  <div class="px-5 py-3 border-b border-line flex items-center gap-2">
+    <i data-lucide="server" style="width:13px;height:13px;color:var(--text-3)"></i>
+    <div class="h-section">Disparos via servidor (post.py)</div>
+    <span class="text-[11px] text-muted">modo legado</span>
+  </div>
+  <div id="legacy-jobs-table"></div>
+</div>
+
+<!-- Modal: detalhe do job -->
+<div id="job-modal" class="modal-bg hidden" onclick="if(event.target===this) closeJobModal()">
+  <div class="modal-card" style="max-width:560px">
+    <div class="flex items-start justify-between mb-3">
+      <div class="min-w-0 flex-1">
+        <div class="text-[13px] text-soft mono" id="modal-video">—</div>
+        <div class="text-[15px] font-semibold mt-1" id="modal-account">—</div>
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="closeJobModal()"><i data-lucide="x" class="icon"></i></button>
+    </div>
+    <div class="text-[12px] mb-3" id="modal-meta"></div>
+    <div class="text-[11px] text-muted mb-1.5 font-medium uppercase tracking-wider">Logs do worker</div>
+    <pre class="logs" style="max-height: 280px; font-size: 11px" id="modal-logs">—</pre>
+    <div class="flex justify-end gap-2 mt-4" id="modal-actions"></div>
   </div>
 </div>
 
 {% endblock %}
 {% block scripts %}
 <script>
-  document.getElementById('run-form').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const fd = new FormData(e.target);
-    const payload = {
-      account: fd.get('account') || null,
-      video: fd.get('video') || null,
-      dry_run: fd.get('dry_run') === 'on',
-    };
-    try {
-      const r = await api('/api/jobs/run', { method: 'POST', body: JSON.stringify(payload) });
-      toast('Disparo iniciado', 'success');
-      setTimeout(() => location.href = `/jobs/${r.job_id}`, 400);
-    } catch (err) { toast(err.message, 'error'); }
-  });
+  const STEP_LABELS = {
+    queued: 'na fila',
+    downloading: 'baixando mídia',
+    logging: 'logando no Insta',
+    posting: 'postando',
+    finishing: 'destaque',
+    done: 'pronto',
+  };
 
-  function statusBadge(s) {
+  function timeAgo(iso) {
+    if (!iso) return '';
+    const then = new Date(iso).getTime();
+    if (isNaN(then)) return '';
+    const sec = Math.max(0, Math.floor((Date.now() - then) / 1000));
+    if (sec < 60) return `há ${sec}s`;
+    const min = Math.floor(sec / 60);
+    if (min < 60) return `há ${min}min`;
+    const h = Math.floor(min / 60);
+    if (h < 24) return `há ${h}h`;
+    return `há ${Math.floor(h / 24)}d`;
+  }
+
+  function shortVideo(name) {
+    if (!name) return '';
+    if (name.length <= 30) return name;
+    return name.slice(0, 14) + '…' + name.slice(-12);
+  }
+
+  function kindBadge(kind) {
+    if (kind === 'story') return '<span class="badge badge-neutral" style="font-size:10px;padding:1px 6px">STORY</span>';
+    return '<span class="badge badge-neutral" style="font-size:10px;padding:1px 6px">REEL</span>';
+  }
+
+  function stepBadge(step) {
+    const label = STEP_LABELS[step] || step;
+    const cls = `step-${step || 'queued'}`;
+    return `<span class="step-row"><span class="step-dot ${cls}"></span>${label}</span>`;
+  }
+
+  function operationLabel(op) {
+    const map = {
+      post: 'post',
+      test_login: 'login',
+      get_profile_info: 'info perfil',
+      edit_profile: 'editar perfil',
+      change_picture: 'trocar foto',
+      auto_like_own: 'auto-like',
+      auto_follow_back: 'auto-follow',
+    };
+    return map[op] || op || 'job';
+  }
+
+  function bucketize(jobs) {
+    const buckets = { queue: [], posting: [], done: [], error: [] };
+    for (const j of jobs) {
+      if (j.status === 'done') buckets.done.push(j);
+      else if (j.status === 'error' || j.status === 'cancelled') buckets.error.push(j);
+      else if (j.status === 'running' && ['logging', 'posting', 'finishing'].includes(j.step)) buckets.posting.push(j);
+      else buckets.queue.push(j); // pending, claimed, ou downloading
+    }
+    // Ordenação: filas pelo created_at asc (mais antigo primeiro), terminados desc (mais novo primeiro)
+    buckets.queue.sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+    buckets.posting.sort((a, b) => (a.claimed_at || a.created_at || '').localeCompare(b.claimed_at || b.created_at || ''));
+    buckets.done.sort((a, b) => (b.finished_at || '').localeCompare(a.finished_at || ''));
+    buckets.error.sort((a, b) => (b.finished_at || b.created_at || '').localeCompare(a.finished_at || a.created_at || ''));
+    return buckets;
+  }
+
+  function renderCard(j, bucket) {
+    const videoName = j.video_name || (j.operation && j.operation !== 'post' ? operationLabel(j.operation) : '—');
+    const isPostOp = (j.operation === 'post' || !j.operation);
+    let extra = '';
+    if (bucket === 'queue') {
+      if (j.status === 'claimed' || j.step === 'downloading') {
+        extra = `<div class="meta-row">${stepBadge(j.step)} <span class="time-ago">${timeAgo(j.claimed_at || j.created_at)}</span></div>`;
+      } else {
+        extra = `<div class="meta-row"><span class="step-row"><span class="step-dot" style="background:var(--text-3)"></span>aguardando worker</span> <span class="time-ago">${timeAgo(j.created_at)}</span></div>`;
+      }
+    } else if (bucket === 'posting') {
+      extra = `<div class="meta-row">${stepBadge(j.step)} <span class="time-ago">${timeAgo(j.step_at || j.claimed_at)}</span></div>`;
+    } else if (bucket === 'done') {
+      extra = `<div class="meta-row"><span class="step-row" style="color:#6ee7b7"><i data-lucide="check" style="width:11px;height:11px"></i> postado</span> <span class="time-ago">${timeAgo(j.finished_at)}</span></div>`;
+    } else if (bucket === 'error') {
+      const msg = (j.error_msg || j.status || 'erro').replace(/</g, '&lt;');
+      extra = `<div class="err-msg" title="${msg.replace(/"/g,'&quot;')}">${msg}</div><div class="time-ago mt-1">${timeAgo(j.finished_at || j.created_at)}</div>`;
+    }
+    const kindTag = isPostOp ? kindBadge(j.kind) : `<span class="badge badge-neutral" style="font-size:10px;padding:1px 6px">${operationLabel(j.operation).toUpperCase()}</span>`;
+    return `
+      <div class="kanban-card" onclick="openJobModal('${j.id}')">
+        <div class="video-name" title="${(videoName || '').replace(/"/g,'&quot;')}">${shortVideo(videoName)}</div>
+        <div class="account">@${j.account_username || '—'}</div>
+        <div class="meta-row">${kindTag}<span class="time-ago">${timeAgo(j.created_at)}</span></div>
+        ${extra}
+      </div>`;
+  }
+
+  function fillColumn(elId, items, bucket, emptyMsg) {
+    const el = document.getElementById(elId);
+    if (!items.length) {
+      el.innerHTML = `<div class="col-empty">${emptyMsg}</div>`;
+      return;
+    }
+    el.innerHTML = items.map(j => renderCard(j, bucket)).join('');
+  }
+
+  let _allRemote = [];
+  async function loadKanban(force = false) {
+    try {
+      const [remote, local] = await Promise.all([
+        api('/api/remote-jobs').catch(() => []),
+        api('/api/jobs').catch(() => []),
+      ]);
+      _allRemote = remote || [];
+      const buckets = bucketize(_allRemote);
+
+      // Limites: na fila e em postando mostra tudo; terminados limita pra UI não ficar pesada
+      const MAX_DONE = 50, MAX_ERR = 30;
+      fillColumn('col-queue', buckets.queue, 'queue', 'fila vazia');
+      fillColumn('col-posting', buckets.posting, 'posting', 'nada postando agora');
+      fillColumn('col-done', buckets.done.slice(0, MAX_DONE), 'done', 'nenhum concluído ainda');
+      fillColumn('col-error', buckets.error.slice(0, MAX_ERR), 'error', 'sem erros 🎉');
+
+      document.getElementById('count-queue').textContent = buckets.queue.length;
+      document.getElementById('count-posting').textContent = buckets.posting.length;
+      document.getElementById('count-done').textContent = buckets.done.length;
+      document.getElementById('count-error').textContent = buckets.error.length;
+
+      // Histórico legacy (post.py local)
+      const wrap = document.getElementById('legacy-jobs-wrap');
+      const tbl = document.getElementById('legacy-jobs-table');
+      if (local && local.length) {
+        wrap.classList.remove('hidden');
+        tbl.innerHTML = `
+          <table class="t">
+            <thead><tr><th>Início</th><th>Tipo</th><th>Descrição</th><th>Status</th><th></th></tr></thead>
+            <tbody>
+              ${local.slice(0, 10).map(j => `
+                <tr class="cursor-pointer" onclick="location.href='/jobs/${j.id}'">
+                  <td class="mono text-[11.5px] text-soft">${j.started_at || '—'}</td>
+                  <td><span class="badge badge-neutral">${j.kind || 'local'}</span></td>
+                  <td>${(j.label || '').replace(/</g, '&lt;')}</td>
+                  <td>${legacyStatusBadge(j.status)}</td>
+                  <td class="text-right"><i data-lucide="chevron-right" style="width:14px;height:14px;color:var(--text-3)"></i></td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>`;
+      } else {
+        wrap.classList.add('hidden');
+      }
+      if (window.lucide) lucide.createIcons();
+    } catch (e) {
+      console.error(e);
+      if (force) toast(e.message, 'error');
+    }
+  }
+
+  function legacyStatusBadge(s) {
     if (s === 'running') return '<span class="badge badge-warning"><span class="dot dot-warning dot-pulse"></span> rodando</span>';
-    if (s === 'finished' || s === 'done') return '<span class="badge badge-success"><span class="dot dot-success"></span> concluído</span>';
+    if (s === 'finished') return '<span class="badge badge-success"><span class="dot dot-success"></span> concluído</span>';
     if (s === 'error') return '<span class="badge badge-danger"><span class="dot dot-danger"></span> erro</span>';
     if (s === 'cancelled') return '<span class="badge badge-neutral">cancelado</span>';
-    if (s === 'pending') return '<span class="badge badge-neutral">aguardando worker</span>';
-    if (s === 'claimed') return '<span class="badge badge-warning">worker pegou</span>';
     return `<span class="badge badge-neutral">${s}</span>`;
   }
 
-  async function loadJobs() {
+  // ---- Modal detalhe ----
+  let _modalJobId = null;
+  function openJobModal(id) {
+    _modalJobId = id;
+    document.getElementById('job-modal').classList.remove('hidden');
+    refreshJobModal();
+  }
+  function closeJobModal() {
+    _modalJobId = null;
+    document.getElementById('job-modal').classList.add('hidden');
+  }
+  async function refreshJobModal() {
+    if (!_modalJobId) return;
     try {
-      const [local, remote] = await Promise.all([
-        api('/api/jobs'),
-        api('/api/remote-jobs').catch(() => []),
-      ]);
-
-      // Normaliza pra um schema comum
-      const allJobs = [
-        ...local.map(j => ({
-          ...j,
-          _kind: 'local',
-          _time: j.started_at,
-          _desc: j.label,
-        })),
-        ...remote.map(r => ({
-          ...r,
-          _kind: 'remote',
-          _time: r.created_at,
-          _desc: `${r.video_name} → @${r.account_username}`,
-          kind: 'worker',
-        })),
-      ].sort((a, b) => (b._time || '').localeCompare(a._time || ''));
-
-      const wrap = document.getElementById('jobs-table-wrap');
-      if (!allJobs.length) {
-        wrap.innerHTML = `<div class="p-12 text-center"><div class="text-sm text-soft">Nenhum disparo ainda</div></div>`;
-        return;
+      const j = await api(`/api/remote-jobs/${_modalJobId}`);
+      document.getElementById('modal-video').textContent = j.video_name || operationLabel(j.operation);
+      document.getElementById('modal-account').textContent = '@' + j.account_username;
+      const parts = [
+        kindBadge(j.kind),
+        `<span class="text-soft">${operationLabel(j.operation)}</span>`,
+        j.step ? stepBadge(j.step) : '',
+        `<span class="time-ago">criado ${timeAgo(j.created_at)}</span>`,
+      ];
+      document.getElementById('modal-meta').innerHTML = `<div class="flex items-center gap-3 flex-wrap">${parts.join('')}</div>`;
+      const logs = j.logs && j.logs.length ? j.logs.join('\n') : '(sem logs ainda)';
+      document.getElementById('modal-logs').textContent = logs;
+      // Ações
+      const actions = document.getElementById('modal-actions');
+      let html = '';
+      if (j.status === 'pending' || j.status === 'claimed') {
+        html += `<button class="btn btn-danger btn-sm" onclick="cancelJob('${j.id}')">Cancelar job</button>`;
       }
-      wrap.innerHTML = `
-        <table class="t">
-          <thead><tr><th>Início</th><th>Tipo</th><th>Descrição</th><th>Status</th><th></th></tr></thead>
-          <tbody>
-            ${allJobs.map(j => {
-              const clickable = j._kind === 'local';
-              const onclickAttr = clickable ? `onclick="location.href='/jobs/${j.id}'"` : '';
-              const typeBadge = j._kind === 'remote'
-                ? '<span class="badge badge-neutral"><i data-lucide="monitor" style="width:10px;height:10px"></i> worker</span>'
-                : `<span class="badge badge-neutral">${j.kind || 'local'}</span>`;
-              return `
-              <tr class="${clickable ? 'cursor-pointer' : ''}" ${onclickAttr}>
-                <td class="mono text-[11.5px] text-soft">${j._time || '—'}</td>
-                <td>${typeBadge}</td>
-                <td>${j._desc || ''}</td>
-                <td>${statusBadge(j.status)}</td>
-                <td class="text-right">${clickable ? '<i data-lucide="chevron-right" style="width:14px;height:14px;color:var(--text-3)"></i>' : ''}</td>
-              </tr>
-            `}).join('')}
-          </tbody>
-        </table>`;
+      if (['done', 'error', 'cancelled'].includes(j.status)) {
+        html += `<button class="btn btn-ghost btn-sm" onclick="deleteJob('${j.id}')">Remover do histórico</button>`;
+      }
+      actions.innerHTML = html;
       if (window.lucide) lucide.createIcons();
-    } catch (e) { toast(e.message, 'error'); }
+    } catch (e) {
+      document.getElementById('modal-logs').textContent = 'Erro: ' + e.message;
+    }
   }
 
-  loadJobs();
-  setInterval(loadJobs, 4000);
+  async function cancelJob(id) {
+    if (!await confirmModal({ title: 'Cancelar job?', message: 'O worker para de processar esse job se ainda não pegou.', danger: true, confirmText: 'Cancelar job' })) return;
+    try { await api(`/api/remote-jobs/${id}/cancel`, { method: 'POST' }); toast('Cancelado', 'success'); closeJobModal(); loadKanban(); }
+    catch (e) { toast(e.message, 'error'); }
+  }
+  async function deleteJob(id) {
+    try { await api(`/api/remote-jobs/${id}/delete`, { method: 'POST' }); toast('Removido', 'success'); closeJobModal(); loadKanban(); }
+    catch (e) { toast(e.message, 'error'); }
+  }
+
+  // ---- Form ----
+  const form = document.getElementById('run-form');
+  if (form) {
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      const video = fd.get('video');
+      const accountMode = fd.get('account_mode');
+      const useServer = fd.get('use_server') === 'on';
+      const skipDup = fd.get('skip_duplicates') === 'on';
+      if (!video) { toast('Escolha uma mídia', 'error'); return; }
+
+      try {
+        if (useServer) {
+          // Modo legado — dispara post.py local
+          const payload = {
+            account: accountMode === '__all_worker__' ? null : accountMode,
+            video,
+            dry_run: false,
+          };
+          const r = await api('/api/jobs/run', { method: 'POST', body: JSON.stringify(payload) });
+          toast('Disparo (servidor) iniciado', 'success');
+          setTimeout(() => location.href = `/jobs/${r.job_id}`, 500);
+        } else {
+          // Modo worker — cria N remote_jobs
+          const payload = {
+            video,
+            accounts: accountMode === '__all_worker__' ? ['__all_worker__'] : [accountMode],
+            skip_duplicates: skipDup,
+          };
+          const r = await api('/api/remote-jobs', { method: 'POST', body: JSON.stringify(payload) });
+          const sk = r.skipped && r.skipped.length ? ` · ${r.skipped.length} pulada(s)` : '';
+          toast(`${r.count} job(s) criados${sk}`, 'success');
+          loadKanban();
+        }
+      } catch (err) { toast(err.message, 'error'); }
+    });
+  }
+
+  loadKanban();
+  setInterval(loadKanban, 3000);
+  // Quando modal aberto, atualiza ele junto
+  setInterval(() => { if (_modalJobId) refreshJobModal(); }, 3000);
 </script>
 {% endblock %}
