@@ -75,22 +75,38 @@
 
   <!-- Modo 1: mesma mídia (legacy) -->
   <form id="run-form" class="grid grid-cols-12 gap-3 items-end dispatch-form" data-tab="same">
-    <div class="col-span-5">
-      <label class="label">Mídia</label>
-      <select name="video" class="select" required>
-        <option value="">— escolha uma mídia pendente —</option>
-        {% for v in videos %}<option value="{{ v.name }}">{{ v.name }}{% if v.kind == 'story' %} · story{% else %} · reel{% endif %}</option>{% endfor %}
+    <div class="col-span-3">
+      <label class="label">Tipo do disparo</label>
+      <select name="kind_filter" class="select" id="same-kind-filter" onchange="filterMediaSelect()">
+        <option value="all">Todos (Reels + Stories)</option>
+        <option value="reel">Só Reels (vídeos)</option>
+        <option value="story">Só Stories (vídeos curtos + fotos)</option>
       </select>
     </div>
-    <div class="col-span-5">
+    <div class="col-span-4">
+      <label class="label">Mídia</label>
+      <select name="video" class="select" id="same-video-select" required>
+        <option value="">— escolha uma mídia —</option>
+        {% for v in videos %}<option value="{{ v.name }}" data-kind="{{ v.kind }}" data-media-type="{{ v.media_type }}">{{ v.name }}{% if v.kind == 'story' %} · story{% else %} · reel{% endif %}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="col-span-3">
+      <label class="label">Postar como</label>
+      <select name="kind_override" class="select" id="same-kind-override">
+        <option value="">— usar do arquivo —</option>
+        <option value="reel">Forçar Reel</option>
+        <option value="story">Forçar Story</option>
+      </select>
+    </div>
+    <div class="col-span-2 flex flex-col gap-2">
+      <button type="submit" class="btn btn-accent w-full"><i data-lucide="play" class="icon"></i> Disparar</button>
+    </div>
+    <div class="col-span-12">
       <label class="label">Contas alvo</label>
       <select name="account_mode" class="select" id="account-mode">
         <option value="__all_worker__">Todas conectadas via worker ({{ accounts|length }})</option>
         {% for a in accounts %}<option value="{{ a.username }}">Só @{{ a.username }}</option>{% endfor %}
       </select>
-    </div>
-    <div class="col-span-2 flex flex-col gap-2">
-      <button type="submit" class="btn btn-accent w-full"><i data-lucide="play" class="icon"></i> Disparar</button>
     </div>
     <div class="col-span-12 flex items-center gap-4 pt-1">
       <label class="flex items-center gap-2 cursor-pointer text-[12px] text-soft">
@@ -528,6 +544,7 @@
       const accountMode = fd.get('account_mode');
       const useServer = fd.get('use_server') === 'on';
       const skipDup = fd.get('skip_duplicates') === 'on';
+      const kindOverride = fd.get('kind_override') || null;  // "reel" | "story" | null
       if (!video) { toast('Escolha uma mídia', 'error'); return; }
 
       try {
@@ -547,6 +564,7 @@
             video,
             accounts: accountMode === '__all_worker__' ? ['__all_worker__'] : [accountMode],
             skip_duplicates: skipDup,
+            kind_override: kindOverride,  // null = usa meta do arquivo; reel/story = força
           };
           const r = await api('/api/remote-jobs', { method: 'POST', body: JSON.stringify(payload) });
           const sk = r.skipped && r.skipped.length ? ` · ${r.skipped.length} pulada(s)` : '';
@@ -572,6 +590,36 @@
       f.classList.toggle('hidden', f.dataset.tab !== tab);
     });
     if (tab === 'diversified') loadAutoLoop();
+  }
+
+  // Filtra options do select de mídia conforme tipo escolhido (reel/story/all).
+  // Também ajusta o select "Postar como" pra valor compatível.
+  function filterMediaSelect() {
+    const filter = document.getElementById('same-kind-filter').value;
+    const sel = document.getElementById('same-video-select');
+    if (!sel) return;
+    let shownCount = 0;
+    let firstVisible = '';
+    Array.from(sel.options).forEach(opt => {
+      if (!opt.value) { opt.hidden = false; return; }
+      const k = opt.dataset.kind || 'reel';
+      const visible = filter === 'all' || filter === k;
+      opt.hidden = !visible;
+      if (visible) {
+        shownCount++;
+        if (!firstVisible) firstVisible = opt.value;
+      }
+    });
+    // Se a opção atualmente selecionada virou hidden, reseta
+    if (sel.value) {
+      const cur = Array.from(sel.options).find(o => o.value === sel.value);
+      if (cur && cur.hidden) sel.value = '';
+    }
+    // Sugere kind_override baseado no filtro pra deixar coerente
+    const overrideSel = document.getElementById('same-kind-override');
+    if (overrideSel && (filter === 'reel' || filter === 'story')) {
+      overrideSel.value = filter;
+    }
   }
 
   // ===== Auto-loop =====

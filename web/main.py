@@ -1732,6 +1732,7 @@ class RemoteJobIn(BaseModel):
     account: Optional[str] = None    # username (legacy single-conta)
     accounts: Optional[list[str]] = None  # multi-conta: cria N jobs (1 por conta)
     skip_duplicates: bool = True     # pula contas que já postaram essa mídia
+    kind_override: Optional[str] = None  # "reel" | "story" — sobrescreve meta.kind do arquivo
 
 
 @app.get("/api/remote-jobs")
@@ -1797,6 +1798,15 @@ def api_create_remote_job(payload: RemoteJobIn, request: Request, user=Depends(a
     media_type = detect_media_kind(str(media_path))
     caption = load_caption(str(media_path))
 
+    # Resolve kind FINAL: override > meta > default por media_type
+    if payload.kind_override and payload.kind_override in ("reel", "story"):
+        # Foto NUNCA pode virar reel (limitação Instagram)
+        if media_type == "photo" and payload.kind_override == "reel":
+            raise HTTPException(400, "Foto não pode virar Reel — só Story")
+        effective_kind = payload.kind_override
+    else:
+        effective_kind = meta.get("kind") or ("story" if media_type == "photo" else "reel")
+
     base = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/") or str(request.base_url).rstrip("/")
 
     raw_link = meta.get("link_url")
@@ -1808,7 +1818,7 @@ def api_create_remote_job(payload: RemoteJobIn, request: Request, user=Depends(a
         media_url = f"{base}/api/worker/media/{video_name}?account={acc['username']}"
         # Se for story+link, gera 1 short link único por conta (anti-cluster)
         link_url = raw_link
-        if meta.get("kind") == "story" and raw_link:
+        if effective_kind == "story" and raw_link:
             try:
                 shortened = link_manager.create(
                     target_url=raw_link,
@@ -1822,7 +1832,7 @@ def api_create_remote_job(payload: RemoteJobIn, request: Request, user=Depends(a
 
         # Se conta tem auto-highlight ligado, passa o título pro worker
         highlight_title = None
-        if meta.get("kind") == "story" and acc.get("auto_highlight_enabled") and acc.get("auto_highlight_title"):
+        if effective_kind == "story" and acc.get("auto_highlight_enabled") and acc.get("auto_highlight_title"):
             highlight_title = acc["auto_highlight_title"]
 
         job = rjob_manager.create({
@@ -1834,9 +1844,7 @@ def api_create_remote_job(payload: RemoteJobIn, request: Request, user=Depends(a
             "account_proxy": acc.get("proxy"),
             "video_name": video_name,
             "media_type": media_type,
-            # FIX: usa media_type pra default correto. Foto SEMPRE vira story.
-            # Vídeo padrão é reel (mas meta.kind override se setado).
-            "kind": meta.get("kind") or ("story" if media_type == "photo" else "reel"),
+            "kind": effective_kind,  # já resolvido com override > meta > default
             "caption": caption,
             "link_url": link_url,
             "link_text": link_text,
