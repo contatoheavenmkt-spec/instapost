@@ -449,7 +449,9 @@
   async function loadConnectedCount() {
     try {
       const accs = await api('/api/accounts');
-      connectedCount = accs.filter(a => a.active && a.session === 'saved').length;
+      // Conectada = TEM worker_id OU sessão local. NÃO usar só session=saved
+      // porque contas via worker (default do user) salvam sessão no PC, não no servidor.
+      connectedCount = accs.filter(a => a.active && (a.connected_via_worker_id || a.session === 'saved')).length;
       updateLinkPreview();
     } catch {}
   }
@@ -658,7 +660,8 @@
     try {
       const accounts = await api('/api/accounts');
       const sel = document.getElementById('sched-account');
-      const connected = accounts.filter(a => a.active && a.session === 'saved');
+      // Conectada = worker_id OU sessão local (mesmo critério usado em outros lugares)
+      const connected = accounts.filter(a => a.active && (a.connected_via_worker_id || a.session === 'saved'));
       sel.innerHTML = `<option value="">— todas as conectadas (${connected.length}) —</option>`
         + connected.map(a => `<option value="${a.username}">@${a.username}</option>`).join('');
     } catch (e) { toast(e.message, 'error'); return; }

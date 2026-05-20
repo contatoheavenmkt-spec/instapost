@@ -372,9 +372,11 @@ def page_job_detail(request: Request, job_id: str):
 def page_schedule(request: Request):
     accounts = load_accounts()
     pending_videos = list_videos(PENDING_DIR)
+    # FIX: conectada = sessão NO servidor OU worker_id (default do user é worker)
     connected = [
         a["username"] for a in accounts
-        if a.get("active", True) and session_status(a["username"]) == "saved"
+        if a.get("active", True)
+        and (session_status(a["username"]) == "saved" or a.get("connected_via_worker_id"))
     ]
     return templates.TemplateResponse(
         request,
@@ -1330,9 +1332,15 @@ def api_create_schedule(payload: ScheduleIn, user=Depends(auth.require_user)):
     account = (payload.account or "").strip() or None
     if account:
         accounts = load_accounts()
-        if not any(a["username"] == account for a in accounts):
+        acc_obj = next((a for a in accounts if a["username"] == account), None)
+        if not acc_obj:
             raise HTTPException(404, f"Conta @{account} não existe")
-        if session_status(account) != "saved":
+        # FIX: aceita conta conectada via worker também (não só sessão no servidor)
+        is_connected = (
+            session_status(account) == "saved"
+            or acc_obj.get("connected_via_worker_id")
+        )
+        if not is_connected:
             raise HTTPException(400, f"Conta @{account} não está conectada — conecte primeiro")
 
         # Conflito: 2 schedules pra MESMA conta com < 5 min de diferença

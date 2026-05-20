@@ -35,7 +35,13 @@
       <i data-lucide="film" style="width:14px;height:14px;color:var(--text-3)"></i>
     </div>
     <div class="text-[28px] font-semibold leading-none">{{ pending|length }}</div>
-    <div class="text-[12px] text-soft mt-2">mídias pendentes</div>
+    <div class="text-[12px] text-soft mt-2">
+      {% set p_reels = pending|selectattr("kind", "equalto", "reel")|list|length %}
+      {% set p_stories = pending|selectattr("kind", "equalto", "story")|list|length %}
+      <span class="text-[#a1a1aa]">{{ p_reels }} reel{{ "s" if p_reels != 1 else "" }}</span>
+      <span class="text-muted mx-1">·</span>
+      <span class="text-[#a1a1aa]">{{ p_stories }} stor{{ "ies" if p_stories != 1 else "y" }}</span>
+    </div>
   </a>
   <a href="/schedule" class="surface p-5 hover:border-[var(--border-2)] transition-all block">
     <div class="flex items-center justify-between mb-3">
@@ -51,7 +57,13 @@
       <i data-lucide="check-circle-2" style="width:14px;height:14px;color:var(--text-3)"></i>
     </div>
     <div class="text-[28px] font-semibold leading-none">{{ posted|length }}</div>
-    <div class="text-[12px] text-soft mt-2">no arquivo</div>
+    <div class="text-[12px] text-soft mt-2">
+      {% set po_reels = posted|selectattr("kind", "equalto", "reel")|list|length %}
+      {% set po_stories = posted|selectattr("kind", "equalto", "story")|list|length %}
+      <span class="text-[#a1a1aa]">{{ po_reels }} reel{{ "s" if po_reels != 1 else "" }}</span>
+      <span class="text-muted mx-1">·</span>
+      <span class="text-[#a1a1aa]">{{ po_stories }} stor{{ "ies" if po_stories != 1 else "y" }}</span>
+    </div>
   </a>
 </div>
 
