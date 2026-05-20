@@ -457,6 +457,12 @@ def _account_view(a: dict) -> dict:
         "blocked": bool(a.get("blocked", False)),
         "blocked_at": a.get("blocked_at"),
         "blocked_reason": a.get("blocked_reason"),
+        # Health / shadow ban detector
+        "shadowban_suspected": bool(a.get("shadowban_suspected", False)),
+        "shadowban_at": a.get("shadowban_at"),
+        "shadowban_reason": a.get("shadowban_reason"),
+        "health_score": int(a.get("health_score", 50)),
+        "follower_count": int(a.get("follower_count", 0)),
     }
 
 
@@ -914,6 +920,55 @@ def api_check_all_accounts(user=Depends(auth.require_user)):
     }
 
 
+@app.post("/api/accounts/{username}/clear-shadowban")
+def api_clear_shadowban(username: str, user=Depends(auth.require_user)):
+    """Desmarca conta como shadow ban suspect (manual override)."""
+    accounts = load_accounts()
+    for a in accounts:
+        if a["username"] == username:
+            a["shadowban_suspected"] = False
+            a["shadowban_at"] = None
+            a["shadowban_reason"] = None
+            save_accounts(accounts)
+            return {"ok": True, "account": _account_view(a)}
+    raise HTTPException(404, "Conta não encontrada")
+
+
+@app.post("/api/accounts/{username}/check-health")
+def api_check_health_now(username: str, user=Depends(auth.require_user)):
+    """Forca disparar collect_insights pra essa conta agora (sem esperar tick diario)."""
+    accounts = load_accounts()
+    acc = next((a for a in accounts if a["username"] == username), None)
+    if not acc:
+        raise HTTPException(404, "Conta não encontrada")
+    if not acc.get("connected_via_worker_id"):
+        raise HTTPException(400, "Conta não conectada via worker")
+    rj = rjob_manager.create({
+        "operation": "collect_insights",
+        "account_username": acc["username"],
+        "account_password": acc["password"],
+        "account_totp_secret": acc.get("totp_secret"),
+        "account_proxy": acc.get("proxy"),
+        "created_by": user["email"],
+    })
+    return {"ok": True, "job_id": rj.id}
+
+
+@app.get("/api/accounts/{username}/health")
+def api_get_health(username: str, user=Depends(auth.require_user)):
+    """Retorna histórico de saúde da conta (snapshots + análise)."""
+    from web import health as _health
+    history = _health.load_history(username)
+    analysis = _health.analyze(username)
+    # Devolve só últimos 30 snapshots pra UI (resto serve pra calcular)
+    return {
+        "username": username,
+        "analysis": analysis,
+        "history": history[-30:],
+        "total_snapshots": len(history),
+    }
+
+
 @app.post("/api/accounts/{username}/clear-block")
 def api_clear_block(username: str, user=Depends(auth.require_user)):
     """Desmarca a conta como bloqueada — use quando resolver o bloqueio manualmente
@@ -1327,8 +1382,30 @@ def page_links(request: Request):
 
 
 @app.get("/api/links")
-def api_list_links(request: Request):
-    return [_link_dict_view(d, request) for d in link_manager.list()]
+def api_list_links(
+    request: Request,
+    since: Optional[str] = None,    # ISO (ex: 2026-05-20T00:00:00Z)
+    until: Optional[str] = None,    # ISO (ex: 2026-05-21T00:00:00Z)
+):
+    """Lista links. Se since/until fornecidos, recalcula click_count_filtered
+    contando só cliques na janela (mantém click_count total intacto)."""
+    out = []
+    raw_links = link_manager.list()
+    for d in raw_links:
+        d = _link_dict_view(d, request)
+        if since or until:
+            clicks = d.get("clicks") or []
+            filt = [
+                c for c in clicks
+                if (not since or (c.get("ts") and c["ts"] >= since))
+                and (not until or (c.get("ts") and c["ts"] <= until))
+            ]
+            d["click_count_filtered"] = len(filt)
+            d["clicks_filtered"] = filt
+        else:
+            d["click_count_filtered"] = d.get("click_count", 0)
+        out.append(d)
+    return out
 
 
 @app.post("/api/links")
@@ -1592,6 +1669,32 @@ def api_worker_job_result(job_id: str, payload: WorkerResultIn, request: Request
                                 "media_id": payload.media_id,
                             })
                             a["posted_media"] = posted
+                    # Health tracker: collect_insights → salva snapshot + analisa
+                    if job.operation == "collect_insights" and payload.result_data:
+                        try:
+                            from web import health as _health
+                            analysis = _health.record(
+                                username=a["username"],
+                                snapshot=payload.result_data,
+                            )
+                            # Atualiza campos resumidos no accounts.json
+                            a["follower_count"] = int(payload.result_data.get("follower_count") or 0)
+                            a["health_score"] = int(analysis.get("health_score", 50))
+                            if analysis.get("suspected"):
+                                # So marca se ainda nao tava marcado (preserva data original)
+                                if not a.get("shadowban_suspected"):
+                                    a["shadowban_suspected"] = True
+                                    a["shadowban_at"] = scheduler_mod.now_local().isoformat(timespec="seconds")
+                                a["shadowban_reason"] = analysis.get("reason") or "queda anormal detectada"
+                            else:
+                                # Se voltou ao normal, limpa
+                                if a.get("shadowban_suspected"):
+                                    a["shadowban_suspected"] = False
+                                    a["shadowban_at"] = None
+                                    a["shadowban_reason"] = None
+                                    print(f"[health] @{a['username']} recuperou — desmarcada")
+                        except Exception as he:
+                            print(f"[health] erro analisando @{a['username']}: {he}")
                         # Se veio do sync_loop, atualiza marcador
                         if (job.created_by or "").startswith("sync:"):
                             a["sync_last_post_at"] = scheduler_mod.now_local().isoformat(timespec="seconds")

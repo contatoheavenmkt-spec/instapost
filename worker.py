@@ -392,6 +392,97 @@ def execute_job(job: dict):
         return
 
     # =====================================================
+    # OPERAÇÃO: collect_insights (tracker passivo de shadow ban)
+    # =====================================================
+    if operation == "collect_insights":
+        log(f"collecting insights @{username}")
+        try:
+            cl = do_login()
+            # Pega info da conta (followers, media_count)
+            info = cl.user_info(cl.user_id)
+            follower_count = int(getattr(info, "follower_count", 0) or 0)
+            following_count = int(getattr(info, "following_count", 0) or 0)
+            media_count = int(getattr(info, "media_count", 0) or 0)
+
+            # Pega últimos 10 posts e calcula media de views
+            recent_posts = []
+            try:
+                medias = cl.user_medias(cl.user_id, amount=10)
+                for m in medias:
+                    views = 0
+                    # Reels e videos têm view_count, posts normais usam play_count fallback
+                    for attr in ("view_count", "play_count", "video_view_count"):
+                        v = getattr(m, attr, None)
+                        if v and int(v) > views:
+                            views = int(v)
+                    recent_posts.append({
+                        "pk": str(m.pk),
+                        "views": views,
+                        "likes": int(getattr(m, "like_count", 0) or 0),
+                        "taken_at": str(getattr(m, "taken_at", "")),
+                    })
+            except Exception as me:
+                log(f"⚠️ user_medias falhou: {me}")
+
+            avg_recent_3 = 0.0
+            avg_baseline = 0.0
+            if len(recent_posts) >= 4:
+                top3 = recent_posts[:3]
+                rest = recent_posts[3:10]
+                if top3:
+                    avg_recent_3 = sum(p["views"] for p in top3) / len(top3)
+                if rest:
+                    avg_baseline = sum(p["views"] for p in rest) / len(rest)
+
+            from datetime import datetime as _dt_h, timezone as _tz_h
+            snapshot = {
+                "collected_at": _dt_h.now(_tz_h.utc).isoformat(timespec="seconds"),
+                "follower_count": follower_count,
+                "following_count": following_count,
+                "media_count": media_count,
+                "recent_posts": recent_posts,
+                "avg_views_last_3": round(avg_recent_3, 1),
+                "avg_views_baseline": round(avg_baseline, 1),
+            }
+            log(f"✓ insights: {follower_count} seg, {len(recent_posts)} posts, avg recent={int(avg_recent_3)} baseline={int(avg_baseline)}")
+            report_result(job_id, True, result_data=snapshot)
+        except Exception as e:
+            log(f"❌ collect_insights falhou: {e}")
+            report_result(job_id, False, error_msg=str(e))
+        return
+
+    # =====================================================
+    # OPERAÇÃO: hashtag_check (teste ativo de shadow ban)
+    # Verifica se um post aparece na busca de hashtag (em outra conta)
+    # =====================================================
+    if operation == "hashtag_check":
+        target_pk = params.get("target_pk")
+        hashtag = params.get("hashtag", "").lstrip("#")
+        log(f"hashtag_check: buscando #{hashtag} pra ver se pk={target_pk} aparece")
+        if not target_pk or not hashtag:
+            log("❌ target_pk e hashtag obrigatórios")
+            report_result(job_id, False, error_msg="params target_pk e hashtag obrigatórios")
+            return
+        try:
+            cl = do_login()
+            try:
+                medias = cl.hashtag_medias_recent(hashtag, amount=50)
+            except Exception:
+                medias = []
+            found = any(str(m.pk) == str(target_pk) for m in medias)
+            log(f"✓ resultado: post {'APARECE' if found else 'NÃO aparece'} na busca de #{hashtag}")
+            report_result(job_id, True, result_data={
+                "found": found,
+                "hashtag": hashtag,
+                "target_pk": str(target_pk),
+                "checked_count": len(medias),
+            })
+        except Exception as e:
+            log(f"❌ hashtag_check falhou: {e}")
+            report_result(job_id, False, error_msg=str(e))
+        return
+
+    # =====================================================
     # OPERAÇÃO: post (default)
     # =====================================================
     log(f"iniciando job: {job['video_name']} ({job['kind']}) -> @{username}")

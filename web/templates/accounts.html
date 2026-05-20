@@ -80,6 +80,19 @@
   </div>
 </div>
 
+<!-- Banner shadow ban suspect -->
+<div id="shadowban-banner" class="surface px-4 py-3 mb-3 hidden" style="border-left: 3px solid var(--warning); background: rgba(245,158,11,0.06)">
+  <div class="flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <i data-lucide="eye-off" style="width:18px;height:18px;color:var(--warning)"></i>
+      <div>
+        <div class="text-[13px] font-semibold"><span id="shadowban-count">0</span> conta(s) com queda anormal (suspeita shadow ban)</div>
+        <div class="text-[11.5px] text-soft">Views recentes caíram >70% vs baseline. Não é certeza — pode ser audiência saturada. Pause a conta por 3-7 dias, diversifique legendas/horários, e se voltar ao normal, marca "Falso alarme".</div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Bulk actions toolbar (visible when there's selection) -->
 <div id="bulk-bar" class="surface px-4 py-2.5 mb-3 flex items-center justify-between hidden">
   <div class="text-sm">
@@ -333,21 +346,34 @@
 
     tbody.innerHTML = accounts.map(a => {
       const blockedRow = a.blocked ? 'style="background: rgba(239,68,68,0.06); border-left: 3px solid var(--danger)"' : '';
+      const shadowRow = (!a.blocked && a.shadowban_suspected) ? 'style="background: rgba(245,158,11,0.06); border-left: 3px solid var(--warning)"' : '';
       const blockedBadge = a.blocked
         ? `<span class="badge badge-danger" title="Bloqueada em ${(a.blocked_at||'').slice(0,16).replace('T',' ')} - ${(a.blocked_reason||'').slice(0,140)}"><i data-lucide="alert-triangle" style="width:11px;height:11px"></i> BLOQUEADA</span>`
+        : '';
+      const shadowBadge = a.shadowban_suspected
+        ? `<span class="badge badge-warning" title="Suspeita desde ${(a.shadowban_at||'').slice(0,16).replace('T',' ')} - ${(a.shadowban_reason||'').slice(0,200)}"><i data-lucide="eye-off" style="width:11px;height:11px"></i> SHADOW BAN?</span>`
+        : '';
+      const healthBadge = (a.health_score < 30 && !a.shadowban_suspected)
+        ? `<span class="badge badge-warning" title="Health score baixo (${a.health_score}/100) - views recentes muito abaixo do baseline"><i data-lucide="activity" style="width:11px;height:11px"></i> ${a.health_score}</span>`
         : '';
       const clearBtn = a.blocked
         ? `<button class="btn btn-subtle btn-sm" onclick="onClearBlock('${a.username}')" title="Marcar como resolvido (desbloqueie a conta manualmente antes)" style="color: #6ee7b7">
             <i data-lucide="check-circle-2" class="icon"></i> Resolvi
           </button>`
-        : '';
+        : (a.shadowban_suspected
+          ? `<button class="btn btn-subtle btn-sm" onclick="onClearShadowban('${a.username}')" title="Falso positivo? Marca como resolvido" style="color: #fcd34d">
+              <i data-lucide="check-circle-2" class="icon"></i> Falso alarme
+            </button>`
+          : '');
       return `
-      <tr data-username="${a.username}" ${blockedRow}>
+      <tr data-username="${a.username}" ${blockedRow}${shadowRow}>
         <td><input type="checkbox" class="check row-check" value="${a.username}" ${selection.has(a.username) ? 'checked' : ''} onchange="onSelect(this)" /></td>
         <td>
           <div class="flex items-center gap-2 flex-wrap">
             <div class="font-medium mono text-[13px]">@${a.username}</div>
             ${blockedBadge}
+            ${shadowBadge}
+            ${healthBadge}
             ${a.has_totp
               ? '<span class="badge badge-success" title="2FA cadastrado"><i data-lucide="shield-check" style="width:11px;height:11px"></i> 2FA</span>'
               : '<span class="badge badge-neutral" title="Sem chave 2FA — se a conta tem 2FA ativo, conectar vai falhar"><i data-lucide="shield-off" style="width:11px;height:11px"></i> sem 2FA</span>'}
@@ -390,13 +416,46 @@
   function updateBlockedBanner() {
     const blocked = accounts.filter(a => a.blocked);
     const banner = document.getElementById('blocked-banner');
-    if (!banner) return;
-    if (blocked.length) {
-      document.getElementById('blocked-count').textContent = blocked.length;
-      banner.classList.remove('hidden');
-    } else {
-      banner.classList.add('hidden');
+    if (banner) {
+      if (blocked.length) {
+        document.getElementById('blocked-count').textContent = blocked.length;
+        banner.classList.remove('hidden');
+      } else {
+        banner.classList.add('hidden');
+      }
     }
+    // Shadow ban banner
+    const shadow = accounts.filter(a => a.shadowban_suspected);
+    const sbBanner = document.getElementById('shadowban-banner');
+    if (sbBanner) {
+      if (shadow.length) {
+        document.getElementById('shadowban-count').textContent = shadow.length;
+        sbBanner.classList.remove('hidden');
+      } else {
+        sbBanner.classList.add('hidden');
+      }
+    }
+  }
+
+  async function onClearShadowban(username) {
+    const ok = await confirmModal({
+      title: `Marcar @${username} como OK?`,
+      message: 'Vai limpar o alerta de shadow ban (falso positivo). Se a queda for real, o sistema vai detectar de novo na próxima coleta diária.',
+      confirmText: 'Sim, falso alarme',
+    });
+    if (!ok) return;
+    try {
+      await api(`/api/accounts/${username}/clear-shadowban`, { method: 'POST' });
+      toast(`@${username} desmarcada`, 'success');
+      await load();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  async function onCheckHealthNow(username) {
+    try {
+      await api(`/api/accounts/${username}/check-health`, { method: 'POST' });
+      toast(`Verificação enviada pro worker — pode levar até 1min`, 'info');
+    } catch (e) { toast(e.message, 'error'); }
   }
 
   async function onClearBlock(username) {

@@ -23,7 +23,7 @@ from core.paths import LINKS_FILE
 
 SLUG_ALPHABET = string.ascii_letters + string.digits  # 62 chars
 SLUG_LEN = 7  # 62^7 = 3.5 trilhões — colisão é negligível
-MAX_CLICKS_KEPT_PER_LINK = 100
+MAX_CLICKS_KEPT_PER_LINK = 1000  # aumentado pra permitir analytics por data
 
 
 def now_iso() -> str:

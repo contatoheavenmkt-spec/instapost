@@ -212,7 +212,12 @@ class ScheduleManager:
             target=self._diversify_loop, daemon=True, name="diversify_scheduler"
         )
         self._diversify_thread.start()
-        print(f"[scheduler] started (tick {TICK_SECONDS}s) + automations + sync + diversify loops")
+        # Thread separada pro health tracker (shadow ban detector passivo)
+        self._health_thread = threading.Thread(
+            target=self._health_loop, daemon=True, name="health_scheduler"
+        )
+        self._health_thread.start()
+        print(f"[scheduler] started (tick {TICK_SECONDS}s) + automations + sync + diversify + health loops")
 
     def stop(self):
         self._stop_event.set()
@@ -985,6 +990,71 @@ class ScheduleManager:
             "accounts_count": len(targets),
             "accounts_completed": accounts_completed,
         }
+
+    # ===================== HEALTH TRACKER (SHADOW BAN DETECTOR) =====================
+
+    def _health_loop(self):
+        """1x/dia (qualquer hora) dispara collect_insights pra cada conta conectada
+        em cada workspace. Resultados sao salvos via api_worker_job_result
+        side-effect (em main.py)."""
+        import time as _t
+        _t.sleep(180)  # 3min apos startup
+        while not self._stop_event.is_set():
+            try:
+                self._health_tick()
+            except Exception as e:
+                print(f"[health] tick falhou: {e}")
+            # 1 hora entre verificacoes (so dispara collect 1x/dia por conta)
+            self._stop_event.wait(60 * 60)
+
+    def _health_tick(self):
+        """Pra cada workspace, pra cada conta conectada, cria 1 job collect_insights
+        se nao houve coleta nas ultimas 22h."""
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        from core import paths as _paths
+        from web import health as _health
+        from web.remote_jobs import manager as rjob_manager
+        import json as _json
+
+        now = _dt.now(_tz.utc)
+
+        for slug in _paths.list_workspace_slugs():
+            _paths.set_workspace(slug)
+            accounts_file = _paths.accounts_file(slug)
+            if not accounts_file.exists():
+                continue
+            try:
+                accounts = _json.loads(accounts_file.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+
+            for acc in accounts:
+                if not acc.get("active", True):
+                    continue
+                if not acc.get("connected_via_worker_id"):
+                    continue
+                # Ultima coleta foi a menos de 22h? Pula.
+                history = _health.load_history(acc["username"], slug)
+                if history:
+                    try:
+                        last = _dt.fromisoformat(history[-1]["collected_at"])
+                        if (now - last).total_seconds() < 22 * 3600:
+                            continue
+                    except Exception:
+                        pass
+                # Cria job collect_insights
+                try:
+                    rjob_manager.create({
+                        "operation": "collect_insights",
+                        "account_username": acc["username"],
+                        "account_password": acc["password"],
+                        "account_totp_secret": acc.get("totp_secret"),
+                        "account_proxy": acc.get("proxy"),
+                        "created_by": f"health:{slug}",
+                    })
+                    print(f"[health] criou collect_insights pra @{acc['username']} (ws={slug})")
+                except Exception as e:
+                    print(f"[health] erro criando job pra {acc['username']}: {e}")
 
     def _dispatch_via_server(self, s: Schedule):
         """Caminho LEGACY — dispara post.py local na VPS. Usa IP da VPS (vai falhar)."""

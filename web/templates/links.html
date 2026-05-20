@@ -21,6 +21,31 @@
   </div>
 </div>
 
+<!-- Filtros de data -->
+<div class="surface px-4 py-3 mb-4 flex items-center gap-3 flex-wrap">
+  <div class="flex items-center gap-1.5">
+    <i data-lucide="calendar" style="width:14px;height:14px;color:var(--text-3)"></i>
+    <span class="text-[12px] text-muted uppercase tracking-wider font-semibold">Período</span>
+  </div>
+  <div class="flex items-center gap-1" id="date-presets">
+    <button class="btn btn-ghost btn-sm date-preset active" data-preset="all" onclick="setDatePreset('all')">Todos</button>
+    <button class="btn btn-ghost btn-sm date-preset" data-preset="today" onclick="setDatePreset('today')">Hoje</button>
+    <button class="btn btn-ghost btn-sm date-preset" data-preset="yesterday" onclick="setDatePreset('yesterday')">Ontem</button>
+    <button class="btn btn-ghost btn-sm date-preset" data-preset="last7" onclick="setDatePreset('last7')">Últimos 7d</button>
+    <button class="btn btn-ghost btn-sm date-preset" data-preset="last30" onclick="setDatePreset('last30')">Últimos 30d</button>
+  </div>
+  <div class="flex items-center gap-2 ml-auto">
+    <input type="date" id="date-from" class="input" style="padding:5px 8px;width:140px" onchange="setDateCustom()" />
+    <span class="text-muted text-[11px]">até</span>
+    <input type="date" id="date-to" class="input" style="padding:5px 8px;width:140px" onchange="setDateCustom()" />
+    <span id="filter-status" class="text-[11px] text-muted ml-2"></span>
+  </div>
+</div>
+
+<style>
+  .date-preset.active { background: var(--accent) !important; color: white !important; border-color: var(--accent) !important; }
+</style>
+
 <!-- Stats -->
 <div class="grid grid-cols-4 gap-3 mb-5">
   <div class="surface p-4">
@@ -158,12 +183,13 @@
 
   function renderByAccount(links) {
     // Agrupa por conta. Links sem conta vão em "(sem conta)" — links manuais
+    const cc = l => (l.click_count_filtered !== undefined ? l.click_count_filtered : l.click_count) || 0;
     const groups = {};
     for (const l of links) {
       const key = l.account || '__manual__';
       if (!groups[key]) groups[key] = { account: l.account, links: [], total_clicks: 0, target_sample: l.target_url };
       groups[key].links.push(l);
-      groups[key].total_clicks += (l.click_count || 0);
+      groups[key].total_clicks += cc(l);
     }
     const sorted = Object.values(groups).sort((a, b) => b.total_clicks - a.total_clicks);
     const tbody = document.getElementById('by_account-tbody');
@@ -174,8 +200,8 @@
     tbody.innerHTML = sorted.map(g => {
       const accName = g.account ? `@${g.account}` : '<span class="text-muted">manuais</span>';
       const linksList = g.links.map(l => `
-        <a href="${l.short_url}" target="_blank" class="badge badge-neutral mono" style="font-size:10px;margin-right:3px" title="${l.click_count || 0} clique(s)">
-          /r/${l.slug} · ${l.click_count || 0}
+        <a href="${l.short_url}" target="_blank" class="badge badge-neutral mono" style="font-size:10px;margin-right:3px" title="${cc(l)} clique(s) no período">
+          /r/${l.slug} · ${cc(l)}
         </a>
       `).join('');
       // Pega o destino mais comum (todos os auto-gerados de uma conta apontam pro mesmo)
@@ -196,12 +222,14 @@
   function render(links) {
     allLinks = links;
     const active = links.filter(l => l.active);
-    const totalClicks = links.reduce((acc, l) => acc + (l.click_count || 0), 0);
-    const top = links.slice().sort((a, b) => (b.click_count || 0) - (a.click_count || 0))[0];
+    // Usa click_count_filtered se vier do backend, senão click_count total
+    const cc = l => (l.click_count_filtered !== undefined ? l.click_count_filtered : l.click_count) || 0;
+    const totalClicks = links.reduce((acc, l) => acc + cc(l), 0);
+    const top = links.slice().sort((a, b) => cc(b) - cc(a))[0];
 
     document.getElementById('stat-active').textContent = active.length;
     document.getElementById('stat-clicks').textContent = totalClicks;
-    document.getElementById('stat-top').textContent = top && top.click_count ? `/${top.slug} (${top.click_count})` : '—';
+    document.getElementById('stat-top').textContent = top && cc(top) ? `/${top.slug} (${cc(top)})` : '—';
     document.getElementById('stat-base').textContent = baseUrl;
 
     // Contagens por tab
@@ -276,9 +304,92 @@
     if (window.lucide) lucide.createIcons();
   }
 
+  // Estado do filtro de data
+  let _dateSince = null;  // ISO UTC string
+  let _dateUntil = null;
+
+  function _utcDayStart(localDate) {
+    // localDate é Date local; retorna ISO UTC do início do dia local
+    const d = new Date(localDate);
+    d.setHours(0, 0, 0, 0);
+    return d.toISOString().slice(0, 19) + 'Z';
+  }
+  function _utcDayEnd(localDate) {
+    const d = new Date(localDate);
+    d.setHours(23, 59, 59, 999);
+    return d.toISOString().slice(0, 19) + 'Z';
+  }
+  function _ymd(d) {
+    const dt = new Date(d);
+    return dt.toISOString().slice(0, 10);
+  }
+
+  function setDatePreset(preset) {
+    document.querySelectorAll('.date-preset').forEach(b => b.classList.toggle('active', b.dataset.preset === preset));
+    const now = new Date();
+    if (preset === 'all') {
+      _dateSince = null;
+      _dateUntil = null;
+      document.getElementById('date-from').value = '';
+      document.getElementById('date-to').value = '';
+    } else if (preset === 'today') {
+      _dateSince = _utcDayStart(now);
+      _dateUntil = _utcDayEnd(now);
+      document.getElementById('date-from').value = _ymd(now);
+      document.getElementById('date-to').value = _ymd(now);
+    } else if (preset === 'yesterday') {
+      const y = new Date(now); y.setDate(y.getDate() - 1);
+      _dateSince = _utcDayStart(y);
+      _dateUntil = _utcDayEnd(y);
+      document.getElementById('date-from').value = _ymd(y);
+      document.getElementById('date-to').value = _ymd(y);
+    } else if (preset === 'last7') {
+      const s = new Date(now); s.setDate(s.getDate() - 6);
+      _dateSince = _utcDayStart(s);
+      _dateUntil = _utcDayEnd(now);
+      document.getElementById('date-from').value = _ymd(s);
+      document.getElementById('date-to').value = _ymd(now);
+    } else if (preset === 'last30') {
+      const s = new Date(now); s.setDate(s.getDate() - 29);
+      _dateSince = _utcDayStart(s);
+      _dateUntil = _utcDayEnd(now);
+      document.getElementById('date-from').value = _ymd(s);
+      document.getElementById('date-to').value = _ymd(now);
+    }
+    updateFilterStatus(preset);
+    load();
+  }
+
+  function setDateCustom() {
+    const from = document.getElementById('date-from').value;
+    const to = document.getElementById('date-to').value;
+    if (!from && !to) return;
+    document.querySelectorAll('.date-preset').forEach(b => b.classList.remove('active'));
+    _dateSince = from ? _utcDayStart(new Date(from + 'T00:00:00')) : null;
+    _dateUntil = to ? _utcDayEnd(new Date(to + 'T00:00:00')) : null;
+    updateFilterStatus('custom');
+    load();
+  }
+
+  function updateFilterStatus(preset) {
+    const el = document.getElementById('filter-status');
+    if (preset === 'all') {
+      el.textContent = '(todos os cliques)';
+    } else {
+      const f = document.getElementById('date-from').value || '—';
+      const t = document.getElementById('date-to').value || '—';
+      el.textContent = `(${f} → ${t})`;
+    }
+  }
+
   async function load() {
     try {
-      const links = await api('/api/links');
+      let url = '/api/links';
+      const params = [];
+      if (_dateSince) params.push(`since=${encodeURIComponent(_dateSince)}`);
+      if (_dateUntil) params.push(`until=${encodeURIComponent(_dateUntil)}`);
+      if (params.length) url += '?' + params.join('&');
+      const links = await api(url);
       render(links);
     } catch (e) { toast(e.message, 'error'); }
   }
