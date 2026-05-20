@@ -621,6 +621,42 @@ def _periodic_heartbeat():
             return
 
 
+# Watchdog: monitora cada thread, se passar de MAX_JOB_SECONDS sem terminar, MATA o worker.
+# Wrapper-forever vai relançar em 10s. Melhor reiniciar tudo que ficar travado pra sempre.
+MAX_JOB_SECONDS = 15 * 60  # 15min máximo por job (login+upload+post normal é < 2min)
+LOCK_ACQUIRE_TIMEOUT = 5 * 60  # 5min esperando lock de outra thread = desiste
+
+# Estado pra watchdog
+_thread_job_started: dict[int, float] = {}  # thread_id -> timestamp inicio do job atual
+_thread_state_lock = threading.Lock()
+
+
+def _watchdog_loop():
+    """Thread separada que monitora estado de cada worker thread.
+
+    Se uma thread está num job há mais de MAX_JOB_SECONDS sem terminar,
+    significa que o instagrapi/login travou infinitamente. Matamos o
+    processo inteiro — wrapper-forever vai relançar limpo.
+
+    Por que matar o processo? Threading.Thread no Python NÃO tem .kill().
+    Não dá pra forçar abortar uma thread travada num socket bloqueado.
+    Reiniciar tudo é a única forma confiável.
+    """
+    while not _stop_flag.is_set():
+        _stop_flag.wait(30)
+        now = time.time()
+        with _thread_state_lock:
+            for tid, started in list(_thread_job_started.items()):
+                elapsed = now - started
+                if elapsed > MAX_JOB_SECONDS:
+                    print(f"\n[WATCHDOG] ⚠️ T{tid} travada há {elapsed/60:.1f}min num job!")
+                    print(f"[WATCHDOG] Matando worker pra wrapper-forever reiniciar limpo.")
+                    print(f"[WATCHDOG] (Threads Python não podem ser killed; reset total é a única opção)\n")
+                    sys.stdout.flush()
+                    # os._exit() é mais bruto que sys.exit() — pula finalizers, atomic
+                    os._exit(99)
+
+
 def _worker_loop(thread_id: int):
     """Loop independente: claim → execute → repeat. Roda N vezes em paralelo
     quando WORKER_CONCURRENCY > 1. Lock por conta garante que 2 threads nunca
@@ -635,15 +671,24 @@ def _worker_loop(thread_id: int):
 
             username = job.get("account_username", "")
             lock = get_account_lock(username)
-            # Se outra thread já está nessa conta, espera serializar
+            # Se outra thread já está nessa conta, espera serializar (COM TIMEOUT!)
             acquired_now = lock.acquire(blocking=False)
             if not acquired_now:
                 if WORKER_CONCURRENCY > 1:
-                    print(f"[T{thread_id}] @{username} ocupada por outra thread, serializando…")
-                lock.acquire()
+                    print(f"[T{thread_id}] @{username} ocupada por outra thread, serializando (timeout 5min)…")
+                # Bug antigo: lock.acquire() sem timeout = trava infinito se outra thread morreu
+                # Agora: se esperar > 5min, desiste e tenta outro job
+                got_lock = lock.acquire(timeout=LOCK_ACQUIRE_TIMEOUT)
+                if not got_lock:
+                    print(f"[T{thread_id}] ⚠️ NÃO conseguiu lock de @{username} em {LOCK_ACQUIRE_TIMEOUT/60:.0f}min — desistindo desse job, vai pegar outro")
+                    # Job volta pra fila no servidor automaticamente (claim expira)
+                    continue
             try:
-                # Stagger anti-detecção quando há paralelismo: cada thread espera
-                # 15-45s antes de começar (evita 2 logins exatos no mesmo segundo).
+                # Marca início pro watchdog
+                with _thread_state_lock:
+                    _thread_job_started[thread_id] = time.time()
+
+                # Stagger anti-detecção quando há paralelismo
                 if WORKER_CONCURRENCY > 1:
                     jitter = random.uniform(15, 45)
                     print(f"[T{thread_id}] aguarda {jitter:.0f}s antes de iniciar (stagger)")
@@ -651,7 +696,13 @@ def _worker_loop(thread_id: int):
                         return
                 execute_job(job)
             finally:
-                lock.release()
+                # Sempre limpa watchdog e libera lock
+                with _thread_state_lock:
+                    _thread_job_started.pop(thread_id, None)
+                try:
+                    lock.release()
+                except Exception:
+                    pass
         except Exception as e:
             print(f"[T{thread_id}] exceção no loop: {e}")
             traceback.print_exc()
@@ -695,6 +746,11 @@ def main():
     # Heartbeat em thread dedicada (não bloqueia o claim)
     hb_thread = threading.Thread(target=_periodic_heartbeat, daemon=True, name="heartbeat")
     hb_thread.start()
+
+    # Watchdog: mata o worker se uma thread fica > 15min num job (indica deadlock).
+    # Wrapper-forever reinicia automático em 10s.
+    wd_thread = threading.Thread(target=_watchdog_loop, daemon=True, name="watchdog")
+    wd_thread.start()
 
     # N threads de execução de jobs
     workers: list[threading.Thread] = []

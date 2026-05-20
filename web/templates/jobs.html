@@ -324,6 +324,11 @@
     if (bucket === 'queue') {
       if (j.status === 'claimed' || j.step === 'downloading') {
         extra = `<div class="meta-row">${stepBadge(j.step)} <span class="time-ago">${timeAgo(j.claimed_at || j.created_at)}</span></div>`;
+      } else if (j.scheduled_for && new Date(j.scheduled_for) > new Date()) {
+        // Stagger: job tem scheduled_for no FUTURO. Mostra quanto falta.
+        const diffSec = Math.max(0, Math.round((new Date(j.scheduled_for) - new Date()) / 1000));
+        const diffLabel = diffSec < 60 ? `${diffSec}s` : (diffSec < 3600 ? `${Math.round(diffSec/60)}min` : `${Math.round(diffSec/3600)}h`);
+        extra = `<div class="meta-row"><span class="step-row" style="color:#a78bfa"><i data-lucide="clock" style="width:11px;height:11px"></i> dispara em ${diffLabel}</span> <span class="time-ago">${timeAgo(j.created_at)}</span></div>`;
       } else {
         extra = `<div class="meta-row"><span class="step-row"><span class="step-dot" style="background:var(--text-3)"></span>aguardando worker</span> <span class="time-ago">${timeAgo(j.created_at)}</span></div>`;
       }
