@@ -67,6 +67,9 @@ class RemoteJob:
         self.media_url: str = data.get("media_url", "")
         # Estado
         self.status: str = data.get("status", "pending")
+        # Stagger anti-flag: worker só pega quando scheduled_for <= now (UTC ISO).
+        # None/"" = pode pegar imediatamente.
+        self.scheduled_for: Optional[str] = data.get("scheduled_for") or None
         # Etapa fina dentro de claimed/running pro Kanban:
         # queued | downloading | logging | posting | finishing | done
         self.step: str = data.get("step", "queued")
@@ -95,6 +98,7 @@ class RemoteJob:
             "link_text": self.link_text,
             "media_url": self.media_url,
             "status": self.status,
+            "scheduled_for": self.scheduled_for,
             "step": self.step,
             "step_at": self.step_at,
             "worker_id": self.worker_id,
@@ -186,12 +190,21 @@ class RemoteJobManager:
             return job
 
     def claim_next(self, worker_id: str) -> Optional[RemoteJob]:
-        """Worker pede o próximo job. Marca como claimed pra esse worker."""
+        """Worker pede o próximo job. Marca como claimed pra esse worker.
+
+        Respeita scheduled_for (stagger): só retorna jobs cuja hora agendada já
+        chegou. Jobs sem scheduled_for podem ser pegos imediatamente.
+        """
         with self._lock:
             self._expire_stale_claims()
-            # FIFO por created_at
+            now = now_iso()
+            # FIFO por created_at, mas SÓ jobs disponíveis (scheduled_for vazio ou no passado)
             candidates = sorted(
-                [j for j in self._items.values() if j.status == "pending"],
+                [
+                    j for j in self._items.values()
+                    if j.status == "pending"
+                    and (not j.scheduled_for or j.scheduled_for <= now)
+                ],
                 key=lambda j: j.created_at,
             )
             if not candidates:

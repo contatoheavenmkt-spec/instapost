@@ -575,19 +575,24 @@
         // Todas as contas postaram TUDO do pool — pergunta se quer reiniciar
         const ok = await confirmModal({
           title: 'Todas as contas postaram tudo!',
-          message: `Cada uma das ${r.accounts_count} conta(s) já postou todos os ${r.pool_size} vídeo(s) do pool.<br><br>Quer <strong>reiniciar a rodada do zero</strong>? Isso vai apagar o histórico de "o que cada conta postou" — depois você poderá distribuir os mesmos vídeos novamente.<br><br><span style="color:#fca5a5">Os ARQUIVOS dos vídeos NÃO serão apagados. Só o registro de quem postou o quê.</span>`,
+          message: `Cada uma das ${r.accounts_count} conta(s) já postou todos os ${r.pool_size} vídeo(s) do pool.<br><br>Quer <strong>reiniciar a rodada do zero</strong>?<br><br><span style="color:#6ee7b7">✓ Reset SEGURO: só zera contas que postaram TUDO. Contas parciais ou novas que ainda têm vídeos pendentes ficam intactas e continuam de onde pararam.</span><br><br><span class="text-muted">Os ARQUIVOS dos vídeos NÃO são apagados, só o histórico de quem postou o quê.</span>`,
           danger: true,
           confirmText: 'Sim, reiniciar do zero',
         });
         if (ok) {
-          await api('/api/remote-jobs/reset-posted', { method: 'POST', body: JSON.stringify({}) });
-          toast('Histórico zerado. Aperte "Distribuir" novamente pra começar.', 'success');
+          const rr = await api('/api/remote-jobs/reset-posted', { method: 'POST', body: JSON.stringify({ only_completed: true }) });
+          let msg = `${rr.count} conta(s) zerada(s).`;
+          if (rr.skipped_partial && rr.skipped_partial.length) {
+            msg += ` ${rr.skipped_partial.length} preservada(s) (postaram parcial).`;
+          }
+          toast(msg + ' Próxima rodada vai redistribuir.', 'success');
         }
       } else {
         const completedNote = r.accounts_completed && r.accounts_completed.length
-          ? ` · ${r.accounts_completed.length} conta(s) já estão completas`
+          ? ` · ${r.accounts_completed.length} já completa(s)`
           : '';
-        toast(`${r.count} job(s) criados em ${Object.keys(r.assignments).length} conta(s)${completedNote}`, 'success');
+        const staggerMin = Math.round(r.count * 60 / 60);  // ~1min/job
+        toast(`${r.count} job(s) criados em ${Object.keys(r.assignments).length} conta(s)${completedNote}. Stagger: vão entrando na fila ao longo de ~${staggerMin}min.`, 'success');
         // Renderiza resumo de quem recebeu o quê
         const summary = document.getElementById('diversified-summary');
         const lines = Object.entries(r.assignments).map(([acc, vids]) =>

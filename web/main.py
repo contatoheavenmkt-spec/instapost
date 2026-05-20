@@ -793,6 +793,28 @@ def _account_posted_names(a: dict) -> set[str]:
     return {item["name"] for item in (a.get("posted_media") or []) if item.get("name")}
 
 
+def _stagger_times(count: int, seconds_per_job: int = 60) -> list[str]:
+    """Gera lista de timestamps ISO UTC pra stagger N jobs.
+
+    Distribui os jobs em janela = count * seconds_per_job (default 1min por job).
+    Adiciona jitter aleatório (±15s) pra não parecer ritmo de robô.
+    O primeiro job sai em ~5s (não bloqueia 1min se for só 1).
+    Retorna lista de tamanho `count`, sorted ascendente.
+    """
+    import random as _r
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    if count <= 0:
+        return []
+    now = _dt.now(_tz.utc)
+    times = []
+    for i in range(count):
+        base = 5 + (i * seconds_per_job)
+        jitter = _r.uniform(-15, 15) if i > 0 else 0
+        delta = max(0, base + jitter)
+        times.append((now + _td(seconds=delta)).isoformat(timespec="seconds"))
+    return sorted(times)
+
+
 @app.get("/api/accounts/{username}/sync-info")
 def api_sync_info(username: str, user=Depends(auth.require_user)):
     """Retorna pool central + progresso de sync da conta + próximas mídias da fila."""
@@ -1811,13 +1833,14 @@ def api_dispatch_diversified(payload: DiversifiedDispatchIn, request: Request, u
             "message": "Todas as contas já postaram todos os vídeos do pool. Use /api/remote-jobs/reset-posted pra começar de novo.",
         }
 
-    # Cria 1 remote_job por assignment
+    # Cria 1 remote_job por assignment, com stagger (1 job/min) pra ritmo humano
     base = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/") or str(request.base_url).rstrip("/")
     from core.poster import load_meta, detect_media_kind, load_caption
 
+    stagger = _stagger_times(len(assignments), seconds_per_job=60)
     created = []
     by_account: dict[str, list[str]] = {}
-    for acc, video_name in assignments:
+    for idx, (acc, video_name) in enumerate(assignments):
         media_path = PENDING_DIR / video_name
         meta = load_meta(str(media_path))
         media_type = detect_media_kind(str(media_path))
@@ -1858,6 +1881,7 @@ def api_dispatch_diversified(payload: DiversifiedDispatchIn, request: Request, u
             "link_text": link_text,
             "media_url": media_url,
             "created_by": f"diversified:{user['email']}",
+            "scheduled_for": stagger[idx] if idx < len(stagger) else None,
         })
         created.append(job.id)
         by_account.setdefault(acc["username"], []).append(video_name)
@@ -1875,7 +1899,8 @@ def api_dispatch_diversified(payload: DiversifiedDispatchIn, request: Request, u
 
 
 class ResetPostedIn(BaseModel):
-    accounts: Optional[list[str]] = None  # se None, reseta TODAS
+    accounts: Optional[list[str]] = None  # se None E only_completed=False, reseta TODAS
+    only_completed: bool = True           # default: só reseta quem já postou TUDO do pool
 
 
 # ---------- AUTO-LOOP DE DISPARO DIVERSIFICADO (por workspace) ----------
@@ -1927,26 +1952,59 @@ def api_diversify_settings_save(payload: DiversifySettingsIn, user=Depends(auth.
 def api_reset_posted(payload: ResetPostedIn, user=Depends(auth.require_user)):
     """Zera o posted_media de N contas — usado pra 'reiniciar a rodada do zero'.
 
-    IMPORTANTE: confirme na UI antes de chamar. Apaga o histórico de quem
-    postou o quê (mas NÃO apaga os arquivos em data/posted/).
+    DEFAULT (only_completed=true): zera SOMENTE contas que ja postaram TUDO
+    do pool atual. Contas com posts parciais (incluindo novas que ja postaram
+    algo) ficam intactas, continuam de onde pararam.
+
+    Pass only_completed=false pra forcar reset de TODAS as contas selecionadas
+    (cuidado: pode fazer conta nova re-postar o que ja postou).
     """
     accounts = load_accounts()
+
+    # Calcula tamanho do pool atual (pra detectar quem completou)
+    pool = _build_pending_pool()
+    pool_set = set(pool)
+    pool_size = len(pool_set)
+
     target_usernames = payload.accounts
     if not target_usernames:
-        # Reseta TODAS as ativas
         target_usernames = [a["username"] for a in accounts if a.get("active", True)]
+    target_set = set(target_usernames)
 
     reset = []
+    skipped_partial = []
     for a in accounts:
-        if a["username"] in target_usernames:
-            had = len(a.get("posted_media") or [])
-            a["posted_media"] = []
-            # Tambem zera sync_completed pra permitir backfill de novo
-            if a.get("sync_completed"):
-                a["sync_completed"] = False
-            reset.append({"username": a["username"], "cleared": had})
+        if a["username"] not in target_set:
+            continue
+        had_count = len(a.get("posted_media") or [])
+
+        if payload.only_completed:
+            # Conta completou se tem posted_media >= pool_size E
+            # cobre todos os videos do pool atual
+            posted_names = _account_posted_names(a)
+            covers_pool = pool_set.issubset(posted_names) and pool_size > 0
+            if not covers_pool:
+                skipped_partial.append({
+                    "username": a["username"],
+                    "posted": had_count,
+                    "pool_size": pool_size,
+                })
+                continue
+
+        a["posted_media"] = []
+        # Tambem zera sync_completed pra permitir backfill de novo
+        if a.get("sync_completed"):
+            a["sync_completed"] = False
+        reset.append({"username": a["username"], "cleared": had_count})
     save_accounts(accounts)
-    return {"ok": True, "count": len(reset), "reset": reset}
+    return {
+        "ok": True,
+        "count": len(reset),
+        "reset": reset,
+        "skipped_partial": skipped_partial,
+        "only_completed_mode": payload.only_completed,
+        "pool_size": pool_size,
+    }
 
 
 @app.post("/api/remote-jobs/{job_id}/cancel")

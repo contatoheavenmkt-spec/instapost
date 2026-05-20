@@ -915,8 +915,19 @@ class ScheduleManager:
             }
 
         base = _os.environ.get("PUBLIC_BASE_URL", "").rstrip("/") or "http://127.0.0.1:8000"
+        # Stagger anti-flag: distribui jobs em janela 60s/job + jitter
+        import random as _r
+        from datetime import datetime as _dt2, timezone as _tz2, timedelta as _td2
+        _now_utc = _dt2.now(_tz2.utc)
+        stagger_times = []
+        for i in range(len(assignments)):
+            base_s = 5 + (i * 60)
+            jitter = _r.uniform(-15, 15) if i > 0 else 0
+            stagger_times.append((_now_utc + _td2(seconds=max(0, base_s + jitter))).isoformat(timespec="seconds"))
+        stagger_times.sort()
+
         created = []
-        for acc, video_name in assignments:
+        for idx_assign, (acc, video_name) in enumerate(assignments):
             media_path = pending_dir / video_name
             try:
                 meta = load_meta(str(media_path))
@@ -961,6 +972,7 @@ class ScheduleManager:
                     "link_text": link_text,
                     "media_url": media_url,
                     "created_by": f"diversify-auto:{slug}",
+                    "scheduled_for": stagger_times[idx_assign] if idx_assign < len(stagger_times) else None,
                 })
                 created.append(job.id)
             except Exception as e:
