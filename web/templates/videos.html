@@ -583,14 +583,24 @@
       if (!active.length) {
         wrap.innerHTML = '<div class="text-[12px] text-muted text-center py-3">Nenhuma conta ativa</div>';
       } else {
+        // Considera "conectada" se TEM worker_id (id é a fonte da verdade, name pode vir vazio)
+        // OU sessão local no servidor.
+        // Default: marca TODAS as conectadas. Se nenhuma conectada, marca todas as ativas
+        // (assim o user nunca tem checkbox vazio causando "só vai 1 ou nenhum").
+        const isConn = a => !!a.connected_via_worker_id || a.session === 'saved';
+        const anyConnected = active.some(isConn);
         wrap.innerHTML = active.map(a => {
-          const connected = !!a.connected_via_worker_name;
+          const connected = isConn(a);
+          // Marca por padrão: conectadas OU (se nenhuma conectada) TODAS
+          const checkedByDefault = anyConnected ? connected : true;
+          const workerLabel = a.connected_via_worker_name || (a.connected_via_worker_id ? 'worker' : null);
           return `
             <label class="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-[var(--surface)] cursor-pointer">
-              <input type="checkbox" class="check acc-check" value="${a.username}" ${connected ? 'checked' : ''} onchange="updateAccCount()" />
+              <input type="checkbox" class="check acc-check" value="${a.username}" ${checkedByDefault ? 'checked' : ''} onchange="updateAccCount()" />
               <span class="mono text-[12.5px] flex-1">@${a.username}</span>
+              ${a.blocked ? '<span class="badge badge-danger" style="font-size:10px">BLOQUEADA</span>' : ''}
               ${connected
-                ? `<span class="badge badge-success" style="font-size:10px"><i data-lucide="monitor" style="width:9px;height:9px"></i> ${escapeHtml(a.connected_via_worker_name)}</span>`
+                ? `<span class="badge badge-success" style="font-size:10px"><i data-lucide="monitor" style="width:9px;height:9px"></i> ${escapeHtml(workerLabel || 'conectada')}</span>`
                 : '<span class="badge badge-neutral" style="font-size:10px">não conectada</span>'}
             </label>`;
         }).join('');
