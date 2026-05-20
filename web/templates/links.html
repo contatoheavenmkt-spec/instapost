@@ -53,8 +53,9 @@
     <div class="text-[22px] font-semibold" id="stat-active">—</div>
   </div>
   <div class="surface p-4">
-    <div class="text-[10.5px] uppercase tracking-wider text-muted font-semibold mb-1.5">Total de cliques</div>
+    <div class="text-[10.5px] uppercase tracking-wider text-muted font-semibold mb-1.5" id="stat-clicks-label">Total de cliques</div>
     <div class="text-[22px] font-semibold" id="stat-clicks">—</div>
+    <div class="text-[10px] text-muted mt-0.5" id="stat-clicks-sub"></div>
   </div>
   <div class="surface p-4">
     <div class="text-[10.5px] uppercase tracking-wider text-muted font-semibold mb-1.5">Mais clicado</div>
@@ -88,7 +89,7 @@
       <tr>
         <th>Conta</th>
         <th>Links</th>
-        <th class="text-right">Cliques totais</th>
+        <th class="text-right" id="by-acc-clicks-header">Cliques totais</th>
         <th>Destino</th>
         <th></th>
       </tr>
@@ -197,20 +198,29 @@
       tbody.innerHTML = '<tr><td colspan="5" class="text-center py-8 text-muted">Nenhum link ainda</td></tr>';
       return;
     }
+    const isFilteredView = !!(_dateSince || _dateUntil);
+    // Atualiza header da coluna conforme filtro
+    const headerEl = document.getElementById('by-acc-clicks-header');
+    if (headerEl) headerEl.textContent = isFilteredView ? 'Cliques no período' : 'Cliques totais';
     tbody.innerHTML = sorted.map(g => {
       const accName = g.account ? `@${g.account}` : '<span class="text-muted">manuais</span>';
-      const linksList = g.links.map(l => `
-        <a href="${l.short_url}" target="_blank" class="badge badge-neutral mono" style="font-size:10px;margin-right:3px" title="${cc(l)} clique(s) no período">
-          /r/${l.slug} · ${cc(l)}
-        </a>
-      `).join('');
+      const totalAccum = g.links.reduce((s, l) => s + (l.click_count || 0), 0);
+      const linksList = g.links.map(l => {
+        const w = cc(l);
+        const t = l.click_count || 0;
+        const label = isFilteredView ? `${w}/${t}` : `${t}`;
+        return `<a href="${l.short_url}" target="_blank" class="badge badge-neutral mono" style="font-size:10px;margin-right:3px" title="${w} clique(s) no período / ${t} total">/r/${l.slug} · ${label}</a>`;
+      }).join('');
       // Pega o destino mais comum (todos os auto-gerados de uma conta apontam pro mesmo)
       const destShort = (g.target_sample || '').length > 50 ? g.target_sample.slice(0, 47) + '…' : g.target_sample;
+      const mainNumber = isFilteredView
+        ? `<span class="font-semibold text-[16px]" style="color: ${g.total_clicks > 0 ? 'var(--accent)' : 'var(--text-3)'}">${g.total_clicks}</span><div class="text-[10px] text-muted">/ ${totalAccum} total</div>`
+        : `<span class="font-semibold text-[16px]" style="color: ${g.total_clicks > 0 ? 'var(--accent)' : 'var(--text-3)'}">${g.total_clicks}</span>`;
       return `
         <tr>
           <td><div class="font-medium mono text-[13px]">${accName}</div></td>
           <td class="text-[12px]">${linksList}</td>
-          <td class="text-right font-semibold text-[16px]" style="color: ${g.total_clicks > 0 ? 'var(--accent)' : 'var(--text-3)'}">${g.total_clicks}</td>
+          <td class="text-right">${mainNumber}</td>
           <td><a href="${escapeHtml(g.target_sample)}" target="_blank" class="text-[12px] mono hover:text-[var(--accent)]">${escapeHtml(destShort)}</a></td>
           <td class="text-right text-[11px] text-muted">${g.links.length} link(s)</td>
         </tr>
@@ -227,8 +237,19 @@
     const totalClicks = links.reduce((acc, l) => acc + cc(l), 0);
     const top = links.slice().sort((a, b) => cc(b) - cc(a))[0];
 
+    const isFiltered = !!(_dateSince || _dateUntil);
     document.getElementById('stat-active').textContent = active.length;
     document.getElementById('stat-clicks').textContent = totalClicks;
+    document.getElementById('stat-clicks-label').textContent = isFiltered ? 'Cliques no período' : 'Total de cliques';
+    const sub = document.getElementById('stat-clicks-sub');
+    if (sub) {
+      if (isFiltered) {
+        const totalAccum = links.reduce((acc, l) => acc + (l.click_count || 0), 0);
+        sub.textContent = `de ${totalAccum} acumulados`;
+      } else {
+        sub.textContent = '';
+      }
+    }
     document.getElementById('stat-top').textContent = top && cc(top) ? `/${top.slug} (${cc(top)})` : '—';
     document.getElementById('stat-base').textContent = baseUrl;
 
@@ -269,7 +290,14 @@
     empty.classList.add('hidden');
     document.querySelector('table.t').classList.remove('hidden');
 
-    tbody.innerHTML = filtered.map(l => `
+    tbody.innerHTML = filtered.map(l => {
+      const isFiltered = _dateSince || _dateUntil;
+      const total = l.click_count || 0;
+      const inWindow = cc(l);
+      const clicksCell = isFiltered
+        ? `<span class="font-semibold">${inWindow}</span> <span class="text-muted text-[11px]" title="total acumulado">/ ${total}</span>`
+        : `<span class="font-semibold">${total}</span>`;
+      return `
       <tr>
         <td>
           <div class="font-mono text-[12.5px] flex items-center gap-2">
@@ -283,7 +311,7 @@
         <td>
           <a href="${escapeHtml(l.target_url)}" target="_blank" class="text-[12.5px] hover:text-[var(--accent)] mono">${escapeHtml(truncate(l.target_url, 50))}</a>
         </td>
-        <td class="font-semibold">${l.click_count || 0}</td>
+        <td>${clicksCell}</td>
         <td class="text-soft text-[12px] mono">${l.account ? '@' + l.account : '<span class="text-muted">—</span>'}</td>
         <td>
           ${l.active
@@ -300,7 +328,7 @@
           </button>
         </td>
       </tr>
-    `).join('');
+    `;}).join('');
     if (window.lucide) lucide.createIcons();
   }
 
@@ -310,14 +338,15 @@
 
   function _utcDayStart(localDate) {
     // localDate é Date local; retorna ISO UTC do início do dia local
+    // Padroniza com '+00:00' (formato do Python) pra comparação string match
     const d = new Date(localDate);
     d.setHours(0, 0, 0, 0);
-    return d.toISOString().slice(0, 19) + 'Z';
+    return d.toISOString().slice(0, 19) + '+00:00';
   }
   function _utcDayEnd(localDate) {
     const d = new Date(localDate);
     d.setHours(23, 59, 59, 999);
-    return d.toISOString().slice(0, 19) + 'Z';
+    return d.toISOString().slice(0, 19) + '+00:00';
   }
   function _ymd(d) {
     const dt = new Date(d);
