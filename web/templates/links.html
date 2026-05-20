@@ -42,7 +42,10 @@
 </div>
 
 <div class="flex items-center gap-1 mb-3 border-b border-line">
-  <button class="tab tab-active" data-tab="auto" onclick="switchTab('auto')">
+  <button class="tab tab-active" data-tab="by_account" onclick="switchTab('by_account')">
+    Por conta <span class="text-muted ml-1" id="count-by_account">0</span>
+  </button>
+  <button class="tab" data-tab="auto" onclick="switchTab('auto')">
     Auto-gerados <span class="text-muted ml-1" id="count-auto">0</span>
   </button>
   <button class="tab" data-tab="manual" onclick="switchTab('manual')">
@@ -51,6 +54,24 @@
   <button class="tab" data-tab="all" onclick="switchTab('all')">
     Todos <span class="text-muted ml-1" id="count-all">0</span>
   </button>
+</div>
+
+<!-- Grouped view: por conta -->
+<div id="by_account-view" class="surface overflow-hidden">
+  <table class="t">
+    <thead>
+      <tr>
+        <th>Conta</th>
+        <th>Links</th>
+        <th class="text-right">Cliques totais</th>
+        <th>Destino</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody id="by_account-tbody">
+      <tr><td colspan="5" class="text-center py-8 text-muted">Carregando…</td></tr>
+    </tbody>
+  </table>
 </div>
 
 <div class="surface overflow-hidden">
@@ -111,7 +132,7 @@
 <script>
   let baseUrl = location.origin;
   let allLinks = [];
-  let currentTab = 'auto';
+  let currentTab = 'by_account';
 
   function escapeHtml(s) { return (s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
   function truncate(s, n) { s = s || ''; return s.length > n ? s.slice(0, n) + '…' : s; }
@@ -122,7 +143,54 @@
   function switchTab(tab) {
     currentTab = tab;
     document.querySelectorAll('.tab').forEach(t => t.classList.toggle('tab-active', t.dataset.tab === tab));
+    // Mostra/esconde view "por conta" vs tabela tradicional
+    const byAccView = document.getElementById('by_account-view');
+    const traditionalSurface = document.querySelector('.surface.overflow-hidden:not(#by_account-view)');
+    if (tab === 'by_account') {
+      if (byAccView) byAccView.classList.remove('hidden');
+      if (traditionalSurface) traditionalSurface.classList.add('hidden');
+    } else {
+      if (byAccView) byAccView.classList.add('hidden');
+      if (traditionalSurface) traditionalSurface.classList.remove('hidden');
+    }
     render(allLinks);
+  }
+
+  function renderByAccount(links) {
+    // Agrupa por conta. Links sem conta vão em "(sem conta)" — links manuais
+    const groups = {};
+    for (const l of links) {
+      const key = l.account || '__manual__';
+      if (!groups[key]) groups[key] = { account: l.account, links: [], total_clicks: 0, target_sample: l.target_url };
+      groups[key].links.push(l);
+      groups[key].total_clicks += (l.click_count || 0);
+    }
+    const sorted = Object.values(groups).sort((a, b) => b.total_clicks - a.total_clicks);
+    const tbody = document.getElementById('by_account-tbody');
+    if (!sorted.length) {
+      tbody.innerHTML = '<tr><td colspan="5" class="text-center py-8 text-muted">Nenhum link ainda</td></tr>';
+      return;
+    }
+    tbody.innerHTML = sorted.map(g => {
+      const accName = g.account ? `@${g.account}` : '<span class="text-muted">manuais</span>';
+      const linksList = g.links.map(l => `
+        <a href="${l.short_url}" target="_blank" class="badge badge-neutral mono" style="font-size:10px;margin-right:3px" title="${l.click_count || 0} clique(s)">
+          /r/${l.slug} · ${l.click_count || 0}
+        </a>
+      `).join('');
+      // Pega o destino mais comum (todos os auto-gerados de uma conta apontam pro mesmo)
+      const destShort = (g.target_sample || '').length > 50 ? g.target_sample.slice(0, 47) + '…' : g.target_sample;
+      return `
+        <tr>
+          <td><div class="font-medium mono text-[13px]">${accName}</div></td>
+          <td class="text-[12px]">${linksList}</td>
+          <td class="text-right font-semibold text-[16px]" style="color: ${g.total_clicks > 0 ? 'var(--accent)' : 'var(--text-3)'}">${g.total_clicks}</td>
+          <td><a href="${escapeHtml(g.target_sample)}" target="_blank" class="text-[12px] mono hover:text-[var(--accent)]">${escapeHtml(destShort)}</a></td>
+          <td class="text-right text-[11px] text-muted">${g.links.length} link(s)</td>
+        </tr>
+      `;
+    }).join('');
+    if (window.lucide) lucide.createIcons();
   }
 
   function render(links) {
@@ -139,9 +207,14 @@
     // Contagens por tab
     const autos = links.filter(isAuto);
     const manuals = links.filter(l => !isAuto(l));
+    const uniqAccounts = new Set(links.map(l => l.account).filter(Boolean));
     document.getElementById('count-auto').textContent = autos.length;
     document.getElementById('count-manual').textContent = manuals.length;
     document.getElementById('count-all').textContent = links.length;
+    document.getElementById('count-by_account').textContent = uniqAccounts.size + (manuals.length ? '+M' : '');
+
+    // Sempre renderiza a view agrupada também (rápido, dados em memória)
+    renderByAccount(links);
 
     const filtered = currentTab === 'auto' ? autos : (currentTab === 'manual' ? manuals : links);
     const tbody = document.getElementById('links-tbody');

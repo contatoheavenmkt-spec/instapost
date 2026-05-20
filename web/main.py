@@ -278,7 +278,12 @@ def page_dashboard(request: Request):
     jobs = job_manager.list()[:10]
 
     active_accounts = [a for a in accounts if a.get("active", True)]
-    connected_accounts = [a for a in active_accounts if session_status(a["username"]) == "saved"]
+    # Conta como "conectada" se TEM sessão local NO SERVIDOR ou se foi conectada via worker
+    # (worker salva sessão no PC do usuário, não no servidor)
+    connected_accounts = [
+        a for a in active_accounts
+        if session_status(a["username"]) == "saved" or a.get("connected_via_worker_id")
+    ]
 
     # Próximos agendamentos (status pending)
     all_schedules = schedule_manager.list()
@@ -2019,6 +2024,21 @@ def api_delete_remote_job(job_id: str, user=Depends(auth.require_user)):
     if not rjob_manager.delete(job_id):
         raise HTTPException(404, "Job não encontrado")
     return {"ok": True}
+
+
+@app.post("/api/remote-jobs/{job_id}/requeue")
+def api_requeue_remote_job(job_id: str, user=Depends(auth.require_user)):
+    """Forca 1 job de volta pra fila (limpa scheduled_for + worker_id)."""
+    if not rjob_manager.requeue(job_id):
+        raise HTTPException(404, "Job não encontrado")
+    return {"ok": True}
+
+
+@app.post("/api/remote-jobs/requeue-stuck")
+def api_requeue_stuck(user=Depends(auth.require_user)):
+    """Re-enfileira TODOS os jobs presos (stagger futuro, claimed zumbi, pending velho)."""
+    count = rjob_manager.requeue_stuck()
+    return {"ok": True, "requeued": count}
 
 
 # ---------- FINANÇAS ----------

@@ -311,23 +311,50 @@
     renderCats(summary.by_category.venda, document.getElementById('vendas-by-cat'));
   }
 
-  async function load() {
+  let _loadInFlight = false;
+  let _loadFailed = false;
+
+  async function load(silent = false) {
+    if (_loadInFlight) return;
+    _loadInFlight = true;
+    if (!silent && !_loadFailed) {
+      // Mostra estado de loading nas células principais (só na 1ª vez)
+      const tbody = document.getElementById('finance-tbody');
+      if (!entries.length) {
+        tbody.innerHTML = `<tr><td colspan="6" class="text-center py-8 text-muted"><i data-lucide="loader" style="width:14px;height:14px;display:inline;vertical-align:-2px;animation:pulse 1s ease-in-out infinite"></i> Carregando…</td></tr>`;
+        if (window.lucide) lucide.createIcons();
+      }
+    }
     try {
       const params = currentMonth ? `?month=${currentMonth}` : '';
       const [list, summary] = await Promise.all([
         api(`/api/finance${params}`),
         api(`/api/finance/summary${params}`),
       ]);
-      entries = list;
+      entries = list || [];
+      _loadFailed = false;
       render();
       renderSummary(summary);
     } catch (e) {
-      toast(e.message, 'error');
+      _loadFailed = true;
+      const tbody = document.getElementById('finance-tbody');
+      tbody.innerHTML = `
+        <tr>
+          <td colspan="6" class="text-center py-8">
+            <div class="text-[#fca5a5] text-[13px] mb-2">⚠ Erro carregando: ${(e.message || 'sem detalhes').replace(/</g,'&lt;')}</div>
+            <button class="btn btn-subtle btn-sm" onclick="load()">↻ Tentar novamente</button>
+          </td>
+        </tr>`;
+      if (!silent) toast(`Erro: ${e.message}`, 'error');
+    } finally {
+      _loadInFlight = false;
     }
   }
 
   buildMonthOptions();
   updateCategoryOptions();
   load();
+  // Auto-refresh leve a cada 30s pra refletir lançamentos novos (futuro webhook)
+  setInterval(() => load(true), 30000);
 </script>
 {% endblock %}

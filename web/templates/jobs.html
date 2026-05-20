@@ -43,6 +43,9 @@
   </div>
   <div class="flex items-center gap-2">
     <div class="text-[11.5px] text-muted">atualiza a cada 3s</div>
+    <button class="btn btn-subtle btn-sm" onclick="requeueStuck()" title="Re-enfileira jobs travados: pending com stagger no futuro, claimed zumbis, pending velho">
+      <i data-lucide="zap" class="icon"></i> Destravar fila
+    </button>
     <button class="btn btn-ghost btn-sm" onclick="loadKanban(true)"><i data-lucide="refresh-cw" class="icon"></i> Atualizar</button>
   </div>
 </div>
@@ -429,10 +432,12 @@
       // Ações
       const actions = document.getElementById('modal-actions');
       let html = '';
-      if (j.status === 'pending' || j.status === 'claimed') {
+      if (j.status === 'pending' || j.status === 'claimed' || j.status === 'running') {
+        html += `<button class="btn btn-subtle btn-sm" onclick="requeueJob('${j.id}')" title="Forçar reprocessamento imediato"><i data-lucide="zap" class="icon"></i> Forçar agora</button>`;
         html += `<button class="btn btn-danger btn-sm" onclick="cancelJob('${j.id}')">Cancelar job</button>`;
       }
       if (['done', 'error', 'cancelled'].includes(j.status)) {
+        html += `<button class="btn btn-subtle btn-sm" onclick="requeueJob('${j.id}')" title="Re-enviar pra fila">↻ Re-enfileirar</button>`;
         html += `<button class="btn btn-ghost btn-sm" onclick="deleteJob('${j.id}')">Remover do histórico</button>`;
       }
       actions.innerHTML = html;
@@ -450,6 +455,33 @@
   async function deleteJob(id) {
     try { await api(`/api/remote-jobs/${id}/delete`, { method: 'POST' }); toast('Removido', 'success'); closeJobModal(); loadKanban(); }
     catch (e) { toast(e.message, 'error'); }
+  }
+
+  async function requeueJob(id) {
+    try {
+      await api(`/api/remote-jobs/${id}/requeue`, { method: 'POST' });
+      toast('Job re-enfileirado — worker vai pegar em segundos', 'success');
+      closeJobModal();
+      loadKanban();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  async function requeueStuck() {
+    const ok = await confirmModal({
+      title: 'Destravar fila?',
+      message: 'Vai re-enfileirar TODOS os jobs presos:<br>• pending com stagger no futuro<br>• claimed/running zumbis (worker travou)<br>• pending velho > 1h<br><br>Jobs voltam pra pending imediato — worker vai pegar nos próximos segundos.',
+      confirmText: 'Sim, destravar',
+    });
+    if (!ok) return;
+    try {
+      const r = await api('/api/remote-jobs/requeue-stuck', { method: 'POST' });
+      if (r.requeued > 0) {
+        toast(`${r.requeued} job(s) re-enfileirado(s). Worker vai começar a pegar.`, 'success');
+      } else {
+        toast('Nenhum job estava travado', 'info');
+      }
+      loadKanban();
+    } catch (e) { toast(e.message, 'error'); }
   }
 
   // ---- Form ----

@@ -290,5 +290,68 @@ class RemoteJobManager:
             self._save()
             return True
 
+    def requeue(self, job_id: str) -> bool:
+        """Forca um job de volta pra 'pending' (limpa scheduled_for + worker_id).
+        Util quando um job ficou travado em pending com scheduled_for futuro ou
+        em claimed/running zumbi."""
+        with self._lock:
+            job = self._items.get(job_id)
+            if not job:
+                return False
+            # Permite re-enfileirar de qualquer estado exceto done bem-sucedido recente
+            job.status = "pending"
+            job.scheduled_for = None
+            job.worker_id = None
+            job.claimed_at = None
+            job.step = "queued"
+            job.step_at = None
+            job.error_msg = None
+            self._save()
+            return True
+
+    def requeue_stuck(self) -> int:
+        """Re-enfileira TODOS os jobs que estão presos: pending com scheduled_for
+        no futuro, ou claimed/running sem update recente, ou pending sem worker
+        ha mais de 10min.
+
+        Retorna quantos foram re-enfileirados.
+        """
+        now = now_iso()
+        count = 0
+        with self._lock:
+            for job in self._items.values():
+                stuck = False
+                # Pending com scheduled_for ainda no futuro: forca pra agora
+                if job.status == "pending" and job.scheduled_for and job.scheduled_for > now:
+                    stuck = True
+                # Claimed/running zumbi (worker pegou e não terminou)
+                elif job.status in ("claimed", "running"):
+                    ts = parse_iso(job.claimed_at)
+                    if ts:
+                        from datetime import datetime as _dt, timezone as _tz
+                        nowdt = _dt.now(_tz.utc)
+                        if (nowdt - ts).total_seconds() > 300:  # 5min sem update
+                            stuck = True
+                # Pending velho (criado ha mais de 1h e nao foi pego)
+                elif job.status == "pending":
+                    ts = parse_iso(job.created_at)
+                    if ts:
+                        from datetime import datetime as _dt, timezone as _tz
+                        nowdt = _dt.now(_tz.utc)
+                        if (nowdt - ts).total_seconds() > 3600:
+                            stuck = True
+
+                if stuck:
+                    job.status = "pending"
+                    job.scheduled_for = None
+                    job.worker_id = None
+                    job.claimed_at = None
+                    job.step = "queued"
+                    job.step_at = None
+                    count += 1
+            if count > 0:
+                self._save()
+        return count
+
 
 manager = RemoteJobManager()
