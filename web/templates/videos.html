@@ -131,6 +131,11 @@
         <div class="text-[11px] text-muted mt-1.5"><span id="acc-count">0</span> selecionada(s)</div>
       </div>
       <div id="worker-status-hint" class="surface-2 p-2.5 rounded-md text-[11.5px] text-soft">—</div>
+      <label class="flex items-center gap-2 text-[12px] text-soft cursor-pointer">
+        <input type="checkbox" id="worker-skip-dup" class="check" />
+        Pular contas que <strong>já postaram</strong> essa mídia
+        <span class="text-muted text-[11px]">(desligado = força postar de novo)</span>
+      </label>
       <div class="flex justify-end gap-2 pt-2 border-t border-line">
         <button type="button" class="btn btn-ghost" onclick="closeWorkerModal()">Cancelar</button>
         <button type="submit" class="btn btn-accent">
@@ -636,19 +641,46 @@
       toast('Selecione pelo menos uma conta', 'error');
       return;
     }
+    const skipDup = document.getElementById('worker-skip-dup').checked;
     try {
       const r = await api('/api/remote-jobs', {
         method: 'POST',
-        body: JSON.stringify({ video: currentVideo.name, accounts: checked }),
+        body: JSON.stringify({
+          video: currentVideo.name,
+          accounts: checked,
+          skip_duplicates: skipDup,
+        }),
       });
-      let msg = `${r.count} job(s) na fila. Worker(s) vão pegar em até 5s.`;
-      if (r.skipped && r.skipped.length) {
-        msg += ` (${r.skipped.length} pulada(s): já postaram essa mídia)`;
+      const total = checked.length;
+      const created = r.count || 0;
+      const skipped = (r.skipped || []).length;
+      // Feedback claro: se pulou MUITAS contas, mostra em destaque
+      if (skipped > 0 && created < total / 2) {
+        const ok = await confirmModal({
+          title: `Só ${created} de ${total} contas foram pra fila`,
+          message: `<strong style="color:#fcd34d">${skipped} conta(s) puladas</strong> porque já postaram essa mídia antes.<br><br>Quer forçar postar de novo nelas? (vai apagar o flag "pular duplicatas" e refazer o disparo)`,
+          confirmText: 'Sim, postar de novo em todas',
+        });
+        if (ok) {
+          // Refaz sem skip
+          const r2 = await api('/api/remote-jobs', {
+            method: 'POST',
+            body: JSON.stringify({
+              video: currentVideo.name,
+              accounts: checked,
+              skip_duplicates: false,
+            }),
+          });
+          toast(`${r2.count} job(s) criados (forçado)`, 'success');
+        }
+      } else {
+        let msg = `${created} job(s) na fila. Worker(s) vão pegar em até 5s.`;
+        if (skipped > 0) msg += ` (${skipped} pulada(s))`;
+        toast(msg, 'success');
       }
-      toast(msg, 'success');
       closeWorkerModal();
       closeDetail();
-      setTimeout(() => location.href = `/jobs`, 400);
+      setTimeout(() => location.href = `/jobs`, 600);
     } catch (err) { toast(err.message, 'error'); }
   });
 

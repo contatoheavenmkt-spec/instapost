@@ -110,8 +110,9 @@
     </div>
     <div class="col-span-12 flex items-center gap-4 pt-1">
       <label class="flex items-center gap-2 cursor-pointer text-[12px] text-soft">
-        <input type="checkbox" name="skip_duplicates" class="check" checked />
+        <input type="checkbox" name="skip_duplicates" class="check" />
         Pular contas que já postaram essa mídia
+        <span class="text-muted text-[11px]">(default DESLIGADO: vai pra TODAS as contas marcadas)</span>
       </label>
       <label class="flex items-center gap-2 cursor-pointer text-[12px] text-soft">
         <input type="checkbox" name="use_server" class="check" />
@@ -567,8 +568,16 @@
             kind_override: kindOverride,  // null = usa meta do arquivo; reel/story = força
           };
           const r = await api('/api/remote-jobs', { method: 'POST', body: JSON.stringify(payload) });
-          const sk = r.skipped && r.skipped.length ? ` · ${r.skipped.length} pulada(s)` : '';
-          toast(`${r.count} job(s) criados${sk}`, 'success');
+          const created = r.count || 0;
+          const skipped = (r.skipped || []).length;
+          if (skipped > 0 && created === 0) {
+            // Pulou TODAS — mostra alerta forte
+            toast(`⚠ NADA foi pra fila: ${skipped} conta(s) puladas porque já postaram essa mídia. Desmarca "Pular contas..." pra forçar.`, 'error');
+          } else if (skipped > 0) {
+            toast(`${created} job(s) criados. ${skipped} pulada(s) (já postaram).`, 'success');
+          } else {
+            toast(`${created} job(s) criados`, 'success');
+          }
           loadKanban();
         }
       } catch (err) { toast(err.message, 'error'); }
