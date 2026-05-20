@@ -207,7 +207,12 @@ class ScheduleManager:
             target=self._sync_loop, daemon=True, name="sync_scheduler"
         )
         self._sync_thread.start()
-        print(f"[scheduler] started (tick {TICK_SECONDS}s) + automations + sync loops")
+        # Thread separada pro auto-loop de disparo diversificado (por workspace)
+        self._diversify_thread = threading.Thread(
+            target=self._diversify_loop, daemon=True, name="diversify_scheduler"
+        )
+        self._diversify_thread.start()
+        print(f"[scheduler] started (tick {TICK_SECONDS}s) + automations + sync + diversify loops")
 
     def stop(self):
         self._stop_event.set()
@@ -760,6 +765,214 @@ class ScheduleManager:
                     _json.dump(accounts, f, ensure_ascii=False, indent=2)
             except Exception as e:
                 print(f"[sync] erro salvando accounts: {e}")
+
+    # ===================== AUTO-LOOP DE DISPARO DIVERSIFICADO =====================
+
+    def _diversify_loop(self):
+        """Itera por todos os workspaces que têm auto-loop ligado. Em cada,
+        cria N jobs diversificados respeitando interval_hours.
+        Tick a cada 15min, janela 7h-22h."""
+        import time as _t
+        _t.sleep(120)  # espera 2min apos startup pra estabilizar
+        while not self._stop_event.is_set():
+            try:
+                self._diversify_tick()
+            except Exception as e:
+                print(f"[diversify] tick falhou: {e}")
+            # 15min
+            self._stop_event.wait(15 * 60)
+
+    def _diversify_tick(self):
+        from datetime import datetime as _dt, timedelta as _td
+        from core import paths as _paths
+
+        # Janela 7h-22h (horario local servidor)
+        hour = _dt.now().hour
+        if hour < 7 or hour >= 22:
+            return
+
+        # Itera por todos os workspaces existentes em disco
+        for slug in _paths.list_workspace_slugs():
+            try:
+                self._diversify_tick_for_workspace(slug)
+            except Exception as e:
+                print(f"[diversify] erro no ws '{slug}': {e}")
+
+    def _diversify_tick_for_workspace(self, slug: str):
+        """Roda 1 rodada de dispatch-diversified pra esse workspace, se devido."""
+        from datetime import datetime as _dt, timedelta as _td
+        from core import paths as _paths
+        from web import diversify as _diversify
+
+        # Setta workspace ativo no contextvar (thread-local!) pra que
+        # paths.ACCOUNTS_FILE etc apontem pra esse ws
+        _paths.set_workspace(slug)
+
+        settings = _diversify.load(slug)
+        if not settings.get("enabled"):
+            return
+
+        interval_h = int(settings.get("interval_hours", 6))
+        last_iso = settings.get("last_run_at")
+        now = now_local()
+        if last_iso:
+            try:
+                last = _dt.fromisoformat(last_iso)
+                if last.tzinfo is None:
+                    last = last.astimezone()
+                elapsed_h = (now - last).total_seconds() / 3600.0
+                if elapsed_h < interval_h:
+                    return
+            except Exception:
+                pass
+
+        # Roda 1 rodada: replica logica do api_dispatch_diversified
+        max_per_acc = int(settings.get("max_per_account", 1))
+        result = self._do_dispatch_diversified(slug, max_per_account=max_per_acc)
+
+        if result.get("all_completed"):
+            print(f"[diversify] ws='{slug}' completou TODOS os videos. Auto-desligando.")
+            _diversify.mark_completed(slug)
+        elif result.get("count", 0) > 0:
+            print(f"[diversify] ws='{slug}' criou {result['count']} job(s) (pool={result['pool_size']}, contas={result['accounts_count']})")
+            _diversify.mark_run(slug)
+        else:
+            # nada criado mas nao completou — pula sem marcar
+            print(f"[diversify] ws='{slug}' nada criado (sem contas ou pool vazio)")
+
+    def _do_dispatch_diversified(self, slug: str, max_per_account: int = 1) -> dict:
+        """Logica core do disparo diversificado, sem HTTP. Usado pelo auto-loop."""
+        import os as _os
+        import json as _json
+        from core import paths as _paths
+        from core.poster import load_meta, detect_media_kind, load_caption
+        from web.remote_jobs import manager as rjob_manager
+        from web.shortener import manager as link_manager
+
+        # Lê accounts do workspace
+        try:
+            accounts_file = _paths.accounts_file(slug)
+            if not accounts_file.exists():
+                return {"count": 0, "all_completed": False, "pool_size": 0, "accounts_count": 0}
+            accounts = _json.loads(accounts_file.read_text(encoding="utf-8"))
+        except Exception as e:
+            print(f"[diversify] erro lendo accounts ws='{slug}': {e}")
+            return {"count": 0, "all_completed": False, "pool_size": 0, "accounts_count": 0}
+
+        targets = [
+            a for a in accounts
+            if a.get("active", True) and a.get("connected_via_worker_id")
+        ]
+        if not targets:
+            return {"count": 0, "all_completed": False, "pool_size": 0, "accounts_count": 0}
+
+        # Lista pending videos cronologicamente
+        pending_dir = _paths.pending_dir(slug)
+        if not pending_dir.exists():
+            return {"count": 0, "all_completed": False, "pool_size": 0, "accounts_count": len(targets)}
+
+        MEDIA_EXTS = {".mp4", ".jpg", ".jpeg", ".png", ".webp"}
+        pool_items = []
+        for p in pending_dir.iterdir():
+            if not p.is_file() or p.suffix.lower() not in MEDIA_EXTS:
+                continue
+            if p.name.endswith(".meta.json"):
+                continue
+            # Pula thumbs (jpg sibling de mp4)
+            if p.suffix.lower() in (".jpg", ".jpeg"):
+                if p.stem.lower().endswith(".mp4") or p.with_suffix(".mp4").exists():
+                    continue
+            pool_items.append((p.name, p.stat().st_mtime))
+        pool_items.sort(key=lambda x: x[1])
+        pool = [n for n, _ in pool_items]
+
+        if not pool:
+            return {"count": 0, "all_completed": False, "pool_size": 0, "accounts_count": len(targets)}
+
+        # Distribui (mesmo algoritmo da função HTTP)
+        used_in_round: set[str] = set()
+        assignments: list[tuple[dict, str]] = []
+        accounts_completed: list[str] = []
+
+        for acc in targets:
+            already = {p.get("name") for p in (acc.get("posted_media") or []) if p.get("name")}
+            for _ in range(max(1, min(20, max_per_account))):
+                avail = [v for v in pool if v not in already]
+                if not avail:
+                    if acc["username"] not in accounts_completed:
+                        accounts_completed.append(acc["username"])
+                    break
+                preferred = [v for v in avail if v not in used_in_round]
+                chosen = preferred[0] if preferred else avail[0]
+                used_in_round.add(chosen)
+                assignments.append((acc, chosen))
+                already.add(chosen)
+
+        if not assignments:
+            return {
+                "count": 0, "all_completed": True,
+                "pool_size": len(pool), "accounts_count": len(targets),
+            }
+
+        base = _os.environ.get("PUBLIC_BASE_URL", "").rstrip("/") or "http://127.0.0.1:8000"
+        created = []
+        for acc, video_name in assignments:
+            media_path = pending_dir / video_name
+            try:
+                meta = load_meta(str(media_path))
+                media_type = detect_media_kind(str(media_path))
+                caption = load_caption(str(media_path))
+            except Exception as e:
+                print(f"[diversify] erro lendo meta de {video_name}: {e}")
+                continue
+
+            link_url = meta.get("link_url")
+            link_text = meta.get("link_text") or "Clique aqui"
+            if meta.get("kind") == "story" and link_url:
+                try:
+                    short = link_manager.create(
+                        target_url=link_url,
+                        label=f"diversify-auto · @{acc['username']}",
+                        account=acc["username"],
+                        created_by=f"diversify-auto:{slug}",
+                    )
+                    link_url = f"{base}/r/{short.slug}"
+                except Exception as e:
+                    print(f"[diversify] shortener falhou: {e}")
+
+            highlight_title = None
+            if meta.get("kind") == "story" and acc.get("auto_highlight_enabled") and acc.get("auto_highlight_title"):
+                highlight_title = acc["auto_highlight_title"]
+
+            media_url = f"{base}/api/worker/media/{video_name}?account={acc['username']}"
+            try:
+                job = rjob_manager.create({
+                    "operation": "post",
+                    "params": {"auto_highlight_title": highlight_title} if highlight_title else {},
+                    "account_username": acc["username"],
+                    "account_password": acc["password"],
+                    "account_totp_secret": acc.get("totp_secret"),
+                    "account_proxy": acc.get("proxy"),
+                    "video_name": video_name,
+                    "media_type": media_type,
+                    "kind": meta.get("kind", "reel"),
+                    "caption": caption,
+                    "link_url": link_url,
+                    "link_text": link_text,
+                    "media_url": media_url,
+                    "created_by": f"diversify-auto:{slug}",
+                })
+                created.append(job.id)
+            except Exception as e:
+                print(f"[diversify] erro criando job pra @{acc['username']}/{video_name}: {e}")
+
+        return {
+            "count": len(created),
+            "all_completed": False,
+            "pool_size": len(pool),
+            "accounts_count": len(targets),
+            "accounts_completed": accounts_completed,
+        }
 
     def _dispatch_via_server(self, s: Schedule):
         """Caminho LEGACY — dispara post.py local na VPS. Usa IP da VPS (vai falhar)."""

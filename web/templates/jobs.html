@@ -122,6 +122,37 @@
       </div>
     </div>
     <div id="diversified-summary" class="mt-3 text-[12px] text-muted"></div>
+
+    <!-- Auto-loop -->
+    <div class="surface-2 p-3 rounded mt-4 border" style="border-color: var(--accent); border-style: dashed">
+      <div class="flex items-center justify-between mb-2">
+        <div>
+          <div class="text-[13px] font-medium flex items-center gap-1.5">
+            <i data-lucide="repeat" style="width:14px;height:14px;color:var(--accent)"></i>
+            Postar sozinho até finalizar (auto-loop)
+          </div>
+          <div class="text-[11px] text-soft mt-0.5">Sistema dispara N posts por conta a cada X horas (janela 7h–22h) até acabar todos os vídeos.</div>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="autoloop-toggle" onchange="saveAutoLoop()" />
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="grid grid-cols-12 gap-3 mt-2">
+        <div class="col-span-3">
+          <label class="label">Intervalo (horas)</label>
+          <input id="autoloop-interval" type="number" min="1" max="72" value="6" class="input" onchange="saveAutoLoop()" />
+        </div>
+        <div class="col-span-3">
+          <label class="label">Posts por conta/rodada</label>
+          <input id="autoloop-max" type="number" min="1" max="20" value="1" class="input" onchange="saveAutoLoop()" />
+        </div>
+        <div class="col-span-6">
+          <label class="label">Status</label>
+          <div id="autoloop-status" class="text-[12px] text-soft surface px-3 py-2 rounded" style="min-height:34px;display:flex;align-items:center">—</div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <style>
@@ -474,7 +505,60 @@
     document.querySelectorAll('.dispatch-form').forEach(f => {
       f.classList.toggle('hidden', f.dataset.tab !== tab);
     });
+    if (tab === 'diversified') loadAutoLoop();
   }
+
+  // ===== Auto-loop =====
+  let _autoloopSaving = false;
+
+  async function loadAutoLoop() {
+    try {
+      const s = await api('/api/diversify-loop');
+      document.getElementById('autoloop-toggle').checked = !!s.enabled;
+      document.getElementById('autoloop-interval').value = s.interval_hours || 6;
+      document.getElementById('autoloop-max').value = s.max_per_account || 1;
+      const status = document.getElementById('autoloop-status');
+      let txt = '';
+      if (s.completed_at && !s.enabled) {
+        txt = `<span style="color:#6ee7b7"><i data-lucide="check-circle-2" style="width:13px;height:13px;display:inline;vertical-align:-2px"></i> Pool completo — desligado em ${s.completed_at.slice(0, 16).replace('T',' ')}</span>`;
+      } else if (s.enabled) {
+        const last = s.last_run_at ? s.last_run_at.slice(0, 16).replace('T',' ') : 'nunca';
+        const next = s.next_run_at ? s.next_run_at.slice(0, 16).replace('T',' ') : '<em>na próxima janela 7h-22h</em>';
+        txt = `<i data-lucide="zap" style="width:13px;height:13px;display:inline;vertical-align:-2px;color:var(--accent)"></i> ATIVO · última: ${last} · próxima: ${next}`;
+      } else {
+        txt = '<span class="text-muted">Desligado</span>';
+      }
+      status.innerHTML = txt;
+      if (window.lucide) lucide.createIcons();
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  async function saveAutoLoop() {
+    if (_autoloopSaving) return;
+    _autoloopSaving = true;
+    try {
+      const payload = {
+        enabled: document.getElementById('autoloop-toggle').checked,
+        interval_hours: parseInt(document.getElementById('autoloop-interval').value) || 6,
+        max_per_account: parseInt(document.getElementById('autoloop-max').value) || 1,
+      };
+      await api('/api/diversify-loop', { method: 'POST', body: JSON.stringify(payload) });
+      toast(payload.enabled ? 'Auto-loop ATIVO' : 'Auto-loop desligado', 'success');
+      await loadAutoLoop();
+    } catch (e) {
+      toast(e.message, 'error');
+    } finally {
+      _autoloopSaving = false;
+    }
+  }
+
+  // Refresh status periódico quando aba diversified estiver visível
+  setInterval(() => {
+    const form = document.querySelector('.dispatch-form[data-tab="diversified"]');
+    if (form && !form.classList.contains('hidden')) loadAutoLoop();
+  }, 30000);
 
   async function runDiversifiedDispatch() {
     const btn = document.getElementById('diversified-btn');

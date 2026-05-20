@@ -1878,6 +1878,51 @@ class ResetPostedIn(BaseModel):
     accounts: Optional[list[str]] = None  # se None, reseta TODAS
 
 
+# ---------- AUTO-LOOP DE DISPARO DIVERSIFICADO (por workspace) ----------
+
+from web import diversify as _diversify  # noqa: E402
+
+
+class DiversifySettingsIn(BaseModel):
+    enabled: Optional[bool] = None
+    interval_hours: Optional[int] = None
+    max_per_account: Optional[int] = None
+
+
+@app.get("/api/diversify-loop")
+def api_diversify_settings(user=Depends(auth.require_user)):
+    """Retorna settings do auto-loop pro workspace ativo."""
+    settings = _diversify.load()
+    # Calcula próxima rodada estimada
+    next_run_at = None
+    if settings.get("enabled") and settings.get("last_run_at"):
+        try:
+            from datetime import datetime as _dt, timedelta as _td
+            last = _dt.fromisoformat(settings["last_run_at"])
+            next_dt = last + _td(hours=int(settings.get("interval_hours", 6)))
+            next_run_at = next_dt.isoformat(timespec="seconds")
+        except Exception:
+            pass
+    return {**settings, "next_run_at": next_run_at}
+
+
+@app.post("/api/diversify-loop")
+def api_diversify_settings_save(payload: DiversifySettingsIn, user=Depends(auth.require_user)):
+    """Atualiza settings do auto-loop pro workspace ativo."""
+    update = {}
+    if payload.enabled is not None:
+        update["enabled"] = bool(payload.enabled)
+        # Quando religa, zera completed_at pra o loop não pular
+        if payload.enabled:
+            update["completed_at"] = None
+    if payload.interval_hours is not None:
+        update["interval_hours"] = int(payload.interval_hours)
+    if payload.max_per_account is not None:
+        update["max_per_account"] = int(payload.max_per_account)
+    settings = _diversify.save(update)
+    return {"ok": True, "settings": settings}
+
+
 @app.post("/api/remote-jobs/reset-posted")
 def api_reset_posted(payload: ResetPostedIn, user=Depends(auth.require_user)):
     """Zera o posted_media de N contas — usado pra 'reiniciar a rodada do zero'.
