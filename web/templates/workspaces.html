@@ -1,0 +1,177 @@
+{% extends "base.html" %}
+{% block title %}Workspaces · Insta Poster{% endblock %}
+{% block content %}
+
+<div class="flex items-end justify-between mb-6">
+  <div>
+    <h1 class="h-page">Workspaces</h1>
+    <p class="text-sm text-soft mt-1">Cada workspace é uma pasta totalmente isolada. Contas, mídias e sessões NÃO se misturam entre workspaces.</p>
+  </div>
+  <button class="btn btn-accent" onclick="openCreate()">
+    <i data-lucide="folder-plus" class="icon"></i> Novo workspace
+  </button>
+</div>
+
+<div class="surface overflow-hidden">
+  <table class="t">
+    <thead>
+      <tr>
+        <th>Nome</th>
+        <th>Slug</th>
+        <th>Criado em</th>
+        <th>Criado por</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody id="ws-tbody">
+      <tr><td colspan="5" class="text-center py-8 text-muted">Carregando…</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- Modal: criar workspace -->
+<div id="create-modal" class="modal-bg hidden" onclick="if(event.target===this) closeCreate()">
+  <div class="modal-card">
+    <div class="flex items-center justify-between mb-3">
+      <div class="text-[15px] font-semibold">Novo workspace</div>
+      <button class="btn btn-ghost btn-sm" onclick="closeCreate()"><i data-lucide="x" class="icon"></i></button>
+    </div>
+    <form id="create-form" onsubmit="submitCreate(event)" class="space-y-3">
+      <div>
+        <label class="label">Nome (ex: "Modelo 2", "Cliente Acme")</label>
+        <input id="ws-name" class="input" placeholder="Modelo 2" maxlength="40" required />
+      </div>
+      <div>
+        <label class="label">Slug (opcional — gerado automático)</label>
+        <input id="ws-slug" class="input mono" placeholder="modelo-2" maxlength="30" pattern="[a-z0-9][a-z0-9-]{0,30}" />
+        <div class="text-[11px] text-muted mt-1">Apenas letras minúsculas, números e hífen. É o ID interno da pasta.</div>
+      </div>
+      <div class="surface-2 p-3 rounded text-[12px] text-soft">
+        <div class="flex items-start gap-2">
+          <i data-lucide="info" style="width:14px;height:14px;color:var(--accent);margin-top:2px"></i>
+          <div>
+            Workspace novo começa <strong>do zero</strong>: sem contas, sem mídias, sem histórico. Para mover conteúdo entre workspaces, precisa fazer manualmente.
+          </div>
+        </div>
+      </div>
+      <div class="flex justify-end gap-2 pt-3 border-t border-line">
+        <button type="button" class="btn btn-ghost" onclick="closeCreate()">Cancelar</button>
+        <button type="submit" class="btn btn-accent"><i data-lucide="check" class="icon"></i> Criar</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+  const CURRENT_WS = {{ (current_workspace.slug if current_workspace else 'default')|tojson }};
+
+  function escapeHtml(s) {
+    return (s || '').replace(/[&<>"']/g, c => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[c]));
+  }
+
+  function fmtDate(iso) {
+    if (!iso) return '—';
+    return iso.replace('T', ' ').slice(0, 16);
+  }
+
+  async function load() {
+    const list = await api('/api/workspaces').catch(() => []);
+    const tbody = document.getElementById('ws-tbody');
+    if (!list.length) {
+      tbody.innerHTML = `<tr><td colspan="5" class="text-center py-8 text-muted">Nenhum workspace.</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = list.map(w => {
+      const isCurrent = w.slug === CURRENT_WS;
+      const isDefault = w.slug === 'default';
+      const currentBadge = isCurrent
+        ? '<span class="badge badge-success ml-2"><i data-lucide="check" style="width:11px;height:11px"></i> ativo</span>'
+        : '';
+      return `
+        <tr ${isCurrent ? 'style="background: rgba(236,72,153,0.06)"' : ''}>
+          <td>
+            <div class="font-medium">${escapeHtml(w.name)}${currentBadge}</div>
+          </td>
+          <td class="mono text-[12px] text-soft">${w.slug}</td>
+          <td class="text-[12px] text-soft">${fmtDate(w.created_at)}</td>
+          <td class="text-[12px] text-soft">${w.created_by || '—'}</td>
+          <td class="text-right">
+            ${!isCurrent ? `<button class="btn btn-subtle btn-sm" onclick="switchTo('${w.slug}')"><i data-lucide="log-in" class="icon"></i> Trocar para</button>` : ''}
+            <button class="btn btn-ghost btn-sm" onclick="renameWs('${w.slug}', '${escapeHtml(w.name).replace(/'/g, "&#39;")}')"><i data-lucide="edit-2" class="icon"></i></button>
+            ${!isDefault ? `<button class="btn btn-danger btn-sm" onclick="deleteWs('${w.slug}', '${escapeHtml(w.name).replace(/'/g, "&#39;")}')"><i data-lucide="trash-2" class="icon"></i></button>` : ''}
+          </td>
+        </tr>
+      `;
+    }).join('');
+    if (window.lucide) lucide.createIcons();
+  }
+
+  function openCreate() {
+    document.getElementById('ws-name').value = '';
+    document.getElementById('ws-slug').value = '';
+    document.getElementById('create-modal').classList.remove('hidden');
+    setTimeout(() => document.getElementById('ws-name').focus(), 50);
+    if (window.lucide) lucide.createIcons();
+  }
+  function closeCreate() {
+    document.getElementById('create-modal').classList.add('hidden');
+  }
+
+  async function submitCreate(e) {
+    e.preventDefault();
+    const name = document.getElementById('ws-name').value.trim();
+    const slug = document.getElementById('ws-slug').value.trim();
+    if (!name) return;
+    try {
+      await api('/api/workspaces', { method: 'POST', body: JSON.stringify({ name, slug: slug || null }) });
+      toast('Workspace criado', 'success');
+      closeCreate();
+      await load();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  async function switchTo(slug) {
+    try {
+      await api('/api/workspaces/switch', { method: 'POST', body: JSON.stringify({ slug }) });
+      toast(`Trocado pra '${slug}'. Recarregando…`, 'success');
+      setTimeout(() => location.reload(), 600);
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  async function renameWs(slug, currentName) {
+    const newName = prompt('Novo nome:', currentName);
+    if (!newName || newName === currentName) return;
+    try {
+      await api(`/api/workspaces/${slug}/rename`, { method: 'POST', body: JSON.stringify({ name: newName }) });
+      toast('Renomeado', 'success');
+      await load();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  async function deleteWs(slug, name) {
+    const ok = await confirmModal({
+      title: `Apagar workspace "${name}"?`,
+      message: `<strong style="color:#fca5a5">Isso apaga PERMANENTEMENTE</strong> todas as contas, mídias, sessões e fotos de perfil desse workspace.<br><br>Digite o slug <span class="mono">${slug}</span> abaixo pra confirmar:`,
+      danger: true,
+      confirmText: 'Apagar tudo',
+    });
+    if (!ok) return;
+    const typed = prompt(`Confirme digitando o slug "${slug}":`);
+    if (typed !== slug) {
+      toast('Slug não confere — cancelado', 'error');
+      return;
+    }
+    try {
+      await api(`/api/workspaces/${slug}/delete`, { method: 'POST' });
+      toast('Workspace apagado', 'success');
+      await load();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  load();
+</script>
+{% endblock %}

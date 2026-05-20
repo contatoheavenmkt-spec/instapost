@@ -56,7 +56,19 @@
   </div>
 
   {% if accounts %}
-  <form id="run-form" class="grid grid-cols-12 gap-3 items-end">
+
+  <!-- Tabs: Mesma mídia vs Diversificado -->
+  <div class="flex gap-1 mb-3 border-b border-line">
+    <button type="button" class="dispatch-tab active" data-tab="same" onclick="switchDispatchTab('same')">
+      <i data-lucide="copy" style="width:13px;height:13px"></i> Mesma mídia em todas
+    </button>
+    <button type="button" class="dispatch-tab" data-tab="diversified" onclick="switchDispatchTab('diversified')">
+      <i data-lucide="shuffle" style="width:13px;height:13px"></i> Diversificar (1 vídeo único por conta)
+    </button>
+  </div>
+
+  <!-- Modo 1: mesma mídia (legacy) -->
+  <form id="run-form" class="grid grid-cols-12 gap-3 items-end dispatch-form" data-tab="same">
     <div class="col-span-5">
       <label class="label">Mídia</label>
       <select name="video" class="select" required>
@@ -86,6 +98,38 @@
       <div class="ml-auto text-[11px] text-muted">Worker: cria 1 job por conta. Servidor: roda o post.py em sequência.</div>
     </div>
   </form>
+
+  <!-- Modo 2: diversificado (novo) -->
+  <div class="dispatch-form hidden" data-tab="diversified">
+    <div class="grid grid-cols-12 gap-3 items-end">
+      <div class="col-span-8">
+        <label class="label">Como funciona</label>
+        <div class="text-[12px] text-soft surface-2 px-3 py-2 rounded">
+          Pega <strong>todas as contas ativas conectadas</strong> e distribui vídeos
+          <strong>diferentes</strong> entre elas (ordem cronológica do upload).
+          Conta nunca recebe vídeo que ela já postou. Se todas postaram tudo, mostra
+          modal pra reiniciar.
+        </div>
+      </div>
+      <div class="col-span-2">
+        <label class="label">Posts por conta</label>
+        <input id="diversified-max" class="input" type="number" min="1" max="20" value="1" />
+      </div>
+      <div class="col-span-2">
+        <button type="button" class="btn btn-accent w-full" onclick="runDiversifiedDispatch()" id="diversified-btn">
+          <i data-lucide="shuffle" class="icon"></i> Distribuir
+        </button>
+      </div>
+    </div>
+    <div id="diversified-summary" class="mt-3 text-[12px] text-muted"></div>
+  </div>
+
+  <style>
+    .dispatch-tab { padding: 7px 12px; font-size: 12px; color: var(--text-2); border-bottom: 2px solid transparent; margin-bottom: -1px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; transition: all .12s; background: transparent; border-top: 0; border-left: 0; border-right: 0; }
+    .dispatch-tab:hover { color: var(--text); }
+    .dispatch-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  </style>
+
   {% else %}
   <div class="text-center py-6">
     <i data-lucide="plug" style="width:28px;height:28px;color:var(--text-3);margin:0 auto 8px;display:block"></i>
@@ -420,5 +464,61 @@
   setInterval(loadKanban, 3000);
   // Quando modal aberto, atualiza ele junto
   setInterval(() => { if (_modalJobId) refreshJobModal(); }, 3000);
+
+  // ===== Disparo diversificado =====
+
+  function switchDispatchTab(tab) {
+    document.querySelectorAll('.dispatch-tab').forEach(b => {
+      b.classList.toggle('active', b.dataset.tab === tab);
+    });
+    document.querySelectorAll('.dispatch-form').forEach(f => {
+      f.classList.toggle('hidden', f.dataset.tab !== tab);
+    });
+  }
+
+  async function runDiversifiedDispatch() {
+    const btn = document.getElementById('diversified-btn');
+    const maxPerAcc = parseInt(document.getElementById('diversified-max').value) || 1;
+    btn.disabled = true;
+    btn.innerHTML = '<i data-lucide="loader" class="icon"></i> Distribuindo...';
+    if (window.lucide) lucide.createIcons();
+    try {
+      const r = await api('/api/remote-jobs/dispatch-diversified', {
+        method: 'POST',
+        body: JSON.stringify({ max_per_account: maxPerAcc }),
+      });
+      if (r.all_completed) {
+        // Todas as contas postaram TUDO do pool — pergunta se quer reiniciar
+        const ok = await confirmModal({
+          title: 'Todas as contas postaram tudo!',
+          message: `Cada uma das ${r.accounts_count} conta(s) já postou todos os ${r.pool_size} vídeo(s) do pool.<br><br>Quer <strong>reiniciar a rodada do zero</strong>? Isso vai apagar o histórico de "o que cada conta postou" — depois você poderá distribuir os mesmos vídeos novamente.<br><br><span style="color:#fca5a5">Os ARQUIVOS dos vídeos NÃO serão apagados. Só o registro de quem postou o quê.</span>`,
+          danger: true,
+          confirmText: 'Sim, reiniciar do zero',
+        });
+        if (ok) {
+          await api('/api/remote-jobs/reset-posted', { method: 'POST', body: JSON.stringify({}) });
+          toast('Histórico zerado. Aperte "Distribuir" novamente pra começar.', 'success');
+        }
+      } else {
+        const completedNote = r.accounts_completed && r.accounts_completed.length
+          ? ` · ${r.accounts_completed.length} conta(s) já estão completas`
+          : '';
+        toast(`${r.count} job(s) criados em ${Object.keys(r.assignments).length} conta(s)${completedNote}`, 'success');
+        // Renderiza resumo de quem recebeu o quê
+        const summary = document.getElementById('diversified-summary');
+        const lines = Object.entries(r.assignments).map(([acc, vids]) =>
+          `<div>@${acc}: ${vids.map(v => `<span class="mono text-[11px]">${v}</span>`).join(', ')}</div>`
+        ).join('');
+        summary.innerHTML = `<div class="surface-2 p-3 rounded mt-2"><div class="text-[11px] text-muted mb-1.5 font-semibold uppercase tracking-wider">Distribuição</div>${lines}</div>`;
+        loadKanban();
+      }
+    } catch (e) {
+      toast(e.message, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = '<i data-lucide="shuffle" class="icon"></i> Distribuir';
+      if (window.lucide) lucide.createIcons();
+    }
+  }
 </script>
 {% endblock %}

@@ -146,7 +146,7 @@
 
 <div class="flex min-h-screen">
   <aside class="w-56 border-r border-line bg-[var(--surface)] flex flex-col">
-    <div class="px-5 pt-5 pb-4">
+    <div class="px-5 pt-5 pb-3">
       <div class="flex items-center gap-2">
         <div class="w-7 h-7 rounded-md bg-[var(--accent)] flex items-center justify-center">
           <i data-lucide="send" class="w-4 h-4 text-white"></i>
@@ -157,6 +157,40 @@
         </div>
       </div>
     </div>
+
+    {% if current_workspace %}
+    <div class="px-3 pb-3">
+      <div class="relative" id="ws-picker-wrap">
+        <button type="button" onclick="toggleWsPicker()" class="w-full surface-2 px-2.5 py-2 rounded flex items-center gap-2 hover:bg-[var(--border)] transition-colors">
+          <i data-lucide="folder" style="width:13px;height:13px;color:var(--accent);flex-shrink:0"></i>
+          <div class="min-w-0 flex-1 text-left">
+            <div class="text-[10.5px] uppercase tracking-wider text-muted leading-none">Workspace</div>
+            <div class="text-[12.5px] font-medium truncate mt-0.5">{{ current_workspace.name }}</div>
+          </div>
+          <i data-lucide="chevron-down" style="width:12px;height:12px;color:var(--text-3)"></i>
+        </button>
+        <div id="ws-picker-menu" class="hidden absolute left-0 right-0 top-full mt-1 surface p-1 shadow-lg" style="z-index: 30; max-height: 280px; overflow-y: auto">
+          {% for ws in all_workspaces %}
+          <button type="button" class="w-full text-left px-2.5 py-1.5 rounded hover:bg-[var(--surface-2)] flex items-center gap-2 text-[12.5px]" onclick="switchWorkspace('{{ ws.slug }}')">
+            {% if ws.slug == current_workspace.slug %}
+            <i data-lucide="check" style="width:12px;height:12px;color:var(--accent)"></i>
+            {% else %}
+            <span style="width:12px;display:inline-block"></span>
+            {% endif %}
+            <span class="truncate">{{ ws.name }}</span>
+          </button>
+          {% endfor %}
+          {% if is_owner %}
+          <div class="border-t border-line my-1"></div>
+          <a href="/workspaces" class="w-full text-left px-2.5 py-1.5 rounded hover:bg-[var(--surface-2)] flex items-center gap-2 text-[12.5px] text-soft">
+            <i data-lucide="settings" style="width:12px;height:12px"></i>
+            <span>Gerenciar workspaces</span>
+          </a>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+    {% endif %}
     <nav class="px-3 space-y-0.5 flex-1 overflow-auto">
       <a class="nav-link {% if active == 'dashboard' %}active{% endif %}" href="/"><i data-lucide="layout-dashboard" class="icon"></i> Dashboard</a>
 
@@ -181,6 +215,7 @@
       <div class="nav-group">Admin</div>
       <a class="nav-link {% if active == 'team' %}active{% endif %}" href="/team"><i data-lucide="users" class="icon"></i> Equipe</a>
       <a class="nav-link {% if active == 'workers' %}active{% endif %}" href="/workers"><i data-lucide="monitor" class="icon"></i> Meu PC</a>
+      <a class="nav-link {% if active == 'workspaces' %}active{% endif %}" href="/workspaces"><i data-lucide="folder-tree" class="icon"></i> Workspaces</a>
       {% endif %}
     </nav>
     <div class="border-t border-line">
@@ -336,6 +371,23 @@
     const wrap = document.getElementById('user-menu-wrap');
     if (wrap && !wrap.contains(e.target)) document.getElementById('user-menu').classList.add('hidden');
   });
+
+  // Workspace picker
+  window.toggleWsPicker = function() {
+    const m = document.getElementById('ws-picker-menu');
+    if (m) m.classList.toggle('hidden');
+  };
+  document.addEventListener('click', (e) => {
+    const wrap = document.getElementById('ws-picker-wrap');
+    const menu = document.getElementById('ws-picker-menu');
+    if (wrap && menu && !wrap.contains(e.target)) menu.classList.add('hidden');
+  });
+  window.switchWorkspace = async function(slug) {
+    try {
+      await api('/api/workspaces/switch', { method: 'POST', body: JSON.stringify({ slug }) });
+      location.reload();
+    } catch (e) { toast(e.message, 'error'); }
+  };
 
   // Render lucide icons
   document.addEventListener('DOMContentLoaded', () => { if (window.lucide) lucide.createIcons(); });

@@ -315,9 +315,10 @@
         const overlayIcon = v.media_type === 'photo' ? 'image' : 'play-circle';
         return `
         <div class="card-video surface" onclick="openDetail('${folder}', '${escapeHtml(v.name)}')">
-          <div class="card-thumb" style="${v.thumb_url ? `background-image: url('${v.thumb_url}')` : ''}">
+          <div class="card-thumb" style="position:relative">
+            ${v.thumb_url ? `<img loading="lazy" decoding="async" src="${v.thumb_url}" alt="" style="width:100%;height:100%;object-fit:cover;display:block">` : ''}
             ${!v.has_thumb ? `<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--text-3)"><i data-lucide="image-off" style="width:24px;height:24px"></i></div>` : ''}
-            <div style="position:absolute;top:8px;left:8px;display:flex;gap:4px">${kindBadge} ${linkBadge}</div>
+            <div style="position:absolute;top:8px;left:8px;display:flex;gap:4px;z-index:2">${kindBadge} ${linkBadge}</div>
             <div class="card-thumb-overlay">
               <i data-lucide="${overlayIcon}" style="width:32px;height:32px;color:white"></i>
               <span>clique pra editar / postar</span>
@@ -752,35 +753,41 @@
     btn.disabled = true;
     document.getElementById('upload-opts-modal').classList.add('hidden');
 
+    // Otimizado: usa endpoint bulk em vez de N requisições. Se tiver > 5 arquivos,
+    // divide em lotes de 5 pra dar feedback de progresso.
+    const BATCH = 5;
     let ok = 0, fail = 0;
-    for (let i = 0; i < files.length; i++) {
-      const f = files[i];
-      statusEl.textContent = `Enviando ${i+1}/${files.length}: ${f.name}…`;
+    const errorsList = [];
+
+    for (let i = 0; i < files.length; i += BATCH) {
+      const slice = Array.from(files).slice(i, i + BATCH);
+      statusEl.textContent = `Enviando ${Math.min(i + BATCH, files.length)}/${files.length}…`;
       const fd = new FormData();
-      fd.append('video', f);
+      slice.forEach(f => fd.append('videos', f));
       fd.append('caption', caption);
+      fd.append('kind', kind);
+      if (linkUrl) fd.append('link_url', linkUrl);
       try {
-        const res = await fetch('/api/videos/upload', { method: 'POST', body: fd });
+        const res = await fetch('/api/videos/upload-bulk', { method: 'POST', body: fd });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.detail || `Erro ${res.status}`);
-        // Atualiza meta (kind + link) — se for foto, força story
-        const finalKind = isImage(f) ? 'story' : kind;
-        if (finalKind !== 'reel' || linkUrl) {
-          await api(`/api/videos/${encodeURIComponent(data.name)}/meta`, {
-            method: 'POST',
-            body: JSON.stringify({ kind: finalKind, link_url: finalKind === 'story' ? linkUrl : null }),
-          });
-        }
-        ok++;
+        ok += data.saved_count || 0;
+        fail += data.error_count || 0;
+        (data.errors || []).forEach(e => errorsList.push(e));
       } catch (e) {
-        fail++;
-        toast(`${f.name}: ${e.message}`, 'error');
+        fail += slice.length;
+        errorsList.push({ name: slice.map(f => f.name).join(','), error: e.message });
       }
     }
+
     statusEl.textContent = '';
     fileInput.value = '';
     pendingUploadFiles = [];
     btn.disabled = false;
+    if (errorsList.length) {
+      errorsList.slice(0, 5).forEach(e => toast(`${e.name}: ${e.error}`, 'error'));
+      if (errorsList.length > 5) toast(`+ ${errorsList.length - 5} outros erros — veja /logs`, 'error');
+    }
     if (ok) toast(`${ok} arquivo(s) enviado(s) como ${kind === 'story' ? 'Story' : 'Reel'}${fail ? ` · ${fail} falhou` : ''}`, ok ? 'success' : 'error');
     await load();
   });

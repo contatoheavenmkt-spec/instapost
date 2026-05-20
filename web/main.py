@@ -13,6 +13,7 @@ import secrets
 import shutil
 import socket
 import sys
+import time
 import unicodedata
 from datetime import datetime
 from pathlib import Path
@@ -64,6 +65,11 @@ PUBLIC_PATH_PREFIXES = ("/login", "/signup/", "/static/", "/api/health", "/r/", 
 class RequireLoginMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
+        # Workspace ativo: setta no contextvar a partir da sessão (default se faltar)
+        from core import paths as _paths
+        ws_slug = (request.session.get("workspace") or _paths.DEFAULT_WORKSPACE)
+        _paths.set_workspace(ws_slug)
+
         if path == "/api/health" or any(path.startswith(p) for p in PUBLIC_PATH_PREFIXES):
             return await call_next(request)
         email = request.session.get("email")
@@ -93,9 +99,15 @@ auth.ensure_owner_seed()
 
 def _ctx(request: Request, **extra) -> dict:
     u = auth.current_user(request)
+    from core import paths as _paths
+    from web.workspaces import manager as ws_manager
+    current_ws_slug = request.session.get("workspace") or _paths.DEFAULT_WORKSPACE
+    current_ws = ws_manager.get(current_ws_slug) or ws_manager.get(_paths.DEFAULT_WORKSPACE)
     base = {
         "user": auth.public_user(u) if u else None,
         "is_owner": bool(u and u.get("role") == "owner"),
+        "current_workspace": current_ws.to_dict() if current_ws else None,
+        "all_workspaces": ws_manager.list(),
     }
     base.update(extra)
     return base
@@ -146,10 +158,38 @@ def _is_video_thumb(p: Path) -> bool:
     return False
 
 
+# Cache em memória pra list_videos (invalidado por mtime do dir ou explicitamente)
+_videos_cache: dict[str, tuple[float, list[dict]]] = {}  # key -> (dir_mtime, result)
+_VIDEOS_CACHE_TTL = 4.0  # seg — auto-expira mesmo sem mudança detectada
+
+
+def _videos_cache_invalidate():
+    """Limpa cache (chame após upload/delete)."""
+    _videos_cache.clear()
+
+
 def list_videos(folder: Path) -> list[dict]:
-    """Lista todas as mídias da pasta (vídeo + foto)."""
+    """Lista todas as mídias da pasta (vídeo + foto).
+
+    Otimização: cacheia resultado em memória por workspace+folder. Invalida
+    automaticamente se o mtime do diretório mudou (criação/remoção de arquivo)
+    OU após TTL curto.
+    """
     from core.poster import load_meta, detect_media_kind
     folder_key = folder.name  # "pending" ou "posted"
+    # Cache key inclui o path absoluto (workspace-aware)
+    cache_key = str(folder)
+    try:
+        dir_mtime = folder.stat().st_mtime
+    except OSError:
+        dir_mtime = 0.0
+    now = time.time()
+    cached = _videos_cache.get(cache_key)
+    if cached:
+        cached_mtime, cached_result = cached
+        # Hit válido se dir não mudou E não passou do TTL
+        if cached_mtime == dir_mtime and (now - cached_mtime) < _VIDEOS_CACHE_TTL + 60:
+            return cached_result
     out = []
     items = [p for p in folder.iterdir()
              if p.is_file()
@@ -193,6 +233,8 @@ def list_videos(folder: Path) -> list[dict]:
             "link_url": meta.get("link_url"),
             "link_text": meta.get("link_text") or "Clique aqui",
         })
+    # Cacheia resultado (workspace-aware via cache_key = path absoluto)
+    _videos_cache[cache_key] = (dir_mtime, out)
     return out
 
 
@@ -870,6 +912,79 @@ def api_list_videos():
     }
 
 
+@app.post("/api/videos/upload-bulk")
+async def api_upload_video_bulk(
+    videos: list[UploadFile] = File(...),
+    caption: str = Form(""),
+    kind: str = Form("reel"),
+    link_url: Optional[str] = Form(None),
+):
+    """Upload de N vídeos/fotos numa única request. MUITO mais rápido que N calls.
+
+    Aceita kind+caption+link_url comuns aplicados a TODOS os arquivos. Fotos
+    forçam kind=story automaticamente (limitação do Instagram).
+    """
+    if not videos:
+        raise HTTPException(400, "Nenhum arquivo enviado")
+    from core.poster import save_meta
+    saved = []
+    errors = []
+    pending_dir = PENDING_DIR  # snapshot do proxy
+
+    for video in videos:
+        if not video.filename:
+            errors.append({"name": "(sem nome)", "error": "arquivo sem nome"})
+            continue
+        try:
+            name = safe_name(video.filename)
+            ext = Path(name).suffix.lower()
+            if ext not in MEDIA_EXTS:
+                errors.append({"name": video.filename, "error": f"tipo {ext} não suportado"})
+                continue
+            target = pending_dir / name
+            if target.exists():
+                errors.append({"name": name, "error": "arquivo com esse nome já existe"})
+                continue
+
+            with target.open("wb") as f:
+                while chunk := await video.read(1024 * 1024):
+                    f.write(chunk)
+
+            # Caption no .txt
+            if caption:
+                (pending_dir / (Path(name).stem + ".txt")).write_text(caption, encoding="utf-8")
+
+            # Meta
+            is_photo = ext in PHOTO_EXTS
+            final_kind = "story" if is_photo else (kind if kind in ("reel", "story") else "reel")
+            if final_kind != "reel" or link_url:
+                save_meta(str(target), {
+                    "kind": final_kind,
+                    "link_url": (link_url or "").strip() or None,
+                    "link_text": "Clique aqui",
+                })
+
+            # Thumb pra vídeo (async-friendly: melhor falhar silenciosamente que bloquear)
+            if ext in VIDEO_EXTS:
+                try:
+                    generate_thumbnail(target)
+                except Exception as e:
+                    print(f"[upload-bulk] thumb falhou {name}: {e}")
+
+            saved.append({"name": name, "kind": final_kind})
+        except Exception as e:
+            errors.append({"name": video.filename, "error": str(e)})
+
+    _videos_cache_invalidate()
+    return {
+        "ok": True,
+        "saved": saved,
+        "errors": errors,
+        "saved_count": len(saved),
+        "error_count": len(errors),
+    }
+
+
 @app.post("/api/videos/upload")
 async def api_upload_video(
     video: UploadFile = File(...),
@@ -901,6 +1016,7 @@ async def api_upload_video(
         except Exception as e:
             print(f"[upload] thumb falhou: {e}")
 
+    _videos_cache_invalidate()
     return {"ok": True, "name": name}
 
 
@@ -957,6 +1073,7 @@ def api_delete_video(name: str):
         cleanup_variants_for(name)
     except Exception:
         pass
+    _videos_cache_invalidate()
     return {"ok": True}
 
 
@@ -987,7 +1104,7 @@ def api_video_thumb(folder: str, name: str):
         if not media.exists():
             raise HTTPException(404, "Foto não existe")
         mime = "image/png" if ext == ".png" else ("image/webp" if ext == ".webp" else "image/jpeg")
-        return FileResponse(media, media_type=mime, headers={"Cache-Control": "public, max-age=3600"})
+        return FileResponse(media, media_type=mime, headers={"Cache-Control": "public, max-age=86400, immutable"})
 
     # Vídeo: gera/serve .jpg
     thumb = media.with_suffix(".jpg")
@@ -998,7 +1115,7 @@ def api_video_thumb(folder: str, name: str):
             generate_thumbnail(media)
         except Exception:
             raise HTTPException(500, "Não foi possível gerar prévia")
-    return FileResponse(thumb, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=3600"})
+    return FileResponse(thumb, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=86400, immutable"})
 
 
 @app.get("/api/videos/{folder}/{name}/stream")
@@ -1586,6 +1703,207 @@ def api_create_remote_job(payload: RemoteJobIn, request: Request, user=Depends(a
     }
 
 
+# ---------- DISPARO DIVERSIFICADO (1 vídeo único por conta) ----------
+
+class DiversifiedDispatchIn(BaseModel):
+    accounts: Optional[list[str]] = None  # se None, usa todas ativas+worker-conectadas
+    videos: Optional[list[str]] = None    # se None, usa todos os pendentes (pool)
+    max_per_account: int = 1              # quantos posts criar por conta (default 1)
+
+
+def _build_pending_pool(only_names: Optional[list[str]] = None) -> list[str]:
+    """Lista vídeos em pending/ ordenados cronologicamente (mais antigos primeiro)."""
+    items = []
+    if not PENDING_DIR.exists():
+        return []
+    for p in PENDING_DIR.iterdir():
+        if not p.is_file():
+            continue
+        suf = p.suffix.lower()
+        if suf not in MEDIA_EXTS:
+            continue
+        if p.name.endswith(".meta.json"):
+            continue
+        if _is_video_thumb(p):
+            continue
+        if only_names and p.name not in only_names:
+            continue
+        items.append((p.name, p.stat().st_mtime))
+    items.sort(key=lambda x: x[1])
+    return [n for n, _ in items]
+
+
+@app.post("/api/remote-jobs/dispatch-diversified")
+def api_dispatch_diversified(payload: DiversifiedDispatchIn, request: Request, user=Depends(auth.require_user)):
+    """Distribui vídeos DIFERENTES entre as contas.
+
+    Algoritmo:
+      - Pool = vídeos do payload.videos (ou todos os pending)
+      - Pra cada conta, escolhe o próximo vídeo do pool que ela NÃO postou
+        (sequencial pela ordem cronológica do pool)
+      - Não repete vídeo na mesma rodada (cada vídeo usado 1x antes de reciclar)
+      - Se todas as contas já postaram todos os vídeos do pool → retorna
+        all_completed=true e count=0 (sem criar nada)
+    """
+    accounts = load_accounts()
+
+    # Lista de contas
+    if payload.accounts:
+        target_usernames = payload.accounts
+    else:
+        target_usernames = [
+            a["username"] for a in accounts
+            if a.get("active", True) and a.get("connected_via_worker_id")
+        ]
+    if not target_usernames:
+        raise HTTPException(400, "Nenhuma conta selecionada / conectada via worker")
+
+    targets = []
+    for uname in target_usernames:
+        a = next((a for a in accounts if a["username"] == uname), None)
+        if not a:
+            raise HTTPException(404, f"Conta @{uname} não existe")
+        targets.append(a)
+
+    # Pool de vídeos
+    only_names = None
+    if payload.videos:
+        only_names = [safe_name(v) for v in payload.videos]
+    pool = _build_pending_pool(only_names=only_names)
+    if not pool:
+        raise HTTPException(400, "Nenhum vídeo pendente disponível")
+
+    # Estado: vídeos já usados nesta rodada (pra não dar o mesmo vídeo pra contas diferentes
+    # no mesmo disparo). Se acabar antes das contas, recicla.
+    used_in_round: set[str] = set()
+    assignments: list[tuple[dict, str]] = []  # (account, video_name)
+    accounts_completed: list[str] = []         # contas que ja postaram tudo do pool
+
+    max_per_acc = max(1, min(20, int(payload.max_per_account or 1)))
+
+    for acc in targets:
+        already = _account_posted_names(acc)
+        for _ in range(max_per_acc):
+            # Vídeos disponíveis pra ESSA conta: pool - já postados
+            avail = [v for v in pool if v not in already]
+            if not avail:
+                # Conta ja postou tudo do pool
+                if acc["username"] not in accounts_completed:
+                    accounts_completed.append(acc["username"])
+                break
+            # Prefere os ainda não usados na rodada; senão recicla
+            preferred = [v for v in avail if v not in used_in_round]
+            chosen = preferred[0] if preferred else avail[0]
+            used_in_round.add(chosen)
+            assignments.append((acc, chosen))
+            # Marca pra essa conta na lista local pra não repetir no segundo slot
+            already.add(chosen)
+
+    if not assignments:
+        # Todas as contas já postaram todos os vídeos do pool — sinal de reset
+        return {
+            "ok": True,
+            "count": 0,
+            "all_completed": True,
+            "pool_size": len(pool),
+            "accounts_count": len(targets),
+            "accounts_completed": [a["username"] for a in targets],
+            "message": "Todas as contas já postaram todos os vídeos do pool. Use /api/remote-jobs/reset-posted pra começar de novo.",
+        }
+
+    # Cria 1 remote_job por assignment
+    base = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/") or str(request.base_url).rstrip("/")
+    from core.poster import load_meta, detect_media_kind, load_caption
+
+    created = []
+    by_account: dict[str, list[str]] = {}
+    for acc, video_name in assignments:
+        media_path = PENDING_DIR / video_name
+        meta = load_meta(str(media_path))
+        media_type = detect_media_kind(str(media_path))
+        caption = load_caption(str(media_path))
+        link_url = meta.get("link_url")
+        link_text = meta.get("link_text") or "Clique aqui"
+
+        # Anti-cluster: 1 short URL único por conta se for story+link
+        if meta.get("kind") == "story" and link_url:
+            try:
+                shortened = link_manager.create(
+                    target_url=link_url,
+                    label=f"diversificado · @{acc['username']}",
+                    account=acc["username"],
+                    created_by=user["email"],
+                )
+                link_url = f"{base}/r/{shortened.slug}"
+            except Exception as e:
+                print(f"[diversified] shortener falhou pra {acc['username']}: {e}")
+
+        highlight_title = None
+        if meta.get("kind") == "story" and acc.get("auto_highlight_enabled") and acc.get("auto_highlight_title"):
+            highlight_title = acc["auto_highlight_title"]
+
+        media_url = f"{base}/api/worker/media/{video_name}?account={acc['username']}"
+        job = rjob_manager.create({
+            "operation": "post",
+            "params": {"auto_highlight_title": highlight_title} if highlight_title else {},
+            "account_username": acc["username"],
+            "account_password": acc["password"],
+            "account_totp_secret": acc.get("totp_secret"),
+            "account_proxy": acc.get("proxy"),
+            "video_name": video_name,
+            "media_type": media_type,
+            "kind": meta.get("kind", "reel"),
+            "caption": caption,
+            "link_url": link_url,
+            "link_text": link_text,
+            "media_url": media_url,
+            "created_by": f"diversified:{user['email']}",
+        })
+        created.append(job.id)
+        by_account.setdefault(acc["username"], []).append(video_name)
+
+    return {
+        "ok": True,
+        "count": len(created),
+        "all_completed": False,
+        "job_ids": created,
+        "pool_size": len(pool),
+        "accounts_count": len(targets),
+        "accounts_completed": accounts_completed,
+        "assignments": by_account,
+    }
+
+
+class ResetPostedIn(BaseModel):
+    accounts: Optional[list[str]] = None  # se None, reseta TODAS
+
+
+@app.post("/api/remote-jobs/reset-posted")
+def api_reset_posted(payload: ResetPostedIn, user=Depends(auth.require_user)):
+    """Zera o posted_media de N contas — usado pra 'reiniciar a rodada do zero'.
+
+    IMPORTANTE: confirme na UI antes de chamar. Apaga o histórico de quem
+    postou o quê (mas NÃO apaga os arquivos em data/posted/).
+    """
+    accounts = load_accounts()
+    target_usernames = payload.accounts
+    if not target_usernames:
+        # Reseta TODAS as ativas
+        target_usernames = [a["username"] for a in accounts if a.get("active", True)]
+
+    reset = []
+    for a in accounts:
+        if a["username"] in target_usernames:
+            had = len(a.get("posted_media") or [])
+            a["posted_media"] = []
+            # Tambem zera sync_completed pra permitir backfill de novo
+            if a.get("sync_completed"):
+                a["sync_completed"] = False
+            reset.append({"username": a["username"], "cleared": had})
+    save_accounts(accounts)
+    return {"ok": True, "count": len(reset), "reset": reset}
+
+
 @app.post("/api/remote-jobs/{job_id}/cancel")
 def api_cancel_remote_job(job_id: str, user=Depends(auth.require_user)):
     if not rjob_manager.cancel(job_id):
@@ -1773,3 +2091,71 @@ def api_delete_member(email: str, owner=Depends(auth.require_owner)):
         raise HTTPException(400, "Não dá pra remover outro owner por aqui")
     auth.delete_user(email)
     return {"ok": True}
+
+
+# ---------- WORKSPACES ----------
+
+from web.workspaces import manager as ws_manager  # noqa: E402
+
+
+class WorkspaceCreateIn(BaseModel):
+    name: str
+    slug: Optional[str] = None
+
+
+class WorkspaceRenameIn(BaseModel):
+    name: str
+
+
+class WorkspaceSwitchIn(BaseModel):
+    slug: str
+
+
+@app.get("/workspaces", response_class=HTMLResponse)
+def page_workspaces(request: Request, owner=Depends(auth.require_owner)):
+    return templates.TemplateResponse(
+        request, "workspaces.html", _ctx(request, active="workspaces"),
+    )
+
+
+@app.get("/api/workspaces")
+def api_list_workspaces(user=Depends(auth.require_user)):
+    return ws_manager.list()
+
+
+@app.post("/api/workspaces")
+def api_create_workspace(payload: WorkspaceCreateIn, owner=Depends(auth.require_owner)):
+    try:
+        ws = ws_manager.create(name=payload.name, slug=payload.slug, created_by=owner["email"])
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, "workspace": ws.to_dict()}
+
+
+@app.post("/api/workspaces/{slug}/rename")
+def api_rename_workspace(slug: str, payload: WorkspaceRenameIn, owner=Depends(auth.require_owner)):
+    try:
+        ws = ws_manager.rename(slug, payload.name)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, "workspace": ws.to_dict()}
+
+
+@app.post("/api/workspaces/{slug}/delete")
+def api_delete_workspace(slug: str, owner=Depends(auth.require_owner)):
+    try:
+        ok = ws_manager.delete(slug)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if not ok:
+        raise HTTPException(404, "Workspace não encontrado")
+    return {"ok": True}
+
+
+@app.post("/api/workspaces/switch")
+def api_switch_workspace(payload: WorkspaceSwitchIn, request: Request, user=Depends(auth.require_user)):
+    """Define o workspace ativo na sessão do user."""
+    if not ws_manager.exists(payload.slug):
+        raise HTTPException(404, f"Workspace '{payload.slug}' não existe")
+    request.session["workspace"] = payload.slug
+    return {"ok": True, "workspace": payload.slug}

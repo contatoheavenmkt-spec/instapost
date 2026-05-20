@@ -21,3 +21,8 @@ remote_jobs.json
 .env
 data/
 .worker_tmp/
+
+# Workspaces (dados isolados por workspace - NUNCA commitar)
+workspaces/
+workspaces_meta.json
+finance.json
