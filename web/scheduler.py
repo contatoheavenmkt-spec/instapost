@@ -609,44 +609,74 @@ class ScheduleManager:
             self._stop_event.wait(10 * 60)
 
     def _sync_tick(self):
+        """SYNC MODE = 'conta nova começa do zero da biblioteca, isoladamente'.
+
+        Diferente do auto-loop diversificado (que distribui vídeos DIFERENTES entre
+        várias contas), o sync pega a biblioteca pending/ INTEIRA e posta na ordem
+        cronológica em UMA conta específica (a que tem sync_enabled), respeitando
+        seu próprio sync_interval_hours.
+
+        Contas com sync_enabled são EXCLUÍDAS do auto-loop diversificado (no
+        _do_dispatch_diversified). Não acontecem 2 fluxos simultâneos na mesma conta.
+
+        Auto-desliga quando a conta postou TODO o pool de pending.
+        """
         import json as _json, os as _os
         from datetime import datetime as _dt
-        from core.paths import ACCOUNTS_FILE, PENDING_DIR, POSTED_DIR
+        from core import paths as _paths
         from core.poster import load_meta, detect_media_kind, load_caption
         from web.remote_jobs import manager as rjob_manager
         from web.shortener import manager as link_manager
 
-        # Janela de atividade 07:00 - 22:00 (mesmo da automation_loop)
+        # Janela de atividade 07:00 - 22:00
         hour = _dt.now().hour
         if hour < 7 or hour >= 22:
             return
 
+        # Itera por todos os workspaces
+        for slug in _paths.list_workspace_slugs():
+            try:
+                self._sync_tick_for_workspace(slug)
+            except Exception as e:
+                print(f"[sync] erro no ws '{slug}': {e}")
+
+    def _sync_tick_for_workspace(self, slug: str):
+        """Sync tick pra 1 workspace específico."""
+        import json as _json, os as _os
+        from core import paths as _paths
+        from core.poster import load_meta, detect_media_kind, load_caption
+        from web.remote_jobs import manager as rjob_manager
+        from web.shortener import manager as link_manager
+
+        _paths.set_workspace(slug)
+        accounts_file = _paths.accounts_file(slug)
+        pending_dir = _paths.pending_dir(slug)
+        posted_dir = _paths.posted_dir(slug)
+
+        if not accounts_file.exists():
+            return
         try:
-            with open(ACCOUNTS_FILE, encoding="utf-8") as f:
-                accounts = _json.load(f)
+            accounts = _json.loads(accounts_file.read_text(encoding="utf-8"))
         except Exception:
             return
 
-        # Constrói o pool central (união das posted_media de todas as contas)
-        pool: dict[str, dict] = {}
-        for a in accounts:
-            for item in (a.get("posted_media") or []):
-                name = item.get("name")
-                if not name:
+        # Pool = vídeos em pending/ ordenados cronologicamente (mais antigo primeiro)
+        MEDIA_EXTS = {".mp4", ".jpg", ".jpeg", ".png", ".webp"}
+        pool_items = []
+        for p in pending_dir.iterdir():
+            if not p.is_file() or p.suffix.lower() not in MEDIA_EXTS:
+                continue
+            if p.name.endswith(".meta.json"):
+                continue
+            if p.suffix.lower() in (".jpg", ".jpeg"):
+                if p.stem.lower().endswith(".mp4") or p.with_suffix(".mp4").exists():
                     continue
-                posted_at = item.get("posted_at") or ""
-                if name not in pool:
-                    pool[name] = {
-                        "name": name,
-                        "kind": item.get("kind", "reel"),
-                        "first_posted_at": posted_at,
-                    }
-                elif posted_at and (not pool[name]["first_posted_at"] or posted_at < pool[name]["first_posted_at"]):
-                    pool[name]["first_posted_at"] = posted_at
+            pool_items.append((p.name, p.stat().st_mtime))
+        pool_items.sort(key=lambda x: x[1])
+        pool_sorted = [{"name": n, "mtime": t} for n, t in pool_items]
 
-        pool_sorted = sorted(pool.values(), key=lambda x: x["first_posted_at"] or "")
         if not pool_sorted:
-            return  # nada postado no sistema ainda
+            return  # biblioteca vazia
 
         now = now_local()
         base = _os.environ.get("PUBLIC_BASE_URL", "").rstrip("/") or "http://127.0.0.1:8000"
@@ -662,19 +692,14 @@ class ScheduleManager:
 
             already = {p.get("name") for p in (acc.get("posted_media") or [])}
             pending_pool = [m for m in pool_sorted if m["name"] not in already]
-            # Filtra só mídias que ainda existem em disco
-            pending_pool = [
-                m for m in pending_pool
-                if (PENDING_DIR / m["name"]).exists() or (POSTED_DIR / m["name"]).exists()
-            ]
 
             if not pending_pool:
-                # Conta alcançou o feed — auto-desliga
+                # Conta postou TODA a biblioteca — auto-desliga
                 if not acc.get("sync_completed"):
                     acc["sync_completed"] = True
                     acc["sync_enabled"] = False
                     changed = True
-                    print(f"[sync] @{acc['username']} alcançou feed central — sync desligado")
+                    print(f"[sync] @{acc['username']} completou biblioteca ({len(already)} vídeos) — sync desligado")
                 continue
 
             # Já tem job de sync pendente/rodando pra essa conta? Pula.
@@ -688,8 +713,8 @@ class ScheduleManager:
             if has_active:
                 continue
 
-            # Respeita intervalo
-            interval_h = int(acc.get("sync_interval_hours", 8))
+            # Respeita intervalo (com tolerância 1min)
+            interval_h = float(acc.get("sync_interval_hours", 8))
             last_iso = acc.get("sync_last_post_at")
             if last_iso:
                 try:
@@ -697,18 +722,17 @@ class ScheduleManager:
                     if last_dt.tzinfo is None:
                         last_dt = last_dt.astimezone()
                     elapsed_h = (now - last_dt).total_seconds() / 3600.0
-                    if elapsed_h < interval_h:
+                    if elapsed_h < interval_h - (1.0 / 60.0):
                         continue
                 except Exception:
                     pass
 
-            # Pega a PRÓXIMA mídia da fila (cronológica)
+            # Pega a PRÓXIMA mídia da fila (cronológica = mais antiga primeiro)
             next_media = pending_pool[0]
             media_name = next_media["name"]
-            # Pega o arquivo onde estiver (pending OU posted)
-            media_path = PENDING_DIR / media_name
+            media_path = pending_dir / media_name
             if not media_path.exists():
-                media_path = POSTED_DIR / media_name
+                media_path = posted_dir / media_name
             if not media_path.exists():
                 continue
 
@@ -766,8 +790,10 @@ class ScheduleManager:
 
         if changed:
             try:
-                with open(ACCOUNTS_FILE, "w", encoding="utf-8") as f:
-                    _json.dump(accounts, f, ensure_ascii=False, indent=2)
+                accounts_file.write_text(
+                    _json.dumps(accounts, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
             except Exception as e:
                 print(f"[sync] erro salvando accounts: {e}")
 
@@ -776,24 +802,27 @@ class ScheduleManager:
     def _diversify_loop(self):
         """Itera por todos os workspaces que têm auto-loop ligado. Em cada,
         cria N jobs diversificados respeitando interval_hours.
-        Tick a cada 15min, janela 7h-22h."""
+        Tick a cada 5min (era 15min), janela 7h-22h."""
         import time as _t
-        _t.sleep(120)  # espera 2min apos startup pra estabilizar
+        _t.sleep(30)  # 30s de espera no startup (antes era 120s)
         while not self._stop_event.is_set():
             try:
                 self._diversify_tick()
             except Exception as e:
                 print(f"[diversify] tick falhou: {e}")
-            # 15min
-            self._stop_event.wait(15 * 60)
+            # 5min tick — mais responsivo (era 15min)
+            self._stop_event.wait(5 * 60)
 
     def _diversify_tick(self):
-        from datetime import datetime as _dt, timedelta as _td
+        from datetime import datetime as _dt
         from core import paths as _paths
 
         # Janela 7h-22h (horario local servidor)
         hour = _dt.now().hour
         if hour < 7 or hour >= 22:
+            # Log uma vez por hora pra ter visibilidade quando está fora da janela
+            if _dt.now().minute < 5:
+                print(f"[diversify] fora da janela 7h-22h (atual: {hour}h), aguardando")
             return
 
         # Itera por todos os workspaces existentes em disco
@@ -805,7 +834,7 @@ class ScheduleManager:
 
     def _diversify_tick_for_workspace(self, slug: str):
         """Roda 1 rodada de dispatch-diversified pra esse workspace, se devido."""
-        from datetime import datetime as _dt, timedelta as _td
+        from datetime import datetime as _dt
         from core import paths as _paths
         from web import diversify as _diversify
 
@@ -817,7 +846,7 @@ class ScheduleManager:
         if not settings.get("enabled"):
             return
 
-        interval_h = int(settings.get("interval_hours", 6))
+        interval_h = float(settings.get("interval_hours", 6))
         last_iso = settings.get("last_run_at")
         now = now_local()
         if last_iso:
@@ -826,10 +855,17 @@ class ScheduleManager:
                 if last.tzinfo is None:
                     last = last.astimezone()
                 elapsed_h = (now - last).total_seconds() / 3600.0
-                if elapsed_h < interval_h:
+                # Tolerância de 1min pra evitar perder rodada por drift de relógio
+                if elapsed_h < interval_h - (1.0 / 60.0):
+                    # Log a cada ~30min pra dar visibilidade
+                    if int(elapsed_h * 60) % 30 == 0:
+                        print(f"[diversify] ws='{slug}' aguardando: {elapsed_h:.2f}h/{interval_h}h ({int((interval_h - elapsed_h) * 60)}min restantes)")
                     return
-            except Exception:
-                pass
+                print(f"[diversify] ws='{slug}' ATINGIU intervalo: {elapsed_h:.2f}h >= {interval_h}h — disparando")
+            except Exception as e:
+                print(f"[diversify] erro parseando last_run_at: {e} — vai rodar mesmo assim")
+        else:
+            print(f"[diversify] ws='{slug}' primeira execução (sem last_run_at)")
 
         # Roda 1 rodada: replica logica do api_dispatch_diversified
         max_per_acc = int(settings.get("max_per_account", 1))
@@ -864,9 +900,15 @@ class ScheduleManager:
             print(f"[diversify] erro lendo accounts ws='{slug}': {e}")
             return {"count": 0, "all_completed": False, "pool_size": 0, "accounts_count": 0}
 
+        # Contas elegíveis ao auto-loop diversificado:
+        # - active=true
+        # - connected_via_worker_id (logada no worker)
+        # - sync_enabled=false (contas em sync rodam isoladas no _sync_loop)
         targets = [
             a for a in accounts
-            if a.get("active", True) and a.get("connected_via_worker_id")
+            if a.get("active", True)
+            and a.get("connected_via_worker_id")
+            and not a.get("sync_enabled")
         ]
         if not targets:
             return {"count": 0, "all_completed": False, "pool_size": 0, "accounts_count": 0}

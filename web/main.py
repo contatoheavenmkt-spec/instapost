@@ -1877,16 +1877,18 @@ def api_dispatch_diversified(payload: DiversifiedDispatchIn, request: Request, u
     """
     accounts = load_accounts()
 
-    # Lista de contas
+    # Lista de contas (contas em sync ficam isoladas — não entram aqui)
     if payload.accounts:
         target_usernames = payload.accounts
     else:
         target_usernames = [
             a["username"] for a in accounts
-            if a.get("active", True) and a.get("connected_via_worker_id")
+            if a.get("active", True)
+            and a.get("connected_via_worker_id")
+            and not a.get("sync_enabled")
         ]
     if not target_usernames:
-        raise HTTPException(400, "Nenhuma conta selecionada / conectada via worker")
+        raise HTTPException(400, "Nenhuma conta selecionada / conectada via worker (contas em sync mode são isoladas)")
 
     targets = []
     for uname in target_usernames:
