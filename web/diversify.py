@@ -33,11 +33,14 @@ _lock = threading.Lock()
 
 DEFAULTS = {
     "enabled": False,
-    "interval_hours": 6,
+    "interval_hours": 1,                # ritmo veterana (entre rodadas)
     "max_per_account": 1,
     "last_run_at": None,
     "completed_at": None,
-    "kind_filter": "all",  # "all" | "reel" | "story"
+    "kind_filter": "all",               # "all" | "reel" | "story"
+    "repetitions_per_video": 3,         # quantas vezes mesmo video por conta antes de avançar
+    "new_account_threshold_hours": 24,  # quanto tempo após 1º post conta é "nova"
+    "new_account_interval_hours": 6,    # ritmo de aquecimento da conta nova
 }
 
 
@@ -66,6 +69,9 @@ def save(data: dict, slug: Optional[str] = None):
         current["enabled"] = bool(current.get("enabled"))
         kf = (current.get("kind_filter") or "all").lower()
         current["kind_filter"] = kf if kf in ("all", "reel", "story") else "all"
+        current["repetitions_per_video"] = max(1, min(10, int(current.get("repetitions_per_video", 3))))
+        current["new_account_threshold_hours"] = max(1, min(168, int(current.get("new_account_threshold_hours", 24))))
+        current["new_account_interval_hours"] = max(1, min(72, int(current.get("new_account_interval_hours", 6))))
         try:
             p.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception as e:

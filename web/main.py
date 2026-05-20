@@ -1036,15 +1036,16 @@ async def api_upload_video_bulk(
             if caption:
                 (pending_dir / (Path(name).stem + ".txt")).write_text(caption, encoding="utf-8")
 
-            # Meta
+            # Meta — SEMPRE salva (fix bug: antes só salvava se story OU tinha link,
+            # então reel sem link ficava sem meta.json e o disparo lia kind=reel
+            # mesmo pra fotos perdidas. Agora salva sempre pra ter origem verdadeira.)
             is_photo = ext in PHOTO_EXTS
             final_kind = "story" if is_photo else (kind if kind in ("reel", "story") else "reel")
-            if final_kind != "reel" or link_url:
-                save_meta(str(target), {
-                    "kind": final_kind,
-                    "link_url": (link_url or "").strip() or None,
-                    "link_text": "Clique aqui",
-                })
+            save_meta(str(target), {
+                "kind": final_kind,
+                "link_url": (link_url or "").strip() or None,
+                "link_text": "Clique aqui",
+            })
 
             # Thumb pra vídeo (async-friendly: melhor falhar silenciosamente que bloquear)
             if ext in VIDEO_EXTS:
@@ -1090,6 +1091,15 @@ async def api_upload_video(
 
     # Legenda no .txt com mesmo stem
     (PENDING_DIR / (Path(name).stem + ".txt")).write_text(caption, encoding="utf-8")
+
+    # Meta — sempre salva pra ter kind explícito desde o upload
+    from core.poster import save_meta as _save_meta
+    is_photo = ext in PHOTO_EXTS
+    _save_meta(str(target), {
+        "kind": "story" if is_photo else "reel",
+        "link_url": None,
+        "link_text": "Clique aqui",
+    })
 
     # Thumbnail só pra vídeo (foto já é a própria thumb)
     if ext in VIDEO_EXTS:
@@ -1661,14 +1671,23 @@ def api_worker_job_result(job_id: str, payload: WorkerResultIn, request: Request
                             a["auto_follow_back_seen_followers"] = new_seen
                     if job.operation == "post" and job.video_name:
                         posted = a.get("posted_media") or []
-                        if not any(p.get("name") == job.video_name for p in posted):
+                        # Procura entry existente pra esse video
+                        existing = next((p for p in posted if p.get("name") == job.video_name), None)
+                        now_iso_str = scheduler_mod.now_local().isoformat(timespec="seconds")
+                        if existing:
+                            # Incrementa contador de repetições
+                            existing["count"] = int(existing.get("count", 1)) + 1
+                            existing["posted_at"] = now_iso_str  # data do post mais recente
+                            existing["media_id"] = payload.media_id  # último media_id
+                        else:
                             posted.append({
                                 "name": job.video_name,
                                 "kind": job.kind or "reel",
-                                "posted_at": scheduler_mod.now_local().isoformat(timespec="seconds"),
+                                "posted_at": now_iso_str,
                                 "media_id": payload.media_id,
+                                "count": 1,
                             })
-                            a["posted_media"] = posted
+                        a["posted_media"] = posted
                     # Health tracker: collect_insights → salva snapshot + analisa
                     if job.operation == "collect_insights" and payload.result_data:
                         try:
@@ -1815,7 +1834,9 @@ def api_create_remote_job(payload: RemoteJobIn, request: Request, user=Depends(a
             "account_proxy": acc.get("proxy"),
             "video_name": video_name,
             "media_type": media_type,
-            "kind": meta.get("kind", "reel"),
+            # FIX: usa media_type pra default correto. Foto SEMPRE vira story.
+            # Vídeo padrão é reel (mas meta.kind override se setado).
+            "kind": meta.get("kind") or ("story" if media_type == "photo" else "reel"),
             "caption": caption,
             "link_url": link_url,
             "link_text": link_text,
@@ -2034,7 +2055,8 @@ def api_dispatch_diversified(payload: DiversifiedDispatchIn, request: Request, u
             "account_proxy": acc.get("proxy"),
             "video_name": video_name,
             "media_type": media_type,
-            "kind": meta.get("kind", "reel"),
+            # FIX: foto SEMPRE vira story (default seguro)
+            "kind": meta.get("kind") or ("story" if media_type == "photo" else "reel"),
             "caption": caption,
             "link_url": link_url,
             "link_text": link_text,
@@ -2072,6 +2094,9 @@ class DiversifySettingsIn(BaseModel):
     interval_hours: Optional[int] = None
     max_per_account: Optional[int] = None
     kind_filter: Optional[str] = None  # 'all' | 'reel' | 'story'
+    repetitions_per_video: Optional[int] = None  # 1-10 (default 3: 3x mesmo vídeo na conta)
+    new_account_threshold_hours: Optional[int] = None  # 1-168 (default 24h: conta < 24h = nova)
+    new_account_interval_hours: Optional[int] = None  # 1-72 (default 6h ritmo nova)
 
 
 @app.get("/api/diversify-loop")
@@ -2106,6 +2131,12 @@ def api_diversify_settings_save(payload: DiversifySettingsIn, user=Depends(auth.
         update["max_per_account"] = int(payload.max_per_account)
     if payload.kind_filter is not None:
         update["kind_filter"] = payload.kind_filter
+    if payload.repetitions_per_video is not None:
+        update["repetitions_per_video"] = int(payload.repetitions_per_video)
+    if payload.new_account_threshold_hours is not None:
+        update["new_account_threshold_hours"] = int(payload.new_account_threshold_hours)
+    if payload.new_account_interval_hours is not None:
+        update["new_account_interval_hours"] = int(payload.new_account_interval_hours)
     settings = _diversify.save(update)
     return {"ok": True, "settings": settings}
 

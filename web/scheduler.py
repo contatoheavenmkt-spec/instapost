@@ -462,7 +462,7 @@ class ScheduleManager:
                 "account_proxy": acc.get("proxy"),
                 "video_name": s.video,
                 "media_type": media_type,
-                "kind": meta.get("kind", "reel"),
+                "kind": meta.get("kind") or ("story" if media_type == "photo" else "reel"),  # FIX: foto sempre story
                 "caption": caption,
                 "link_url": this_link,
                 "link_text": link_text,
@@ -785,7 +785,7 @@ class ScheduleManager:
                 "account_proxy": acc.get("proxy"),
                 "video_name": media_name,
                 "media_type": media_type,
-                "kind": meta.get("kind", "reel"),
+                "kind": meta.get("kind") or ("story" if media_type == "photo" else "reel"),  # FIX: foto sempre story
                 "caption": caption,
                 "link_url": link_url,
                 "link_text": link_text,
@@ -890,7 +890,18 @@ class ScheduleManager:
         # Roda 1 rodada: replica logica do api_dispatch_diversified
         max_per_acc = int(settings.get("max_per_account", 1))
         kind_filter = settings.get("kind_filter", "all")
-        result = self._do_dispatch_diversified(slug, max_per_account=max_per_acc, kind_filter=kind_filter)
+        reps_per_video = int(settings.get("repetitions_per_video", 3))
+        new_thresh_h = float(settings.get("new_account_threshold_hours", 24))
+        new_interval_h = float(settings.get("new_account_interval_hours", 6))
+        result = self._do_dispatch_diversified(
+            slug,
+            max_per_account=max_per_acc,
+            kind_filter=kind_filter,
+            reps_per_video=reps_per_video,
+            interval_hours=float(settings.get("interval_hours", 1)),
+            new_account_threshold_hours=new_thresh_h,
+            new_account_interval_hours=new_interval_h,
+        )
 
         if result.get("all_completed"):
             print(f"[diversify] ws='{slug}' completou TODOS os videos. Auto-desligando.")
@@ -902,10 +913,26 @@ class ScheduleManager:
             # nada criado mas nao completou — pula sem marcar
             print(f"[diversify] ws='{slug}' nada criado (sem contas ou pool vazio)")
 
-    def _do_dispatch_diversified(self, slug: str, max_per_account: int = 1, kind_filter: str = "all") -> dict:
+    def _do_dispatch_diversified(
+        self,
+        slug: str,
+        max_per_account: int = 1,
+        kind_filter: str = "all",
+        reps_per_video: int = 1,
+        interval_hours: float = 1.0,
+        new_account_threshold_hours: float = 24.0,
+        new_account_interval_hours: float = 6.0,
+    ) -> dict:
         """Logica core do disparo diversificado, sem HTTP. Usado pelo auto-loop.
 
-        kind_filter: 'all' | 'reel' | 'story' — restringe o pool a só esse tipo.
+        Args:
+            kind_filter: 'all' | 'reel' | 'story'
+            reps_per_video: quantas vezes o mesmo video é postado por conta antes
+                de avançar pro próximo (descoberta empírica: 3x viraliza)
+            interval_hours: ritmo veterana (entre rodadas da mesma conta)
+            new_account_threshold_hours: contas com 1ª atividade < N horas atrás
+                são tratadas como "novas" (modo aquecimento)
+            new_account_interval_hours: ritmo conta nova (geralmente mais espaçado)
         """
         import os as _os
         import json as _json
@@ -1094,7 +1121,7 @@ class ScheduleManager:
                     "account_proxy": acc.get("proxy"),
                     "video_name": video_name,
                     "media_type": media_type,
-                    "kind": meta.get("kind", "reel"),
+                    "kind": meta.get("kind") or ("story" if media_type == "photo" else "reel"),  # FIX: foto sempre story
                     "caption": caption,
                     "link_url": link_url,
                     "link_text": link_text,
