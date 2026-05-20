@@ -146,11 +146,19 @@
           <label class="label">Intervalo (horas)</label>
           <input id="autoloop-interval" type="number" min="1" max="72" value="6" class="input" onchange="saveAutoLoop()" />
         </div>
-        <div class="col-span-3">
-          <label class="label">Posts por conta/rodada</label>
+        <div class="col-span-2">
+          <label class="label">Posts/conta/rodada</label>
           <input id="autoloop-max" type="number" min="1" max="20" value="1" class="input" onchange="saveAutoLoop()" />
         </div>
-        <div class="col-span-6">
+        <div class="col-span-3">
+          <label class="label">Postar apenas</label>
+          <select id="autoloop-kind" class="select" onchange="saveAutoLoop()">
+            <option value="all">Todos (Reels + Stories)</option>
+            <option value="reel">Só Reels</option>
+            <option value="story">Só Stories</option>
+          </select>
+        </div>
+        <div class="col-span-4">
           <label class="label">Status</label>
           <div id="autoloop-status" class="text-[12px] text-soft surface px-3 py-2 rounded" style="min-height:34px;display:flex;align-items:center">—</div>
         </div>
@@ -549,6 +557,7 @@
       document.getElementById('autoloop-toggle').checked = !!s.enabled;
       document.getElementById('autoloop-interval').value = s.interval_hours || 6;
       document.getElementById('autoloop-max').value = s.max_per_account || 1;
+      document.getElementById('autoloop-kind').value = s.kind_filter || 'all';
       const status = document.getElementById('autoloop-status');
       let txt = '';
       if (s.completed_at && !s.enabled) {
@@ -575,6 +584,7 @@
         enabled: document.getElementById('autoloop-toggle').checked,
         interval_hours: parseInt(document.getElementById('autoloop-interval').value) || 6,
         max_per_account: parseInt(document.getElementById('autoloop-max').value) || 1,
+        kind_filter: document.getElementById('autoloop-kind').value || 'all',
       };
       await api('/api/diversify-loop', { method: 'POST', body: JSON.stringify(payload) });
       toast(payload.enabled ? 'Auto-loop ATIVO' : 'Auto-loop desligado', 'success');

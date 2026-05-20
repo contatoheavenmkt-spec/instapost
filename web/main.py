@@ -1839,10 +1839,15 @@ class DiversifiedDispatchIn(BaseModel):
     accounts: Optional[list[str]] = None  # se None, usa todas ativas+worker-conectadas
     videos: Optional[list[str]] = None    # se None, usa todos os pendentes (pool)
     max_per_account: int = 1              # quantos posts criar por conta (default 1)
+    kind_filter: str = "all"              # 'all' | 'reel' | 'story'
 
 
-def _build_pending_pool(only_names: Optional[list[str]] = None) -> list[str]:
-    """Lista vídeos em pending/ ordenados cronologicamente (mais antigos primeiro)."""
+def _build_pending_pool(only_names: Optional[list[str]] = None, kind_filter: str = "all") -> list[str]:
+    """Lista vídeos em pending/ ordenados cronologicamente (mais antigos primeiro).
+
+    kind_filter: 'all' | 'reel' | 'story' — filtra o pool por tipo.
+    """
+    from core.poster import load_meta
     items = []
     if not PENDING_DIR.exists():
         return []
@@ -1858,6 +1863,14 @@ def _build_pending_pool(only_names: Optional[list[str]] = None) -> list[str]:
             continue
         if only_names and p.name not in only_names:
             continue
+        if kind_filter and kind_filter != "all":
+            try:
+                m = load_meta(str(p))
+                k = m.get("kind") or ("story" if suf in PHOTO_EXTS else "reel")
+                if k != kind_filter:
+                    continue
+            except Exception:
+                pass
         items.append((p.name, p.stat().st_mtime))
     items.sort(key=lambda x: x[1])
     return [n for n, _ in items]
@@ -1901,7 +1914,7 @@ def api_dispatch_diversified(payload: DiversifiedDispatchIn, request: Request, u
     only_names = None
     if payload.videos:
         only_names = [safe_name(v) for v in payload.videos]
-    pool = _build_pending_pool(only_names=only_names)
+    pool = _build_pending_pool(only_names=only_names, kind_filter=payload.kind_filter or "all")
     if not pool:
         raise HTTPException(400, "Nenhum vídeo pendente disponível")
 
@@ -2022,6 +2035,7 @@ class DiversifySettingsIn(BaseModel):
     enabled: Optional[bool] = None
     interval_hours: Optional[int] = None
     max_per_account: Optional[int] = None
+    kind_filter: Optional[str] = None  # 'all' | 'reel' | 'story'
 
 
 @app.get("/api/diversify-loop")
@@ -2054,6 +2068,8 @@ def api_diversify_settings_save(payload: DiversifySettingsIn, user=Depends(auth.
         update["interval_hours"] = int(payload.interval_hours)
     if payload.max_per_account is not None:
         update["max_per_account"] = int(payload.max_per_account)
+    if payload.kind_filter is not None:
+        update["kind_filter"] = payload.kind_filter
     settings = _diversify.save(update)
     return {"ok": True, "settings": settings}
 

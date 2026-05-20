@@ -37,6 +37,7 @@ DEFAULTS = {
     "max_per_account": 1,
     "last_run_at": None,
     "completed_at": None,
+    "kind_filter": "all",  # "all" | "reel" | "story"
 }
 
 
@@ -63,6 +64,8 @@ def save(data: dict, slug: Optional[str] = None):
         current["interval_hours"] = max(1, min(72, int(current.get("interval_hours", 6))))
         current["max_per_account"] = max(1, min(20, int(current.get("max_per_account", 1))))
         current["enabled"] = bool(current.get("enabled"))
+        kf = (current.get("kind_filter") or "all").lower()
+        current["kind_filter"] = kf if kf in ("all", "reel", "story") else "all"
         try:
             p.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception as e:

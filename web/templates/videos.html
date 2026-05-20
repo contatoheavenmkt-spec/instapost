@@ -27,8 +27,8 @@
   <input id="file-input" type="file" accept="video/mp4,image/jpeg,image/png,image/webp" multiple class="hidden" />
 </div>
 
-<!-- Tabs -->
-<div class="flex items-center gap-1 mb-5 border-b border-line">
+<!-- Tabs status: pendentes vs postados -->
+<div class="flex items-center gap-1 mb-2 border-b border-line">
   <button class="tab tab-active" data-tab="pending" onclick="switchTab('pending')">
     Pendentes <span class="text-muted ml-1" id="count-pending">0</span>
   </button>
@@ -36,6 +36,17 @@
     Postados <span class="text-muted ml-1" id="count-posted">0</span>
   </button>
 </div>
+
+<!-- Filtro por tipo: Reels / Stories -->
+<div class="flex items-center gap-2 mb-4 text-[12px]">
+  <span class="text-muted uppercase tracking-wider font-semibold">Tipo:</span>
+  <button class="btn btn-ghost btn-sm kind-filter active" data-kind="all" onclick="setKindFilter('all')">Todos <span id="kf-count-all" class="text-muted ml-1">0</span></button>
+  <button class="btn btn-ghost btn-sm kind-filter" data-kind="reel" onclick="setKindFilter('reel')"><i data-lucide="film" style="width:11px;height:11px;display:inline;vertical-align:-1px"></i> Reels <span id="kf-count-reel" class="text-muted ml-1">0</span></button>
+  <button class="btn btn-ghost btn-sm kind-filter" data-kind="story" onclick="setKindFilter('story')"><i data-lucide="circle-dot" style="width:11px;height:11px;display:inline;vertical-align:-1px"></i> Stories <span id="kf-count-story" class="text-muted ml-1">0</span></button>
+</div>
+<style>
+  .kind-filter.active { background: var(--accent) !important; color: white !important; border-color: var(--accent) !important; }
+</style>
 
 <!-- Grid -->
 <div id="grid-pending" class="grid grid-cols-4 gap-4"></div>
@@ -293,15 +304,43 @@
     renderGrid();
   }
 
+  let currentKindFilter = 'all';  // 'all' | 'reel' | 'story'
+
+  function setKindFilter(kind) {
+    currentKindFilter = kind;
+    document.querySelectorAll('.kind-filter').forEach(b =>
+      b.classList.toggle('active', b.dataset.kind === kind)
+    );
+    renderGrid();
+  }
+
   function renderGrid() {
     for (const folder of ['pending', 'posted']) {
       const grid = document.getElementById(`grid-${folder}`);
       const empty = document.getElementById(`empty-${folder}`);
-      const items = allVideos[folder];
-      document.getElementById(`count-${folder}`).textContent = items.length;
+      const allItems = allVideos[folder] || [];
+
+      // Conta por tipo (sempre do total, mesmo com filtro ativo)
+      const cReel = allItems.filter(v => v.kind === 'reel').length;
+      const cStory = allItems.filter(v => v.kind === 'story').length;
+      if (folder === currentTab) {
+        document.getElementById('kf-count-all').textContent = allItems.length;
+        document.getElementById('kf-count-reel').textContent = cReel;
+        document.getElementById('kf-count-story').textContent = cStory;
+      }
+
+      // Aplica filtro de tipo
+      const items = currentKindFilter === 'all'
+        ? allItems
+        : allItems.filter(v => v.kind === currentKindFilter);
+      document.getElementById(`count-${folder}`).textContent = allItems.length;
       if (!items.length) {
         grid.innerHTML = '';
         empty.classList.toggle('hidden', currentTab !== folder);
+        if (folder === currentTab && allItems.length > 0) {
+          // Tem itens mas o filtro escondeu todos
+          grid.innerHTML = `<div class="col-span-4 text-center py-12 text-muted text-[13px]">Nenhum ${currentKindFilter === 'reel' ? 'Reel' : 'Story'} em ${folder === 'pending' ? 'pendentes' : 'postados'}</div>`;
+        }
         continue;
       }
       empty.classList.add('hidden');

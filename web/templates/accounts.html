@@ -93,6 +93,38 @@
   </div>
 </div>
 
+<!-- Busca + filtros -->
+<div class="surface px-4 py-3 mb-3 flex items-center gap-3 flex-wrap">
+  <div class="flex items-center gap-2 flex-1 min-w-0">
+    <i data-lucide="search" style="width:14px;height:14px;color:var(--text-3);flex-shrink:0"></i>
+    <input id="search-accounts" type="text" placeholder="Buscar @username..." class="input"
+      style="padding:5px 8px;max-width:300px" oninput="applyFilters()" />
+  </div>
+  <div class="flex items-center gap-1 flex-wrap">
+    <span class="text-[11px] text-muted uppercase tracking-wider font-semibold mr-1">Status:</span>
+    <button class="btn btn-ghost btn-sm status-filter active" data-status="all" onclick="setStatusFilter('all')">
+      Todas <span id="sf-count-all" class="text-muted ml-1">0</span>
+    </button>
+    <button class="btn btn-ghost btn-sm status-filter" data-status="connected" onclick="setStatusFilter('connected')">
+      <span class="dot dot-success" style="margin-right:4px"></span>Conectadas <span id="sf-count-connected" class="text-muted ml-1">0</span>
+    </button>
+    <button class="btn btn-ghost btn-sm status-filter" data-status="disconnected" onclick="setStatusFilter('disconnected')">
+      <span class="dot dot-warning" style="margin-right:4px"></span>Não conectadas <span id="sf-count-disconnected" class="text-muted ml-1">0</span>
+    </button>
+    <button class="btn btn-ghost btn-sm status-filter" data-status="blocked" onclick="setStatusFilter('blocked')">
+      <span class="dot dot-danger" style="margin-right:4px"></span>Bloqueadas <span id="sf-count-blocked" class="text-muted ml-1">0</span>
+    </button>
+    <button class="btn btn-ghost btn-sm status-filter" data-status="paused" onclick="setStatusFilter('paused')">
+      <span class="dot dot-muted" style="margin-right:4px"></span>Pausadas <span id="sf-count-paused" class="text-muted ml-1">0</span>
+    </button>
+  </div>
+</div>
+
+<style>
+  .status-filter.active { background: var(--accent) !important; color: white !important; border-color: var(--accent) !important; }
+  .status-filter.active .dot { box-shadow: 0 0 0 2px rgba(255,255,255,.25) !important; }
+</style>
+
 <!-- Bulk actions toolbar (visible when there's selection) -->
 <div id="bulk-bar" class="surface px-4 py-2.5 mb-3 flex items-center justify-between hidden">
   <div class="text-sm">
@@ -332,6 +364,39 @@
     return parts.length ? `<div class="flex flex-wrap gap-1">${parts.join('')}</div>` : '<span class="text-muted text-[12px]">—</span>';
   }
 
+  let _searchQuery = '';
+  let _statusFilter = 'all';
+
+  function _matchStatus(a, filter) {
+    if (filter === 'all') return true;
+    if (filter === 'paused') return !a.active;
+    if (filter === 'blocked') return a.blocked || a.shadowban_suspected;
+    if (filter === 'connected') return a.active && (a.session === 'saved' || a.connected_via_worker_id) && !a.blocked;
+    if (filter === 'disconnected') return a.active && a.session !== 'saved' && !a.connected_via_worker_id && !a.blocked;
+    return true;
+  }
+
+  function setStatusFilter(f) {
+    _statusFilter = f;
+    document.querySelectorAll('.status-filter').forEach(b =>
+      b.classList.toggle('active', b.dataset.status === f)
+    );
+    render();
+  }
+
+  function applyFilters() {
+    _searchQuery = (document.getElementById('search-accounts').value || '').toLowerCase().trim();
+    render();
+  }
+
+  function _updateStatusCounts() {
+    document.getElementById('sf-count-all').textContent = accounts.length;
+    document.getElementById('sf-count-connected').textContent = accounts.filter(a => _matchStatus(a, 'connected')).length;
+    document.getElementById('sf-count-disconnected').textContent = accounts.filter(a => _matchStatus(a, 'disconnected')).length;
+    document.getElementById('sf-count-blocked').textContent = accounts.filter(a => _matchStatus(a, 'blocked')).length;
+    document.getElementById('sf-count-paused').textContent = accounts.filter(a => _matchStatus(a, 'paused')).length;
+  }
+
   function render() {
     const tbody = document.getElementById('accounts-tbody');
     const empty = document.getElementById('empty-state');
@@ -339,12 +404,27 @@
       tbody.innerHTML = '';
       empty.classList.remove('hidden');
       document.querySelector('table.t').classList.add('hidden');
+      _updateStatusCounts();
       return;
     }
     empty.classList.add('hidden');
     document.querySelector('table.t').classList.remove('hidden');
+    _updateStatusCounts();
 
-    tbody.innerHTML = accounts.map(a => {
+    // Aplica busca + filtro de status
+    const filtered = accounts.filter(a => {
+      if (!_matchStatus(a, _statusFilter)) return false;
+      if (_searchQuery && !a.username.toLowerCase().includes(_searchQuery)) return false;
+      return true;
+    });
+
+    if (!filtered.length) {
+      tbody.innerHTML = `<tr><td colspan="6" class="text-center py-8 text-muted">Nenhuma conta com esses filtros</td></tr>`;
+      updateBulkBar();
+      return;
+    }
+
+    tbody.innerHTML = filtered.map(a => {
       const blockedRow = a.blocked ? 'style="background: rgba(239,68,68,0.06); border-left: 3px solid var(--danger)"' : '';
       const shadowRow = (!a.blocked && a.shadowban_suspected) ? 'style="background: rgba(245,158,11,0.06); border-left: 3px solid var(--warning)"' : '';
       const blockedBadge = a.blocked

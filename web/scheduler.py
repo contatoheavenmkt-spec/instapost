@@ -889,7 +889,8 @@ class ScheduleManager:
 
         # Roda 1 rodada: replica logica do api_dispatch_diversified
         max_per_acc = int(settings.get("max_per_account", 1))
-        result = self._do_dispatch_diversified(slug, max_per_account=max_per_acc)
+        kind_filter = settings.get("kind_filter", "all")
+        result = self._do_dispatch_diversified(slug, max_per_account=max_per_acc, kind_filter=kind_filter)
 
         if result.get("all_completed"):
             print(f"[diversify] ws='{slug}' completou TODOS os videos. Auto-desligando.")
@@ -901,8 +902,11 @@ class ScheduleManager:
             # nada criado mas nao completou — pula sem marcar
             print(f"[diversify] ws='{slug}' nada criado (sem contas ou pool vazio)")
 
-    def _do_dispatch_diversified(self, slug: str, max_per_account: int = 1) -> dict:
-        """Logica core do disparo diversificado, sem HTTP. Usado pelo auto-loop."""
+    def _do_dispatch_diversified(self, slug: str, max_per_account: int = 1, kind_filter: str = "all") -> dict:
+        """Logica core do disparo diversificado, sem HTTP. Usado pelo auto-loop.
+
+        kind_filter: 'all' | 'reel' | 'story' — restringe o pool a só esse tipo.
+        """
         import os as _os
         import json as _json
         from core import paths as _paths
@@ -949,6 +953,15 @@ class ScheduleManager:
             if p.suffix.lower() in (".jpg", ".jpeg"):
                 if p.stem.lower().endswith(".mp4") or p.with_suffix(".mp4").exists():
                     continue
+            # Filtro de kind (lê meta pra saber se é reel/story)
+            if kind_filter and kind_filter != "all":
+                try:
+                    item_meta = load_meta(str(p))
+                    item_kind = item_meta.get("kind") or ("story" if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp") else "reel")
+                    if item_kind != kind_filter:
+                        continue
+                except Exception:
+                    pass
             pool_items.append((p.name, p.stat().st_mtime))
         pool_items.sort(key=lambda x: x[1])
         pool = [n for n, _ in pool_items]
