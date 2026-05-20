@@ -1926,23 +1926,59 @@ def api_dispatch_diversified(payload: DiversifiedDispatchIn, request: Request, u
 
     max_per_acc = max(1, min(20, int(payload.max_per_account or 1)))
 
-    for acc in targets:
+    # ANTI-DUPLICATE: jobs em pending/claimed/running ATUAIS contam como "já pegos"
+    # pra cada conta, evitando criar 2x o mesmo vídeo na fila enquanto worker
+    # ainda não terminou o primeiro.
+    pending_per_acc: dict[str, set[str]] = {}
+    for j in rjob_manager._items.values():
+        if (
+            j.operation == "post"
+            and j.status in ("pending", "claimed", "running")
+            and j.video_name
+        ):
+            pending_per_acc.setdefault(j.account_username, set()).add(j.video_name)
+
+    # ROTAÇÃO REAL: cada conta começa em posição DIFERENTE do pool (circular).
+    # Resultado: contas pegam vídeos diferentes em ordens diferentes a cada rodada.
+    targets_sorted = sorted(targets, key=lambda a: a.get("username", ""))
+    pool_len = len(pool)
+
+    for idx, acc in enumerate(targets_sorted):
+        posted_count = len(acc.get("posted_media") or [])
         already = _account_posted_names(acc)
-        for _ in range(max_per_acc):
-            # Vídeos disponíveis pra ESSA conta: pool - já postados
-            avail = [v for v in pool if v not in already]
-            if not avail:
-                # Conta ja postou tudo do pool
+        in_flight = pending_per_acc.get(acc["username"], set())
+        forbidden = already | in_flight
+
+        start_offset = (posted_count + idx) % max(1, pool_len)
+
+        for slot in range(max_per_acc):
+            chosen = None
+            # 1ª tentativa: ainda não usado na rodada E permitido pra essa conta
+            for step in range(pool_len):
+                candidate = pool[(start_offset + step) % pool_len]
+                if candidate in forbidden:
+                    continue
+                if candidate not in used_in_round:
+                    chosen = candidate
+                    break
+            # 2ª tentativa: aceita reciclar (já usado na rodada por outra conta)
+            if chosen is None:
+                for step in range(pool_len):
+                    candidate = pool[(start_offset + step) % pool_len]
+                    if candidate not in forbidden:
+                        chosen = candidate
+                        break
+
+            if chosen is None:
+                # Conta postou TUDO que o pool oferece — completed
                 if acc["username"] not in accounts_completed:
                     accounts_completed.append(acc["username"])
                 break
-            # Prefere os ainda não usados na rodada; senão recicla
-            preferred = [v for v in avail if v not in used_in_round]
-            chosen = preferred[0] if preferred else avail[0]
+
             used_in_round.add(chosen)
+            forbidden.add(chosen)
             assignments.append((acc, chosen))
-            # Marca pra essa conta na lista local pra não repetir no segundo slot
-            already.add(chosen)
+            start_offset = (start_offset + 1) % max(1, pool_len)
 
     if not assignments:
         # Todas as contas já postaram todos os vídeos do pool — sinal de reset
@@ -2160,6 +2196,13 @@ def api_requeue_stuck(user=Depends(auth.require_user)):
     """Re-enfileira TODOS os jobs presos (stagger futuro, claimed zumbi, pending velho)."""
     count = rjob_manager.requeue_stuck()
     return {"ok": True, "requeued": count}
+
+
+@app.post("/api/remote-jobs/dedupe")
+def api_dedupe_pending(user=Depends(auth.require_user)):
+    """Remove jobs duplicados na fila: pra cada (conta, video), mantém apenas 1."""
+    count = rjob_manager.dedupe_pending()
+    return {"ok": True, "removed": count}
 
 
 # ---------- FINANÇAS ----------

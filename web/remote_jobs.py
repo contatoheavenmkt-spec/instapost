@@ -340,6 +340,33 @@ class RemoteJobManager:
             self._save()
             return True
 
+    def dedupe_pending(self) -> int:
+        """Remove jobs pending/claimed duplicados: pra cada par (account, video_name)
+        mantém apenas 1 job ativo, deleta os outros.
+
+        Útil pra limpar fila quando algum bug criou múltiplos jobs do mesmo
+        vídeo pra mesma conta (ex: race condition antes do anti-duplicate).
+        """
+        with self._lock:
+            seen: dict[tuple[str, str], str] = {}  # (acc, video) -> job_id que mantém
+            to_delete: list[str] = []
+            for j in self._items.values():
+                if j.status not in ("pending", "claimed"):
+                    continue
+                if j.operation != "post" or not j.video_name:
+                    continue
+                key = (j.account_username, j.video_name)
+                if key in seen:
+                    # Já tem outro job ativo pra esse par — marca pra deletar
+                    to_delete.append(j.id)
+                else:
+                    seen[key] = j.id
+            for jid in to_delete:
+                self._items.pop(jid, None)
+            if to_delete:
+                self._save()
+            return len(to_delete)
+
     def requeue_stuck(self) -> int:
         """Re-enfileira TODOS os jobs que estão presos: pending com scheduled_for
         no futuro, ou claimed/running sem update recente, ou pending sem worker

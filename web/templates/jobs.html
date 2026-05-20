@@ -46,6 +46,9 @@
     <button class="btn btn-subtle btn-sm" onclick="requeueStuck()" title="Re-enfileira jobs travados: pending com stagger no futuro, claimed zumbis, pending velho">
       <i data-lucide="zap" class="icon"></i> Destravar fila
     </button>
+    <button class="btn btn-subtle btn-sm" onclick="dedupePending()" title="Remove jobs duplicados (mesmo video/conta) ainda na fila">
+      <i data-lucide="filter" class="icon"></i> Limpar duplicados
+    </button>
     <button class="btn btn-ghost btn-sm" onclick="loadKanban(true)"><i data-lucide="refresh-cw" class="icon"></i> Atualizar</button>
   </div>
 </div>
@@ -470,6 +473,24 @@
       await api(`/api/remote-jobs/${id}/requeue`, { method: 'POST' });
       toast('Job re-enfileirado — worker vai pegar em segundos', 'success');
       closeJobModal();
+      loadKanban();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  async function dedupePending() {
+    const ok = await confirmModal({
+      title: 'Limpar jobs duplicados?',
+      message: 'Vai remover jobs duplicados da fila — pra cada (conta + vídeo), mantém só 1.<br><br>Útil agora porque o bug antigo criou múltiplos jobs do MESMO vídeo na mesma conta. Os duplicados que ainda estão pending vão ser apagados.',
+      confirmText: 'Sim, limpar',
+    });
+    if (!ok) return;
+    try {
+      const r = await api('/api/remote-jobs/dedupe', { method: 'POST' });
+      if (r.removed > 0) {
+        toast(`${r.removed} duplicado(s) removido(s) da fila.`, 'success');
+      } else {
+        toast('Nenhum duplicado encontrado', 'info');
+      }
       loadKanban();
     } catch (e) { toast(e.message, 'error'); }
   }

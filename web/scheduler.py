@@ -974,19 +974,67 @@ class ScheduleManager:
         assignments: list[tuple[dict, str]] = []
         accounts_completed: list[str] = []
 
-        for acc in targets:
+        # ANTI-DUPLICATE: pra cada conta, considera "já pego" tudo que está em
+        # pending/claimed/running ATUALMENTE (jobs de rodadas anteriores ainda
+        # não processados). Antes, o sistema só olhava posted_media e criava
+        # múltiplos jobs do mesmo vídeo enquanto worker não terminava o 1º.
+        pending_per_acc: dict[str, set[str]] = {}
+        for j in rjob_manager._items.values():
+            if (
+                j.operation == "post"
+                and j.status in ("pending", "claimed", "running")
+                and j.video_name
+            ):
+                pending_per_acc.setdefault(j.account_username, set()).add(j.video_name)
+
+        # ROTAÇÃO REAL: cada conta começa numa posição DIFERENTE do pool, baseado
+        # em quantos vídeos ela já postou (acumulado) + sua posição na lista.
+        # Resultado: rodada 1 conta_A pega v1, conta_B pega v2, conta_C pega v3.
+        # Rodada 2 (após posted_media incrementar): conta_A pega v2, conta_B pega v3, etc.
+        # Pool é tratado como LISTA CIRCULAR.
+        targets_sorted = sorted(targets, key=lambda a: a.get("username", ""))
+        pool_len = len(pool)
+
+        for idx, acc in enumerate(targets_sorted):
+            posted_count = len(acc.get("posted_media") or [])
             already = {p.get("name") for p in (acc.get("posted_media") or []) if p.get("name")}
-            for _ in range(max(1, min(20, max_per_account))):
-                avail = [v for v in pool if v not in already]
-                if not avail:
+            in_flight = pending_per_acc.get(acc["username"], set())
+            forbidden = already | in_flight  # vídeos que essa conta NÃO pode receber
+
+            # Offset rotacional inicial (acc-específico)
+            start_offset = (posted_count + idx) % max(1, pool_len)
+
+            for slot in range(max(1, min(20, max_per_account))):
+                # Procura no pool a partir do offset, em ordem circular
+                chosen = None
+                for step in range(pool_len):
+                    candidate = pool[(start_offset + step) % pool_len]
+                    if candidate in forbidden:
+                        continue
+                    # Anti cross-account: preferir candidato não usado nesta rodada,
+                    # mas se TODOS os disponíveis pra essa conta já foram usados, recicla
+                    if candidate not in used_in_round:
+                        chosen = candidate
+                        break
+                # Se nada novo foi encontrado, tenta de novo aceitando reciclar
+                if chosen is None:
+                    for step in range(pool_len):
+                        candidate = pool[(start_offset + step) % pool_len]
+                        if candidate not in forbidden:
+                            chosen = candidate
+                            break
+
+                if chosen is None:
+                    # Conta já tem tudo que o pool oferece (em forbidden) — completed
                     if acc["username"] not in accounts_completed:
                         accounts_completed.append(acc["username"])
                     break
-                preferred = [v for v in avail if v not in used_in_round]
-                chosen = preferred[0] if preferred else avail[0]
+
                 used_in_round.add(chosen)
+                forbidden.add(chosen)
                 assignments.append((acc, chosen))
-                already.add(chosen)
+                # Avança o offset pra próximo slot da MESMA conta pegar vídeo diferente
+                start_offset = (start_offset + 1) % max(1, pool_len)
 
         if not assignments:
             return {
