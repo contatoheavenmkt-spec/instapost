@@ -151,7 +151,13 @@ class RemoteJobManager:
             print(f"[remote_jobs] failed to save: {e}")
 
     def _expire_stale_claims(self):
-        """Libera jobs claimed há muito tempo (worker travou ou desconectou)."""
+        """Libera jobs zumbis (claimed > 2min ou running > 10min sem report).
+
+        Casos cobertos:
+        - claimed: worker pegou mas não começou (timeout curto = 2min)
+        - running: worker tava processando mas travou (timeout maior = 10min,
+          tempo suficiente pra um post completo terminar normalmente)
+        """
         now = datetime.now(timezone.utc)
         changed = False
         for j in self._items.values():
@@ -161,8 +167,33 @@ class RemoteJobManager:
                     j.status = "pending"
                     j.worker_id = None
                     j.claimed_at = None
+                    j.step = "queued"
+                    j.step_at = None
+                    changed = True
+            elif j.status == "running":
+                # Usa step_at (última atividade reportada) ou claimed_at como fallback
+                last_activity = parse_iso(j.step_at) or parse_iso(j.claimed_at)
+                if last_activity and (now - last_activity).total_seconds() > 600:  # 10min
+                    print(f"[remote_jobs] zumbi liberado: {j.id} (running > 10min sem update)")
+                    j.status = "pending"
+                    j.worker_id = None
+                    j.claimed_at = None
+                    j.step = "queued"
+                    j.step_at = None
                     changed = True
         return changed
+
+    def cleanup_zombies(self) -> int:
+        """Roda _expire_stale_claims fora do claim_next (chamado por thread periódica).
+        Retorna quantos foram liberados."""
+        with self._lock:
+            before = sum(1 for j in self._items.values() if j.status in ("claimed", "running"))
+            self._expire_stale_claims()
+            after = sum(1 for j in self._items.values() if j.status in ("claimed", "running"))
+            freed = before - after
+            if freed > 0:
+                self._save()
+            return freed
 
     # ---- queries ----
 

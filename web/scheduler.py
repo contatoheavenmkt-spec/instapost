@@ -217,7 +217,12 @@ class ScheduleManager:
             target=self._health_loop, daemon=True, name="health_scheduler"
         )
         self._health_thread.start()
-        print(f"[scheduler] started (tick {TICK_SECONDS}s) + automations + sync + diversify + health loops")
+        # Thread separada pra limpar jobs zumbis (claimed/running travados)
+        self._zombie_thread = threading.Thread(
+            target=self._zombie_loop, daemon=True, name="zombie_cleanup"
+        )
+        self._zombie_thread.start()
+        print(f"[scheduler] started (tick {TICK_SECONDS}s) + automations + sync + diversify + health + zombie loops")
 
     def stop(self):
         self._stop_event.set()
@@ -627,10 +632,15 @@ class ScheduleManager:
         from core.poster import load_meta, detect_media_kind, load_caption
         from web.remote_jobs import manager as rjob_manager
         from web.shortener import manager as link_manager
+        from web.workers import manager as worker_manager
 
         # Janela de atividade 07:00 - 22:00
         hour = _dt.now().hour
         if hour < 7 or hour >= 22:
+            return
+
+        # Mesma guarda do auto-loop: se NÃO tem worker online, pausa o sync
+        if not worker_manager.online_workers():
             return
 
         # Itera por todos os workspaces
@@ -816,13 +826,23 @@ class ScheduleManager:
     def _diversify_tick(self):
         from datetime import datetime as _dt
         from core import paths as _paths
+        from web.workers import manager as worker_manager
 
         # Janela 7h-22h (horario local servidor)
         hour = _dt.now().hour
         if hour < 7 or hour >= 22:
-            # Log uma vez por hora pra ter visibilidade quando está fora da janela
             if _dt.now().minute < 5:
                 print(f"[diversify] fora da janela 7h-22h (atual: {hour}h), aguardando")
+            return
+
+        # GUARDA CRÍTICA: se NÃO tem worker online, NÃO cria jobs novos
+        # (anti-inchar fila quando worker caiu de madrugada).
+        # Worker quando volta, vai pegar os pending antigos + auto-loop volta a criar novos.
+        online_workers = worker_manager.online_workers()
+        if not online_workers:
+            # Log a cada ~30min pra dar visibilidade
+            if _dt.now().minute % 30 < 5:
+                print(f"[diversify] PAUSADO: nenhum worker online (auto-loop em standby até worker reconectar)")
             return
 
         # Itera por todos os workspaces existentes em disco
@@ -1032,6 +1052,28 @@ class ScheduleManager:
             "accounts_count": len(targets),
             "accounts_completed": accounts_completed,
         }
+
+    # ===================== ZOMBIE CLEANUP =====================
+
+    def _zombie_loop(self):
+        """Periodicamente libera jobs zumbis (claimed > 2min, running > 10min sem update).
+
+        Por que separado: _expire_stale_claims original só rodava no claim_next.
+        Se worker tá offline, claim_next NÃO é chamado e zumbis ficam parados pra
+        sempre. Esta thread garante limpeza independente.
+        """
+        import time as _t
+        _t.sleep(60)  # aguarda 1min apos startup
+        while not self._stop_event.is_set():
+            try:
+                from web.remote_jobs import manager as rjob_manager
+                freed = rjob_manager.cleanup_zombies()
+                if freed > 0:
+                    print(f"[zombie] liberou {freed} job(s) zumbi (worker travou ou desconectou)")
+            except Exception as e:
+                print(f"[zombie] erro: {e}")
+            # Tick a cada 2min
+            self._stop_event.wait(2 * 60)
 
     # ===================== HEALTH TRACKER (SHADOW BAN DETECTOR) =====================
 
