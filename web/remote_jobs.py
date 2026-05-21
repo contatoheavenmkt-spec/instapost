@@ -28,7 +28,7 @@ from core.paths import data_path
 
 REMOTE_JOBS_FILE = data_path("remote_jobs.json")
 MAX_KEPT = 200
-CLAIM_TIMEOUT_SECONDS = 120  # se worker pegou e não atualizou status em 2min, libera
+CLAIM_TIMEOUT_SECONDS = 300  # 5min: tempo seguro pra worker baixar vídeo grande + começar a postar
 MAX_LOG_LINES = 300
 
 
@@ -211,7 +211,25 @@ class RemoteJobManager:
     # ---- mutations ----
 
     def create(self, payload: dict) -> RemoteJob:
+        """Cria novo job. Pra operation='post' com video_name, retorna job existente
+        se já houver um ATIVO (pending/claimed/running) pra mesma (account, video).
+        Isso evita race condition de 2 callers criarem o mesmo job simultaneamente.
+        """
         with self._lock:
+            # Anti-duplicate atômico (dentro do mesmo lock que cria)
+            if payload.get("operation", "post") == "post":
+                acc = payload.get("account_username")
+                video = payload.get("video_name")
+                if acc and video:
+                    for j in self._items.values():
+                        if (
+                            j.operation == "post"
+                            and j.account_username == acc
+                            and j.video_name == video
+                            and j.status in ("pending", "claimed", "running")
+                        ):
+                            # Job já existe ativo — devolve o existente em vez de duplicar
+                            return j
             payload["id"] = "rj_" + uuid.uuid4().hex[:12]
             payload["status"] = "pending"
             payload["created_at"] = now_iso()

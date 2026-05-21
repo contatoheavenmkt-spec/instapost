@@ -462,7 +462,7 @@ class ScheduleManager:
                 "account_proxy": acc.get("proxy"),
                 "video_name": s.video,
                 "media_type": media_type,
-                "kind": meta.get("kind") or ("story" if media_type == "photo" else "reel"),  # FIX: foto sempre story
+                "kind": "story" if media_type == "photo" else (meta.get("kind") or "reel"),  # FIX: foto SEMPRE story (Insta nao aceita foto como reel)
                 "caption": caption,
                 "link_url": this_link,
                 "link_text": link_text,
@@ -785,7 +785,7 @@ class ScheduleManager:
                 "account_proxy": acc.get("proxy"),
                 "video_name": media_name,
                 "media_type": media_type,
-                "kind": meta.get("kind") or ("story" if media_type == "photo" else "reel"),  # FIX: foto sempre story
+                "kind": "story" if media_type == "photo" else (meta.get("kind") or "reel"),  # FIX: foto SEMPRE story (Insta nao aceita foto como reel)
                 "caption": caption,
                 "link_url": link_url,
                 "link_text": link_text,
@@ -1121,7 +1121,7 @@ class ScheduleManager:
                     "account_proxy": acc.get("proxy"),
                     "video_name": video_name,
                     "media_type": media_type,
-                    "kind": meta.get("kind") or ("story" if media_type == "photo" else "reel"),  # FIX: foto sempre story
+                    "kind": "story" if media_type == "photo" else (meta.get("kind") or "reel"),  # FIX: foto SEMPRE story (Insta nao aceita foto como reel)
                     "caption": caption,
                     "link_url": link_url,
                     "link_text": link_text,

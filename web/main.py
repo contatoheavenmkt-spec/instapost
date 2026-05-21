@@ -501,12 +501,13 @@ def api_list_accounts():
 
 @app.post("/api/accounts")
 def api_add_account(payload: AccountIn):
-    username = payload.username.strip()
+    # Normaliza username pra lowercase (Instagram é case-insensitive)
+    username = payload.username.strip().lower()
     if not username or not payload.password:
         raise HTTPException(400, "username e password obrigatórios")
 
     accounts = load_accounts()
-    if any(a["username"].lower() == username.lower() for a in accounts):
+    if any(a["username"].lower() == username for a in accounts):
         raise HTTPException(409, f"Conta @{username} já existe")
 
     accounts.append({
@@ -834,7 +835,8 @@ def api_bulk_import(payload: BulkImportIn, user=Depends(auth.require_user)):
     added = []
     for entry in to_add:
         accounts.append({
-            "username": entry["username"],
+            # Normaliza username pra lowercase (consistência)
+            "username": entry["username"].strip().lower(),
             "password": entry["password"],
             "totp_secret": entry["totp_secret"],
             "proxy": None,
@@ -2169,13 +2171,15 @@ def api_create_remote_job(payload: RemoteJobIn, request: Request, user=Depends(a
     caption = load_caption(str(media_path))
 
     # Resolve kind FINAL: override > meta > default por media_type
-    if payload.kind_override and payload.kind_override in ("reel", "story"):
-        # Foto NUNCA pode virar reel (limitação Instagram)
-        if media_type == "photo" and payload.kind_override == "reel":
+    # REGRA INVIOLÁVEL: foto SEMPRE story (Insta não aceita foto como reel)
+    if media_type == "photo":
+        effective_kind = "story"
+        if payload.kind_override == "reel":
             raise HTTPException(400, "Foto não pode virar Reel — só Story")
+    elif payload.kind_override and payload.kind_override in ("reel", "story"):
         effective_kind = payload.kind_override
     else:
-        effective_kind = meta.get("kind") or ("story" if media_type == "photo" else "reel")
+        effective_kind = meta.get("kind") or "reel"
 
     base = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/") or str(request.base_url).rstrip("/")
 
@@ -2433,8 +2437,8 @@ def api_dispatch_diversified(payload: DiversifiedDispatchIn, request: Request, u
             "account_proxy": acc.get("proxy"),
             "video_name": video_name,
             "media_type": media_type,
-            # FIX: foto SEMPRE vira story (default seguro)
-            "kind": meta.get("kind") or ("story" if media_type == "photo" else "reel"),
+            # FIX: foto SEMPRE vira story (regra inviolável do Instagram)
+            "kind": "story" if media_type == "photo" else (meta.get("kind") or "reel"),
             "caption": caption,
             "link_url": link_url,
             "link_text": link_text,
