@@ -579,6 +579,368 @@ def api_delete_account(username: str):
     return {"ok": True}
 
 
+# ---------- IMPORTAÇÃO EM MASSA ----------
+
+class BulkImportIn(BaseModel):
+    text: str
+    dry_run: bool = False  # se True, só faz preview sem importar
+    connect_after: bool = False  # se True, dispara test_login após importar
+
+
+import re as _re_acct
+
+# 2FA seed: base32 só [A-Z2-7], geralmente 16 ou 32 chars
+_RE_TOTP_SECRET = _re_acct.compile(r"^[A-Z2-7]{16,64}$")
+# Username Insta: minúsculas/dígitos/._
+_RE_USERNAME = _re_acct.compile(r"^[a-z0-9._]{1,30}$", _re_acct.IGNORECASE)
+# Numero solto tipo "1", "2)", "3:"
+_RE_JUST_NUMBER = _re_acct.compile(r"^\d{1,4}[\.\)\-:]?$")
+
+
+def _classify_field(s: str) -> str:
+    """Identifica o tipo do campo: '2fa', 'username', 'password' ou 'unknown'."""
+    s = s.strip()
+    if _RE_TOTP_SECRET.match(s):
+        return "2fa"
+    # Username Insta NÃO pode ter espaços/símbolos exceto . _
+    if _RE_USERNAME.match(s) and not any(c in s for c in (" ", ":", "|", ";")):
+        return "username"
+    # Resto é senha (qualquer coisa que não bate em 2fa nem username)
+    return "password"
+
+
+def _parse_account_block(lines: list[str]) -> Optional[dict]:
+    """Parse 3-4 linhas que pertencem ao mesmo bloco (1 conta).
+
+    Aceita ordem ARBITRÁRIA: tenta identificar qual linha é 2fa/user/senha.
+    Formato comum do vendedor:
+        2FA_SECRET      (32 chars MAIÚSCULOS)
+        username
+        password
+    Ou com número no início (ignorado):
+        1
+        2FA_SECRET
+        username
+        password
+    """
+    # Remove números soltos (1, 2, 3...) e linhas vazias
+    cleaned = []
+    for ln in lines:
+        s = ln.strip()
+        if not s or _RE_JUST_NUMBER.match(s):
+            continue
+        cleaned.append(s)
+
+    if len(cleaned) < 2:
+        return None
+
+    # Classifica cada linha
+    fields = {"2fa": None, "username": None, "password": None}
+    unclassified = []
+    for s in cleaned:
+        cat = _classify_field(s)
+        if cat == "2fa" and not fields["2fa"]:
+            fields["2fa"] = s
+        elif cat == "username" and not fields["username"]:
+            fields["username"] = s
+        elif cat == "password" and not fields["password"]:
+            fields["password"] = s
+        else:
+            unclassified.append(s)
+
+    # Se sobraram unclassified e ainda tem slots vazios, tenta preencher
+    for s in unclassified:
+        if not fields["password"]:
+            fields["password"] = s
+        elif not fields["username"]:
+            fields["username"] = s
+
+    if not fields["username"] or not fields["password"]:
+        return None  # falta info crítica
+
+    return {
+        "username": fields["username"],
+        "password": fields["password"],
+        "totp_secret": fields["2fa"],
+    }
+
+
+def _parse_account_line(line: str) -> Optional[dict]:
+    """Parse uma SINGLE LINE em conta (formato user:senha:2fa).
+    Pra formato multi-linha use _parse_account_block."""
+    line = (line or "").strip()
+    if not line or line.startswith("#") or line.startswith("//"):
+        return None
+
+    parts = None
+    for sep in [":", "|", ";", "\t"]:
+        if sep in line:
+            parts = [p.strip() for p in line.split(sep)]
+            break
+    if parts is None:
+        return None  # sem separador → não é single-line
+
+    parts = [p for p in parts if p]
+    if len(parts) < 2:
+        return None
+
+    # Detecta automaticamente qual posição tem o 2FA (base32)
+    fields = {"2fa": None, "username": None, "password": None}
+    for p in parts:
+        cat = _classify_field(p)
+        if cat == "2fa" and not fields["2fa"]:
+            fields["2fa"] = p
+        elif cat == "username" and not fields["username"]:
+            fields["username"] = p
+        elif not fields["password"]:
+            fields["password"] = p
+
+    # Fallback: se não classificou, ordem padrão user:senha:2fa
+    if not fields["username"] and len(parts) >= 1:
+        fields["username"] = parts[0]
+    if not fields["password"] and len(parts) >= 2:
+        fields["password"] = parts[1]
+    if not fields["2fa"] and len(parts) >= 3:
+        fields["2fa"] = parts[2]
+
+    if not fields["username"] or not fields["password"]:
+        return None
+
+    return {
+        "username": fields["username"],
+        "password": fields["password"],
+        "totp_secret": fields["2fa"],
+    }
+
+
+def _parse_accounts_text(text: str) -> dict:
+    """Parse texto suportando 2 formatos:
+
+    1. SINGLE-LINE (1 conta por linha):
+       user:senha:2fa
+       user|senha|2fa
+
+    2. MULTI-LINE BLOCKS (1 conta em 3-4 linhas, separadas por linha em branco):
+       1
+       BLBMV56NILPQYHPHO47LBJYF6S7CWMYU
+       juliafreireua374
+       elMSoYMQakO
+
+    Detecta automaticamente qual formato baseado em: se há separador ":|;tab" → single-line.
+    Senão, agrupa por linhas em branco.
+
+    Retorna {valid: [...], invalid: [...], format_detected: "single"|"blocks"}.
+    """
+    text = text or ""
+    has_separator = any(sep in text for sep in [":", "|", ";", "\t"])
+    valid = []
+    invalid = []
+    seen_usernames = set()
+
+    if has_separator:
+        # SINGLE-LINE mode
+        for i, raw_line in enumerate(text.splitlines(), 1):
+            line = raw_line.strip()
+            if not line or line.startswith("#") or line.startswith("//"):
+                continue
+            if _RE_JUST_NUMBER.match(line):
+                continue  # pula numeração solta
+            parsed = _parse_account_line(line)
+            if not parsed:
+                invalid.append({"line": i, "raw": raw_line[:80], "error": "formato não reconhecido"})
+                continue
+            if parsed["username"].lower() in seen_usernames:
+                invalid.append({"line": i, "raw": raw_line[:80], "error": f"@{parsed['username']} duplicada na lista"})
+                continue
+            seen_usernames.add(parsed["username"].lower())
+            valid.append(parsed)
+        return {"valid": valid, "invalid": invalid, "format_detected": "single"}
+
+    # MULTI-LINE BLOCKS mode (formato do vendedor real)
+    # Split por linhas em branco
+    lines = text.splitlines()
+    blocks = []
+    current_block = []
+    current_block_start_line = 1
+    for i, ln in enumerate(lines, 1):
+        if ln.strip() == "":
+            if current_block:
+                blocks.append((current_block_start_line, current_block))
+            current_block = []
+            current_block_start_line = i + 1
+        else:
+            current_block.append(ln)
+    if current_block:
+        blocks.append((current_block_start_line, current_block))
+
+    for start_line, block_lines in blocks:
+        # Linhas tipo "1", "2)" sozinhas viram bloco sem conteúdo útil → pula
+        non_number_lines = [l for l in block_lines if l.strip() and not _RE_JUST_NUMBER.match(l.strip())]
+        if not non_number_lines:
+            continue
+        parsed = _parse_account_block(block_lines)
+        if not parsed:
+            invalid.append({
+                "line": start_line,
+                "raw": " | ".join(l.strip() for l in block_lines[:3])[:80],
+                "error": f"bloco com {len(non_number_lines)} linha(s) — não consegui identificar user/senha",
+            })
+            continue
+        if parsed["username"].lower() in seen_usernames:
+            invalid.append({"line": start_line, "raw": parsed["username"], "error": f"@{parsed['username']} duplicada na lista"})
+            continue
+        seen_usernames.add(parsed["username"].lower())
+        valid.append(parsed)
+    return {"valid": valid, "invalid": invalid, "format_detected": "blocks"}
+
+
+@app.post("/api/accounts/bulk-import")
+def api_bulk_import(payload: BulkImportIn, user=Depends(auth.require_user)):
+    """Importa lista de contas em massa. Aceita formatos:
+    user:senha:2fa | user|senha|2fa | user;senha;2fa | user[TAB]senha[TAB]2fa
+
+    dry_run=True: só faz preview sem salvar.
+    connect_after=True: dispara test_login pra cada conta importada (com stagger).
+    """
+    parsed = _parse_accounts_text(payload.text)
+    valid = parsed["valid"]
+    invalid = parsed["invalid"]
+
+    accounts = load_accounts()
+    existing_usernames = {a["username"].lower() for a in accounts}
+
+    to_add = []
+    skipped_existing = []
+    for entry in valid:
+        if entry["username"].lower() in existing_usernames:
+            skipped_existing.append(entry["username"])
+        else:
+            to_add.append(entry)
+
+    if payload.dry_run:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "would_add_count": len(to_add),
+            "would_add": [e["username"] for e in to_add],
+            "skipped_existing_count": len(skipped_existing),
+            "skipped_existing": skipped_existing,
+            "invalid_count": len(invalid),
+            "invalid": invalid,
+            "total_lines_parsed": len(valid) + len(invalid),
+        }
+
+    # Aplica importação
+    added = []
+    for entry in to_add:
+        accounts.append({
+            "username": entry["username"],
+            "password": entry["password"],
+            "totp_secret": entry["totp_secret"],
+            "proxy": None,
+            "active": True,
+        })
+        added.append(entry["username"])
+    if added:
+        save_accounts(accounts)
+
+    # Se connect_after, cria jobs test_login com stagger
+    connect_jobs_created = 0
+    if payload.connect_after and added:
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        import random as _r
+        now_utc = _dt.now(_tz.utc)
+        # Stagger: 30-90s entre cada conexão (anti-flag IP)
+        for idx, username in enumerate(added):
+            acc = next((a for a in accounts if a["username"] == username), None)
+            if not acc:
+                continue
+            delay_s = idx * _r.randint(30, 90)
+            scheduled_for = (now_utc + _td(seconds=delay_s)).isoformat(timespec="seconds")
+            try:
+                rjob_manager.create({
+                    "operation": "test_login",
+                    "account_username": acc["username"],
+                    "account_password": acc["password"],
+                    "account_totp_secret": acc.get("totp_secret"),
+                    "account_proxy": acc.get("proxy"),
+                    "scheduled_for": scheduled_for,
+                    "created_by": f"bulk-import:{user['email']}",
+                })
+                connect_jobs_created += 1
+            except Exception as e:
+                print(f"[bulk-import] erro criando job pra @{username}: {e}")
+
+    return {
+        "ok": True,
+        "dry_run": False,
+        "added_count": len(added),
+        "added": added,
+        "skipped_existing_count": len(skipped_existing),
+        "skipped_existing": skipped_existing,
+        "invalid_count": len(invalid),
+        "invalid": invalid,
+        "connect_jobs_created": connect_jobs_created,
+    }
+
+
+class BulkConnectIn(BaseModel):
+    usernames: Optional[list[str]] = None  # se None, conecta todas desconectadas
+    only_disconnected: bool = True  # se True, ignora as que já tem connected_via_worker_id
+
+
+@app.post("/api/accounts/bulk-connect")
+def api_bulk_connect(payload: BulkConnectIn, user=Depends(auth.require_user)):
+    """Dispara test_login pra N contas em massa com stagger (30-90s entre cada).
+
+    Por padrão pula contas já conectadas (only_disconnected=True).
+    """
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    import random as _r
+
+    accounts = load_accounts()
+
+    if payload.usernames:
+        target_usernames = [u for u in payload.usernames if u]
+    else:
+        target_usernames = [a["username"] for a in accounts if a.get("active", True)]
+
+    if payload.only_disconnected:
+        target_usernames = [
+            u for u in target_usernames
+            if not next((a for a in accounts if a["username"] == u), {}).get("connected_via_worker_id")
+        ]
+
+    now_utc = _dt.now(_tz.utc)
+    created = []
+    for idx, username in enumerate(target_usernames):
+        acc = next((a for a in accounts if a["username"] == username), None)
+        if not acc:
+            continue
+        delay_s = idx * _r.randint(30, 90)
+        scheduled_for = (now_utc + _td(seconds=delay_s)).isoformat(timespec="seconds")
+        try:
+            rj = rjob_manager.create({
+                "operation": "test_login",
+                "account_username": acc["username"],
+                "account_password": acc["password"],
+                "account_totp_secret": acc.get("totp_secret"),
+                "account_proxy": acc.get("proxy"),
+                "scheduled_for": scheduled_for,
+                "created_by": f"bulk-connect:{user['email']}",
+            })
+            created.append({"username": username, "job_id": rj.id, "scheduled_for": scheduled_for})
+        except Exception as e:
+            print(f"[bulk-connect] erro pra @{username}: {e}")
+
+    return {
+        "ok": True,
+        "count": len(created),
+        "jobs": created,
+        "estimated_total_minutes": (len(created) * 60) / 60,  # aprox
+    }
+
+
 @app.post("/api/accounts/bulk-delete")
 def api_bulk_delete(payload: BulkUsernames):
     accounts = load_accounts()

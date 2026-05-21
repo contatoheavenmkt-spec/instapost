@@ -11,6 +11,9 @@
     <button class="btn btn-ghost" onclick="onCheckAll()" id="check-all-btn" title="Testa login em todas as contas conectadas. Quem falhar vira BLOQUEADA">
       <i data-lucide="activity" class="icon"></i> Verificar todas
     </button>
+    <button class="btn btn-ghost" onclick="openBulkImport()" title="Cola lista do vendedor — sistema importa em massa">
+      <i data-lucide="upload-cloud" class="icon"></i> Importar lista
+    </button>
     <button class="btn btn-accent" onclick="toggleAddForm(true)">
       <i data-lucide="plus" class="icon"></i> Nova conta
     </button>
@@ -310,6 +313,51 @@
       <button class="btn btn-ghost" onclick="closeProfileEditor()">Cancelar</button>
       <button class="btn btn-accent" onclick="saveProfileEditor()">
         <i data-lucide="check" class="icon"></i> Aplicar alterações
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: Importar lista em massa -->
+<div id="bulk-import-modal" class="modal-bg hidden" onclick="if(event.target===this) closeBulkImport()">
+  <div class="modal-card" style="max-width: 700px; width: 100%">
+    <div class="flex items-center justify-between mb-3">
+      <div class="text-[16px] font-semibold">Importar contas em massa</div>
+      <button class="btn btn-ghost btn-sm" onclick="closeBulkImport()"><i data-lucide="x" class="icon"></i></button>
+    </div>
+
+    <div class="text-[12.5px] text-soft mb-3">
+      Cola a lista que o vendedor te enviou. Suporta os formatos:
+      <ul class="list-disc list-inside mt-1.5 ml-1 space-y-0.5 text-[12px]">
+        <li><strong>Blocos multilinha</strong> (mais comum dos vendedores):
+          <pre class="mono text-[11px] surface-2 px-2 py-1.5 rounded mt-0.5">1
+BLBMV56NILPQYHPHO47LBJYF6S7CWMYU
+juliafreireua374
+elMSoYMQakO</pre>
+        </li>
+        <li><strong>Linha única</strong>: <span class="mono text-[11px]">user:senha:CHAVE2FA</span> (ou separado por <span class="mono">|</span> <span class="mono">;</span> TAB)</li>
+      </ul>
+    </div>
+
+    <textarea id="bulk-text" class="textarea mono text-[12px]" rows="12"
+      placeholder="Cola aqui sua lista..."
+      style="font-family: 'JetBrains Mono', monospace"
+      oninput="updateBulkPreview()"></textarea>
+
+    <!-- Preview em tempo real -->
+    <div id="bulk-preview" class="surface-2 p-3 rounded mt-3 text-[12px] text-soft" style="min-height: 50px">
+      Cole a lista pra ver o preview.
+    </div>
+
+    <label class="flex items-center gap-2 mt-3 text-[12.5px] cursor-pointer">
+      <input type="checkbox" id="bulk-connect-after" class="check" checked />
+      <span><strong>Conectar contas após importar</strong> (recomendado — testa login com stagger 30-90s entre cada)</span>
+    </label>
+
+    <div class="flex justify-end gap-2 mt-4 pt-3 border-t border-line">
+      <button class="btn btn-ghost" onclick="closeBulkImport()">Cancelar</button>
+      <button class="btn btn-accent" onclick="submitBulkImport()" id="bulk-import-btn">
+        <i data-lucide="check" class="icon"></i> Importar contas
       </button>
     </div>
   </div>
@@ -974,5 +1022,97 @@
   }
 
   load();
+
+  // ===== BULK IMPORT =====
+  let _bulkPreviewTimer = null;
+
+  function openBulkImport() {
+    document.getElementById('bulk-text').value = '';
+    document.getElementById('bulk-preview').innerHTML = 'Cole a lista pra ver o preview.';
+    document.getElementById('bulk-connect-after').checked = true;
+    document.getElementById('bulk-import-modal').classList.remove('hidden');
+    setTimeout(() => document.getElementById('bulk-text').focus(), 50);
+    if (window.lucide) lucide.createIcons();
+  }
+
+  function closeBulkImport() {
+    document.getElementById('bulk-import-modal').classList.add('hidden');
+  }
+
+  function updateBulkPreview() {
+    // Debounce: aguarda 400ms sem digitar pra chamar API
+    clearTimeout(_bulkPreviewTimer);
+    _bulkPreviewTimer = setTimeout(async () => {
+      const text = document.getElementById('bulk-text').value;
+      if (!text.trim()) {
+        document.getElementById('bulk-preview').innerHTML = 'Cole a lista pra ver o preview.';
+        return;
+      }
+      try {
+        const r = await api('/api/accounts/bulk-import', {
+          method: 'POST',
+          body: JSON.stringify({ text, dry_run: true }),
+        });
+        const div = document.getElementById('bulk-preview');
+        const fmt = r.would_add_count > 0 ? 'success' : 'warning';
+        const color = fmt === 'success' ? '#6ee7b7' : '#fcd34d';
+        let html = `<div class="flex items-center gap-2 mb-1.5">
+          <i data-lucide="${r.would_add_count > 0 ? 'check-circle-2' : 'alert-circle'}" style="width:14px;height:14px;color:${color}"></i>
+          <strong style="color:${color}">${r.would_add_count} conta(s) válidas pra adicionar</strong>
+          <span class="text-muted">· formato: ${r.format_detected || 'auto'}</span>
+        </div>`;
+        if (r.would_add && r.would_add.length) {
+          const preview = r.would_add.slice(0, 8).map(u => `<span class="badge badge-neutral mono" style="font-size:10px">@${u}</span>`).join(' ');
+          const more = r.would_add.length > 8 ? `<span class="text-muted">+${r.would_add.length - 8} outras</span>` : '';
+          html += `<div class="mt-1.5">${preview} ${more}</div>`;
+        }
+        if (r.skipped_existing_count > 0) {
+          html += `<div class="mt-2 text-[#fcd34d]"><i data-lucide="alert-circle" style="width:12px;height:12px;display:inline;vertical-align:-2px"></i> ${r.skipped_existing_count} já existe(m) (vão ser pulada(s))</div>`;
+        }
+        if (r.invalid_count > 0) {
+          html += `<div class="mt-2 text-[#fca5a5]"><i data-lucide="x-circle" style="width:12px;height:12px;display:inline;vertical-align:-2px"></i> ${r.invalid_count} inválida(s) (formato não reconhecido)</div>`;
+          const invList = r.invalid.slice(0, 3).map(inv => `<div class="text-[11px] text-muted ml-4">linha ${inv.line}: ${escapeHtml(inv.raw)} → ${inv.error}</div>`).join('');
+          html += invList;
+        }
+        div.innerHTML = html;
+        if (window.lucide) lucide.createIcons();
+      } catch (e) {
+        document.getElementById('bulk-preview').innerHTML = `<span style="color:#fca5a5">Erro: ${escapeHtml(e.message)}</span>`;
+      }
+    }, 400);
+  }
+
+  async function submitBulkImport() {
+    const text = document.getElementById('bulk-text').value;
+    const connectAfter = document.getElementById('bulk-connect-after').checked;
+    if (!text.trim()) { toast('Cole a lista primeiro', 'error'); return; }
+
+    const btn = document.getElementById('bulk-import-btn');
+    btn.disabled = true;
+    btn.innerHTML = '<i data-lucide="loader" class="icon"></i> Importando...';
+    if (window.lucide) lucide.createIcons();
+    try {
+      const r = await api('/api/accounts/bulk-import', {
+        method: 'POST',
+        body: JSON.stringify({ text, dry_run: false, connect_after: connectAfter }),
+      });
+      let msg = `✓ ${r.added_count} conta(s) importada(s)`;
+      if (r.connect_jobs_created > 0) {
+        const minutos = Math.round((r.connect_jobs_created * 60) / 60);
+        msg += ` · ${r.connect_jobs_created} job(s) de login enfileirado(s) (~${minutos} min com stagger)`;
+      }
+      if (r.skipped_existing_count > 0) msg += ` · ${r.skipped_existing_count} já existia(m)`;
+      if (r.invalid_count > 0) msg += ` · ${r.invalid_count} inválida(s)`;
+      toast(msg, 'success');
+      closeBulkImport();
+      await load();
+    } catch (e) {
+      toast(e.message, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = '<i data-lucide="check" class="icon"></i> Importar contas';
+      if (window.lucide) lucide.createIcons();
+    }
+  }
 </script>
 {% endblock %}
