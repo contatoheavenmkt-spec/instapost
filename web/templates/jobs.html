@@ -36,7 +36,7 @@
   details.acc-picker > summary::marker { display: none; }
 </style>
 
-<div class="flex items-end justify-between mb-6">
+<div class="flex items-end justify-between mb-4">
   <div>
     <h1 class="h-page">Disparos</h1>
     <p class="text-sm text-soft mt-1">Acompanhe cada conta em tempo real conforme o worker processa.</p>
@@ -50,6 +50,18 @@
       <i data-lucide="filter" class="icon"></i> Limpar duplicados
     </button>
     <button class="btn btn-ghost btn-sm" onclick="loadKanban(true)"><i data-lucide="refresh-cw" class="icon"></i> Atualizar</button>
+  </div>
+</div>
+
+<!-- Banner explicativo das 2 abas -->
+<div class="surface p-3 mb-4 flex gap-3 items-start" style="border-left: 3px solid var(--accent); background: rgba(236,72,153,.04)">
+  <i data-lucide="info" style="width:16px;height:16px;color:var(--accent);margin-top:2px;flex-shrink:0"></i>
+  <div class="text-[12.5px] text-soft leading-relaxed">
+    <strong class="text-[var(--text)]">2 modos de disparo:</strong>
+    <span class="mx-2">·</span>
+    <strong class="text-[var(--text)]">"Mesma mídia em todas"</strong> = <span class="text-muted">disparo único</span> (com opção de <strong>repetir N vezes a cada Y horas</strong>)
+    <span class="mx-2">·</span>
+    <strong class="text-[var(--text)]">"Diversificar"</strong> = <span class="text-muted">cada conta recebe vídeo diferente</span>, com <strong>auto-loop infinito</strong> que dispara sozinho até esvaziar o pool
   </div>
 </div>
 
@@ -118,7 +130,24 @@
         <input type="checkbox" name="use_server" class="check" />
         Usar servidor (post.py legado — serial)
       </label>
-      <div class="ml-auto text-[11px] text-muted">Worker: cria 1 job por conta. Servidor: roda o post.py em sequência.</div>
+    </div>
+
+    <!-- Repetir disparo -->
+    <div class="col-span-12 surface-2 p-3 rounded mt-2">
+      <label class="flex items-center gap-2 cursor-pointer text-[13px]">
+        <input type="checkbox" id="repeat-enabled" class="check" onchange="toggleRepeatFields()" />
+        <i data-lucide="repeat" style="width:13px;height:13px;color:var(--accent)"></i>
+        <strong>Repetir esse disparo automaticamente</strong>
+        <span class="text-muted text-[11.5px]">(sistema agenda N execuções com intervalo fixo)</span>
+      </label>
+      <div id="repeat-fields" class="hidden mt-3 flex items-center gap-2 text-[12.5px] text-soft">
+        Repetir
+        <input id="repeat-count" type="number" min="2" max="20" value="3" class="input" style="width:65px;padding:5px 8px" />
+        vezes (1 disparo inicial + N-1 agendados), a cada
+        <input id="repeat-interval" type="number" min="1" max="72" value="1" class="input" style="width:65px;padding:5px 8px" step="0.5" />
+        hora(s).
+        <span class="text-muted ml-2" id="repeat-summary">3 disparos em ~2h</span>
+      </div>
     </div>
   </form>
 
@@ -147,14 +176,17 @@
     <div id="diversified-summary" class="mt-3 text-[12px] text-muted"></div>
 
     <!-- Auto-loop -->
-    <div class="surface-2 p-3 rounded mt-4 border" style="border-color: var(--accent); border-style: dashed">
+    <div id="autoloop-card" class="surface-2 p-3 rounded mt-4 border" style="border-color: var(--accent); border-style: dashed">
       <div class="flex items-center justify-between mb-2">
-        <div>
-          <div class="text-[13px] font-medium flex items-center gap-1.5">
-            <i data-lucide="repeat" style="width:14px;height:14px;color:var(--accent)"></i>
-            Postar sozinho até finalizar (auto-loop)
+        <div class="flex items-center gap-3">
+          <div>
+            <div class="text-[13px] font-medium flex items-center gap-1.5">
+              <i data-lucide="repeat" style="width:14px;height:14px;color:var(--accent)"></i>
+              Postar sozinho até finalizar (auto-loop)
+            </div>
+            <div class="text-[11px] text-soft mt-0.5">Sistema dispara N posts por conta a cada X horas (janela 7h–22h) até acabar todos os vídeos.</div>
           </div>
-          <div class="text-[11px] text-soft mt-0.5">Sistema dispara N posts por conta a cada X horas (janela 7h–22h) até acabar todos os vídeos.</div>
+          <span id="autoloop-badge" class="badge" style="font-size:11px;padding:4px 10px">OFF</span>
         </div>
         <label class="switch">
           <input type="checkbox" id="autoloop-toggle" onchange="saveAutoLoop()" />
@@ -536,6 +568,21 @@
   }
 
   // ---- Form ----
+  // Toggle visual dos campos de repetição
+  function toggleRepeatFields() {
+    const enabled = document.getElementById('repeat-enabled').checked;
+    document.getElementById('repeat-fields').classList.toggle('hidden', !enabled);
+    updateRepeatSummary();
+  }
+  function updateRepeatSummary() {
+    const n = parseInt(document.getElementById('repeat-count').value) || 3;
+    const h = parseFloat(document.getElementById('repeat-interval').value) || 1;
+    const totalH = (n - 1) * h;
+    document.getElementById('repeat-summary').textContent = `${n} disparos em ~${totalH}h total`;
+  }
+  document.getElementById('repeat-count')?.addEventListener('input', updateRepeatSummary);
+  document.getElementById('repeat-interval')?.addEventListener('input', updateRepeatSummary);
+
   const form = document.getElementById('run-form');
   if (form) {
     form.addEventListener('submit', async (e) => {
@@ -546,6 +593,9 @@
       const useServer = fd.get('use_server') === 'on';
       const skipDup = fd.get('skip_duplicates') === 'on';
       const kindOverride = fd.get('kind_override') || null;  // "reel" | "story" | null
+      const repeatEnabled = document.getElementById('repeat-enabled')?.checked;
+      const repeatCount = Math.max(1, Math.min(20, parseInt(document.getElementById('repeat-count')?.value) || 1));
+      const repeatIntervalH = Math.max(0.5, Math.min(72, parseFloat(document.getElementById('repeat-interval')?.value) || 1));
       if (!video) { toast('Escolha uma mídia', 'error'); return; }
 
       try {
@@ -570,13 +620,42 @@
           const r = await api('/api/remote-jobs', { method: 'POST', body: JSON.stringify(payload) });
           const created = r.count || 0;
           const skipped = (r.skipped || []).length;
+
+          // Se REPETIR ativo, agenda N-1 execuções futuras
+          let scheduledCount = 0;
+          if (repeatEnabled && repeatCount > 1) {
+            const acc = (accountMode === '__all_worker__') ? null : accountMode;
+            for (let i = 1; i < repeatCount; i++) {
+              const when = new Date(Date.now() + i * repeatIntervalH * 3600 * 1000);
+              try {
+                await api('/api/schedules', {
+                  method: 'POST',
+                  body: JSON.stringify({
+                    video,
+                    account: acc,
+                    scheduled_at: when.toISOString().slice(0, 19),  // ISO sem ms
+                  }),
+                });
+                scheduledCount++;
+              } catch (se) {
+                console.error(`Agendamento ${i+1} falhou: ${se.message}`);
+              }
+            }
+          }
+
+          // Toast com info COMPLETA
+          let msg = '';
           if (skipped > 0 && created === 0) {
-            // Pulou TODAS — mostra alerta forte
-            toast(`⚠ NADA foi pra fila: ${skipped} conta(s) puladas porque já postaram essa mídia. Desmarca "Pular contas..." pra forçar.`, 'error');
-          } else if (skipped > 0) {
-            toast(`${created} job(s) criados. ${skipped} pulada(s) (já postaram).`, 'success');
+            msg = `⚠ NADA foi pra fila: ${skipped} pulada(s). Desmarca "Pular contas..." pra forçar.`;
+            toast(msg, 'error');
           } else {
-            toast(`${created} job(s) criados`, 'success');
+            msg = `${created} job(s) criados agora`;
+            if (skipped > 0) msg += ` · ${skipped} pulada(s)`;
+            if (scheduledCount > 0) {
+              const totalH = (repeatCount - 1) * repeatIntervalH;
+              msg += ` · ${scheduledCount} repetição(ões) agendada(s) ao longo de ~${totalH}h`;
+            }
+            toast(msg, 'success');
           }
           loadKanban();
         }
@@ -641,6 +720,22 @@
       document.getElementById('autoloop-interval').value = s.interval_hours || 6;
       document.getElementById('autoloop-max').value = s.max_per_account || 1;
       document.getElementById('autoloop-kind').value = s.kind_filter || 'all';
+      // Badge visual grande
+      const badge = document.getElementById('autoloop-badge');
+      const card = document.getElementById('autoloop-card');
+      if (s.enabled) {
+        badge.className = 'badge badge-success';
+        badge.innerHTML = '<span class="dot dot-success dot-pulse" style="margin-right:5px"></span>ATIVO — repetindo sozinho';
+        if (card) card.style.background = 'rgba(16,185,129,0.04)';
+      } else if (s.completed_at) {
+        badge.className = 'badge badge-neutral';
+        badge.textContent = '✓ Pool completo';
+        if (card) card.style.background = '';
+      } else {
+        badge.className = 'badge badge-neutral';
+        badge.textContent = 'INATIVO (clique no toggle pra ligar)';
+        if (card) card.style.background = '';
+      }
       const status = document.getElementById('autoloop-status');
       let txt = '';
       if (s.completed_at && !s.enabled) {
