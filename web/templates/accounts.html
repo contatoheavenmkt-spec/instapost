@@ -544,6 +544,9 @@ elMSoYMQakO</pre>
             <button class="btn btn-subtle btn-sm" onclick="onConnectViaWorker('${a.username}')" title="Conectar conta">
               <i data-lucide="log-in" class="icon"></i> Conectar
             </button>
+            <button class="btn btn-ghost btn-sm" onclick="onOpenBrowser('${a.username}')" title="Abrir Instagram dessa conta no Chrome modo mobile (profile isolado + UA do device fingerprint)">
+              <i data-lucide="smartphone" class="icon"></i>
+            </button>
             <button class="btn btn-ghost btn-sm" onclick="onOpenProfileEditor('${a.username}')" title="Editar perfil e automações">
               <i data-lucide="user-cog" class="icon"></i>
             </button>
@@ -1047,6 +1050,22 @@ elMSoYMQakO</pre>
       toast(`Worker demorou — ${pending.size} job(s) ainda pendente(s). Veja em /jobs`, 'info');
     }
     await load();
+  }
+
+  function onOpenBrowser(username) {
+    // Detecta SO do user via navigator.userAgent
+    const isWindows = navigator.userAgent.includes('Windows');
+    const ext = isWindows ? 'bat' : 'sh';
+    const url = `/api/accounts/${encodeURIComponent(username)}/launcher.${ext}`;
+    // Inicia download — user executa pra abrir Chrome com profile isolado + UA mobile
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `open_${username}.${ext}`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    const platform = isWindows ? 'Execute o arquivo .bat baixado' : 'Execute: chmod +x open_*.sh && ./open_*.sh';
+    toast(`📱 Launcher de @${username} baixado. ${platform}`, 'success');
   }
 
   async function onShowTotp(username) {

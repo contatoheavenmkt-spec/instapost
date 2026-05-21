@@ -593,6 +593,140 @@ def api_show_totp(username: str):
     raise HTTPException(404, "Conta não encontrada")
 
 
+# ---------- BROWSER LAUNCHER (Chrome mobile com fingerprint isolado) ----------
+
+@app.get("/api/accounts/{username}/launcher.bat")
+def api_account_launcher_bat(username: str):
+    """Gera um arquivo .BAT (Windows) que abre Chrome com:
+    - Profile isolado pra essa conta (cookies não compartilham)
+    - User-Agent mobile do device fingerprint da conta
+    - Janela tamanho celular (375x812)
+    - Instagram já aberto
+
+    Funciona em conjunto com o sistema: mesma device fingerprint que o
+    worker usa pra postar = mesma fingerprint que o Chrome usa pra browsing
+    manual. Coerência total — Instagram vê 1 celular único por conta.
+    """
+    from fastapi.responses import PlainTextResponse
+    from core.devices import device_for_account
+
+    # Sanitiza username (path safety)
+    safe_uname = "".join(c for c in username if c.isalnum() or c in "._-")
+    if not safe_uname:
+        raise HTTPException(400, "Username inválido")
+
+    device = device_for_account(username)
+    user_agent = device["user_agent"]
+    model = f"{device['manufacturer']} {device['model']}"
+
+    # Tamanho aproximado de celular vertical
+    width, height = 412, 870
+
+    bat_content = f"""@echo off
+REM Insta Poster - launcher Chrome pra @{safe_uname}
+REM Device fingerprint: {model} (Android {device['android_release']})
+REM Profile isolado em %USERPROFILE%\\InstaposterProfiles\\{safe_uname}
+REM
+REM Esse arquivo abre o Chrome com User-Agent mobile + cookies dedicados
+REM dessa conta. Voce loga 1x e fica salvo no profile.
+
+setlocal
+
+set "PROFILE_DIR=%USERPROFILE%\\InstaposterProfiles\\{safe_uname}"
+if not exist "%PROFILE_DIR%" mkdir "%PROFILE_DIR%"
+
+set "CHROME="
+if exist "%ProgramFiles%\\Google\\Chrome\\Application\\chrome.exe" set "CHROME=%ProgramFiles%\\Google\\Chrome\\Application\\chrome.exe"
+if exist "%ProgramFiles(x86)%\\Google\\Chrome\\Application\\chrome.exe" set "CHROME=%ProgramFiles(x86)%\\Google\\Chrome\\Application\\chrome.exe"
+if exist "%LocalAppData%\\Google\\Chrome\\Application\\chrome.exe" set "CHROME=%LocalAppData%\\Google\\Chrome\\Application\\chrome.exe"
+
+if "%CHROME%"=="" (
+    echo Chrome nao encontrado. Instale o Google Chrome primeiro.
+    pause
+    exit /b 1
+)
+
+echo Abrindo Instagram pra @{safe_uname}...
+echo Device: {model}
+echo.
+
+start "" "%CHROME%" ^
+    --user-data-dir="%PROFILE_DIR%" ^
+    --user-agent="{user_agent}" ^
+    --window-size={width},{height} ^
+    --no-first-run ^
+    --no-default-browser-check ^
+    --disable-features=Translate ^
+    https://www.instagram.com/
+
+endlocal
+"""
+    return PlainTextResponse(
+        bat_content,
+        headers={
+            "Content-Type": "application/x-bat; charset=utf-8",
+            "Content-Disposition": f'attachment; filename="open_{safe_uname}.bat"',
+        },
+    )
+
+
+@app.get("/api/accounts/{username}/launcher.sh")
+def api_account_launcher_sh(username: str):
+    """Versão Bash do launcher (macOS/Linux)."""
+    from fastapi.responses import PlainTextResponse
+    from core.devices import device_for_account
+
+    safe_uname = "".join(c for c in username if c.isalnum() or c in "._-")
+    if not safe_uname:
+        raise HTTPException(400, "Username inválido")
+
+    device = device_for_account(username)
+    user_agent = device["user_agent"]
+    model = f"{device['manufacturer']} {device['model']}"
+    width, height = 412, 870
+
+    sh_content = f"""#!/bin/bash
+# Insta Poster - launcher Chrome pra @{safe_uname}
+# Device: {model} (Android {device['android_release']})
+
+PROFILE_DIR="$HOME/InstaposterProfiles/{safe_uname}"
+mkdir -p "$PROFILE_DIR"
+
+# Detecta Chrome no macOS ou Linux
+CHROME=""
+if command -v google-chrome >/dev/null 2>&1; then
+    CHROME="google-chrome"
+elif command -v google-chrome-stable >/dev/null 2>&1; then
+    CHROME="google-chrome-stable"
+elif [ -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]; then
+    CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+elif command -v chromium >/dev/null 2>&1; then
+    CHROME="chromium"
+else
+    echo "Chrome nao encontrado. Instale o Google Chrome primeiro."
+    exit 1
+fi
+
+echo "Abrindo Instagram pra @{safe_uname}..."
+echo "Device: {model}"
+
+"$CHROME" \\
+    --user-data-dir="$PROFILE_DIR" \\
+    --user-agent="{user_agent}" \\
+    --window-size={width},{height} \\
+    --no-first-run \\
+    --no-default-browser-check \\
+    "https://www.instagram.com/" &
+"""
+    return PlainTextResponse(
+        sh_content,
+        headers={
+            "Content-Type": "application/x-sh; charset=utf-8",
+            "Content-Disposition": f'attachment; filename="open_{safe_uname}.sh"',
+        },
+    )
+
+
 @app.post("/api/accounts/{username}/toggle")
 def api_toggle_account(username: str):
     accounts = load_accounts()
