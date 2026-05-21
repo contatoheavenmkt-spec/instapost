@@ -429,6 +429,40 @@ class BulkUsernames(BaseModel):
     usernames: list[str]
 
 
+# Threshold padrão pra considerar conta "nova" (em aquecimento)
+NEW_ACCOUNT_THRESHOLD_HOURS = 24
+
+
+def _hours_since_first_post(a: dict) -> Optional[float]:
+    """Horas desde a 1ª postagem da conta. None se nunca postou."""
+    posted = a.get("posted_media") or []
+    if not posted:
+        return None
+    try:
+        from datetime import datetime as _dt
+        first_iso = min(p.get("posted_at", "") for p in posted if p.get("posted_at"))
+        if not first_iso:
+            return None
+        first_dt = _dt.fromisoformat(first_iso)
+        if first_dt.tzinfo is None:
+            first_dt = first_dt.astimezone()
+        now_dt = _dt.now(first_dt.tzinfo)
+        return round((now_dt - first_dt).total_seconds() / 3600.0, 2)
+    except Exception:
+        return None
+
+
+def _is_account_warming_up(a: dict) -> bool:
+    """Conta está em aquecimento (modo conservador) se:
+    - Nunca postou (posted_media vazio) OU
+    - 1ª postagem foi há menos de NEW_ACCOUNT_THRESHOLD_HOURS horas.
+    """
+    hours = _hours_since_first_post(a)
+    if hours is None:
+        return True  # nunca postou = muito nova
+    return hours < NEW_ACCOUNT_THRESHOLD_HOURS
+
+
 def _account_view(a: dict) -> dict:
     return {
         "username": a["username"],
@@ -455,6 +489,9 @@ def _account_view(a: dict) -> dict:
         "sync_last_post_at": a.get("sync_last_post_at"),
         "sync_completed": bool(a.get("sync_completed", False)),
         "posted_media_count": len(a.get("posted_media", []) or []),
+        # Aquecimento (conta nova) — calculado a partir de posted_media
+        "is_warming_up": _is_account_warming_up(a),
+        "hours_since_first_post": _hours_since_first_post(a),
         # Bloqueio detectado
         "blocked": bool(a.get("blocked", False)),
         "blocked_at": a.get("blocked_at"),

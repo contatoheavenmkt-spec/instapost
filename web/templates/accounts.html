@@ -83,6 +83,21 @@
   </div>
 </div>
 
+<!-- Banner aquecimento -->
+<div id="warming-banner" class="surface px-4 py-3 mb-3 hidden" style="border-left: 3px solid #60a5fa; background: rgba(96,165,250,0.06)">
+  <div class="flex items-center gap-3">
+    <i data-lucide="thermometer-sun" style="width:18px;height:18px;color:#60a5fa;flex-shrink:0"></i>
+    <div>
+      <div class="text-[13px] font-semibold"><span id="warming-count">0</span> conta(s) em modo aquecimento</div>
+      <div class="text-[11.5px] text-soft leading-relaxed">
+        Contas com menos de 24h da 1ª postagem ficam <strong>limitadas a 1 post a cada 24h</strong> no auto-loop (regra anti-ban).
+        Após 24h da primeira postagem, viram "veteranas" e seguem o ritmo normal.
+        <span class="text-[#fcd34d]">⚠ Recomendação: aquece manualmente (scroll/like/comment 3-7 dias) ANTES de postar, pra reduzir taxa de bloqueio.</span>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Banner shadow ban suspect -->
 <div id="shadowban-banner" class="surface px-4 py-3 mb-3 hidden" style="border-left: 3px solid var(--warning); background: rgba(245,158,11,0.06)">
   <div class="flex items-center justify-between">
@@ -119,6 +134,9 @@
     </button>
     <button class="btn btn-ghost btn-sm status-filter" data-status="paused" onclick="setStatusFilter('paused')">
       <span class="dot dot-muted" style="margin-right:4px"></span>Pausadas <span id="sf-count-paused" class="text-muted ml-1">0</span>
+    </button>
+    <button class="btn btn-ghost btn-sm status-filter" data-status="warming" onclick="setStatusFilter('warming')">
+      <i data-lucide="thermometer-sun" style="width:11px;height:11px;display:inline;vertical-align:-1px;color:#93c5fd"></i> Aquecendo <span id="sf-count-warming" class="text-muted ml-1">0</span>
     </button>
   </div>
 </div>
@@ -421,6 +439,7 @@ elMSoYMQakO</pre>
     if (filter === 'blocked') return a.blocked || a.shadowban_suspected;
     if (filter === 'connected') return a.active && (a.session === 'saved' || a.connected_via_worker_id) && !a.blocked;
     if (filter === 'disconnected') return a.active && a.session !== 'saved' && !a.connected_via_worker_id && !a.blocked;
+    if (filter === 'warming') return a.active && a.is_warming_up;
     return true;
   }
 
@@ -443,6 +462,7 @@ elMSoYMQakO</pre>
     document.getElementById('sf-count-disconnected').textContent = accounts.filter(a => _matchStatus(a, 'disconnected')).length;
     document.getElementById('sf-count-blocked').textContent = accounts.filter(a => _matchStatus(a, 'blocked')).length;
     document.getElementById('sf-count-paused').textContent = accounts.filter(a => _matchStatus(a, 'paused')).length;
+    document.getElementById('sf-count-warming').textContent = accounts.filter(a => _matchStatus(a, 'warming')).length;
   }
 
   function render() {
@@ -484,6 +504,9 @@ elMSoYMQakO</pre>
       const healthBadge = (a.health_score < 30 && !a.shadowban_suspected)
         ? `<span class="badge badge-warning" title="Health score baixo (${a.health_score}/100) - views recentes muito abaixo do baseline"><i data-lucide="activity" style="width:11px;height:11px"></i> ${a.health_score}</span>`
         : '';
+      const warmupBadge = (a.is_warming_up && !a.blocked && !a.shadowban_suspected)
+        ? `<span class="badge" style="background:rgba(96,165,250,.15);color:#93c5fd;border-color:rgba(96,165,250,.3);font-size:10.5px" title="Conta nova em aquecimento — auto-loop limita a 1 post a cada 24h. Vira veterana após ${24}h da 1ª postagem."><i data-lucide="thermometer-sun" style="width:11px;height:11px"></i> AQUECENDO${a.hours_since_first_post !== null ? ` (${a.hours_since_first_post.toFixed(0)}h/24h)` : ''}</span>`
+        : '';
       const clearBtn = a.blocked
         ? `<button class="btn btn-subtle btn-sm" onclick="onClearBlock('${a.username}')" title="Marcar como resolvido (desbloqueie a conta manualmente antes)" style="color: #6ee7b7">
             <i data-lucide="check-circle-2" class="icon"></i> Resolvi
@@ -502,6 +525,7 @@ elMSoYMQakO</pre>
             ${blockedBadge}
             ${shadowBadge}
             ${healthBadge}
+            ${warmupBadge}
             ${a.has_totp
               ? '<span class="badge badge-success" title="2FA cadastrado"><i data-lucide="shield-check" style="width:11px;height:11px"></i> 2FA</span>'
               : '<span class="badge badge-neutral" title="Sem chave 2FA — se a conta tem 2FA ativo, conectar vai falhar"><i data-lucide="shield-off" style="width:11px;height:11px"></i> sem 2FA</span>'}
@@ -561,6 +585,17 @@ elMSoYMQakO</pre>
         sbBanner.classList.remove('hidden');
       } else {
         sbBanner.classList.add('hidden');
+      }
+    }
+    // Warming banner
+    const warming = accounts.filter(a => a.is_warming_up && a.active);
+    const wmBanner = document.getElementById('warming-banner');
+    if (wmBanner) {
+      if (warming.length) {
+        document.getElementById('warming-count').textContent = warming.length;
+        wmBanner.classList.remove('hidden');
+      } else {
+        wmBanner.classList.add('hidden');
       }
     }
   }

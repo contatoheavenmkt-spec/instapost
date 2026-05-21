@@ -1022,16 +1022,64 @@ class ScheduleManager:
         targets_sorted = sorted(targets, key=lambda a: a.get("username", ""))
         pool_len = len(pool)
 
+        from datetime import datetime as _dt_warm, timezone as _tz_warm
+        _now_warm = _dt_warm.now(_tz_warm.utc)
+
         for idx, acc in enumerate(targets_sorted):
             posted_count = len(acc.get("posted_media") or [])
             already = {p.get("name") for p in (acc.get("posted_media") or []) if p.get("name")}
             in_flight = pending_per_acc.get(acc["username"], set())
             forbidden = already | in_flight  # vídeos que essa conta NÃO pode receber
 
+            # ===== MODO AQUECIMENTO (conta nova) =====
+            # Conta sem posted_media OU com 1ª atividade < N horas é tratada como nova.
+            # Default: máximo 1 post / 24h pra ela. Resto da config é ignorado.
+            is_new_acc = False
+            try:
+                first_post_iso = None
+                posted_media = acc.get("posted_media") or []
+                if posted_media:
+                    first_post_iso = min(p.get("posted_at", "") for p in posted_media if p.get("posted_at"))
+                if not first_post_iso:
+                    # Sem histórico = MUITO nova
+                    is_new_acc = True
+                else:
+                    try:
+                        first_dt = _dt_warm.fromisoformat(first_post_iso)
+                        if first_dt.tzinfo is None:
+                            first_dt = first_dt.astimezone()
+                        hours_active = (_now_warm.astimezone(first_dt.tzinfo) - first_dt).total_seconds() / 3600.0
+                        if hours_active < new_account_threshold_hours:
+                            is_new_acc = True
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # Aplica restrições de aquecimento
+            effective_max_per_acc = max_per_account
+            if is_new_acc:
+                effective_max_per_acc = 1  # conta nova só ganha 1 post por rodada
+                # Checa última atividade — se postou nas últimas N horas, PULA essa rodada
+                if posted_media:
+                    try:
+                        last_post_iso = max(p.get("posted_at", "") for p in posted_media if p.get("posted_at"))
+                        last_dt = _dt_warm.fromisoformat(last_post_iso)
+                        if last_dt.tzinfo is None:
+                            last_dt = last_dt.astimezone()
+                        hours_since = (_now_warm.astimezone(last_dt.tzinfo) - last_dt).total_seconds() / 3600.0
+                        if hours_since < new_account_interval_hours - 0.05:
+                            # Conta nova ainda em cooldown da última postagem — pula
+                            print(f"[diversify] @{acc['username']} em AQUECIMENTO ({hours_since:.1f}h/{new_account_interval_hours}h desde último post) — skip")
+                            continue
+                    except Exception:
+                        pass
+                print(f"[diversify] @{acc['username']} em AQUECIMENTO (conta < {new_account_threshold_hours}h) — limitado a 1 post nessa rodada")
+
             # Offset rotacional inicial (acc-específico)
             start_offset = (posted_count + idx) % max(1, pool_len)
 
-            for slot in range(max(1, min(20, max_per_account))):
+            for slot in range(max(1, min(20, effective_max_per_acc))):
                 # Procura no pool a partir do offset, em ordem circular
                 chosen = None
                 for step in range(pool_len):
