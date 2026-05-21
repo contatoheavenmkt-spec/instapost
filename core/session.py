@@ -48,6 +48,18 @@ def get_client(
     """
     cl = Client()
     cl.delay_range = [2, 5]
+
+    # Device fingerprint determinístico por conta: cada @ aparece como
+    # um celular Android diferente (modelo, versão, IDs). Reduz cluster
+    # detection do Instagram.
+    try:
+        from core.devices import apply_device_to_client
+        device_info = apply_device_to_client(cl, username)
+        if device_info:
+            print(f"[{username}] 📱 device: {device_info['manufacturer']} {device_info['model']} (Android {device_info['android_release']})")
+    except Exception as e:
+        print(f"[{username}] ⚠️ device fingerprint falhou: {e} — usando default do instagrapi")
+
     if proxy:
         cl.set_proxy(proxy)
     if challenge_handler:
@@ -105,6 +117,12 @@ def get_client(
     try:
         cl = Client()
         cl.delay_range = [2, 5]
+        # Re-aplica device fingerprint no Client novo (fresh login)
+        try:
+            from core.devices import apply_device_to_client
+            apply_device_to_client(cl, username)
+        except Exception:
+            pass
         if proxy:
             cl.set_proxy(proxy)
 
