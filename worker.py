@@ -650,9 +650,144 @@ def _find_chrome_path() -> Optional[str]:
     return None
 
 
+def _find_session_file(username: str) -> Optional[Path]:
+    """Procura o session JSON do instagrapi em workspaces/<ws>/sessions/<user>.json.
+    Worker pode rodar em qualquer workspace — escaneamos todos."""
+    # DATA_DIR é a raiz dos dados (idêntico ao core.paths.DATA_DIR mas resolvemos
+    # aqui pra não depender de import lazy)
+    project_root = Path(__file__).resolve().parent
+    data_dir = Path(os.environ.get("DATA_DIR", str(project_root)))
+    ws_root = data_dir / "workspaces"
+    if not ws_root.exists():
+        # Fallback: sessions na raiz (estilo pré-workspace)
+        legacy = data_dir / "sessions" / f"{username}.json"
+        return legacy if legacy.exists() else None
+    for ws_dir in ws_root.iterdir():
+        if not ws_dir.is_dir():
+            continue
+        candidate = ws_dir / "sessions" / f"{username}.json"
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _extract_cdp_cookies(session_path: Path) -> list[dict]:
+    """Lê o session JSON do instagrapi e devolve cookies no formato CDP
+    (Network.setCookie). Inclui pelo menos sessionid + ds_user_id + mid."""
+    import json as _json
+    try:
+        data = _json.loads(session_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+    auth = data.get("authorization_data") or {}
+    sessionid = auth.get("sessionid")
+    ds_user_id = auth.get("ds_user_id")
+    mid = data.get("mid")
+
+    if not sessionid or not ds_user_id:
+        return []
+
+    # Expira em 1 ano (sessionid do IG dura ~90 dias na prática; vence sozinho antes)
+    expires = int(time.time()) + 365 * 24 * 3600
+    common = {
+        "domain": ".instagram.com",
+        "path": "/",
+        "secure": True,
+        "sameSite": "Lax",
+        "expires": expires,
+    }
+    cookies = [
+        {"name": "sessionid", "value": sessionid, "httpOnly": True, **common},
+        {"name": "ds_user_id", "value": ds_user_id, "httpOnly": False, **common},
+    ]
+    if mid:
+        cookies.append({"name": "mid", "value": mid, "httpOnly": False, **common})
+    # csrftoken: se a session JSON tiver no dict cookies, manda. Senão, IG seta sozinho.
+    extra_cookies = data.get("cookies") or {}
+    for name in ("csrftoken", "ig_did", "rur", "ig_nrcb"):
+        v = extra_cookies.get(name)
+        if v:
+            cookies.append({"name": name, "value": v, "httpOnly": False, **common})
+    return cookies
+
+
+def _get_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _inject_cookies_via_cdp(debug_port: int, cookies: list[dict], target_url: str) -> bool:
+    """Conecta no Chrome via CDP, injeta cookies e navega pra URL. Lib opcional —
+    se websocket-client não tiver instalado, devolve False e Chrome só abre vazio."""
+    try:
+        import websocket  # websocket-client (pip install websocket-client)
+    except ImportError:
+        print("[local-api] ⚠️ websocket-client não instalado — Chrome abre sem cookies. "
+              "Rode: pip install -r worker-requirements.txt")
+        return False
+
+    import json as _json
+    import urllib.request
+
+    # Espera o CDP HTTP endpoint ficar disponível (até 5s)
+    targets_url = f"http://127.0.0.1:{debug_port}/json"
+    targets = None
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(targets_url, timeout=0.5) as r:
+                targets = _json.loads(r.read().decode("utf-8"))
+                if targets:
+                    break
+        except Exception:
+            time.sleep(0.15)
+    if not targets:
+        print(f"[local-api] ⚠️ CDP em 127.0.0.1:{debug_port} não respondeu — Chrome abre sem cookies")
+        return False
+
+    # Pega o 1º target tipo "page" (aba about:blank que abrimos)
+    page_target = next((t for t in targets if t.get("type") == "page"), targets[0])
+    ws_url = page_target.get("webSocketDebuggerUrl")
+    if not ws_url:
+        return False
+
+    try:
+        ws = websocket.create_connection(ws_url, timeout=5)
+    except Exception as e:
+        print(f"[local-api] ⚠️ WS connect falhou: {e}")
+        return False
+
+    try:
+        msg_id = 0
+
+        def send(method, params=None):
+            nonlocal msg_id
+            msg_id += 1
+            payload = {"id": msg_id, "method": method, "params": params or {}}
+            ws.send(_json.dumps(payload))
+            # Drena resposta (não bloqueia muito)
+            try:
+                ws.recv()
+            except Exception:
+                pass
+
+        send("Network.enable")
+        for c in cookies:
+            send("Network.setCookie", c)
+        send("Page.navigate", {"url": target_url})
+        return True
+    finally:
+        try:
+            ws.close()
+        except Exception:
+            pass
+
+
 def _open_chrome_for_account(username: str) -> tuple[bool, str]:
-    """Abre Chrome com profile isolado + UA do device fingerprint da @conta.
-    Retorna (ok, info|erro)."""
+    """Abre Chrome com profile isolado + UA do device fingerprint + sessão Insta
+    pré-injetada (se houver session salva). Retorna (ok, info|erro)."""
     safe = "".join(c for c in username if c.isalnum() or c in "._-")
     if not safe:
         return False, "username inválido"
@@ -670,6 +805,18 @@ def _open_chrome_for_account(username: str) -> tuple[bool, str]:
     profile_dir = Path.home() / "InstaposterProfiles" / safe
     profile_dir.mkdir(parents=True, exist_ok=True)
 
+    # Procura sessão salva pra auto-login. Se não existe, abre Chrome vazio.
+    session_path = _find_session_file(safe)
+    cdp_cookies: list[dict] = []
+    if session_path:
+        cdp_cookies = _extract_cdp_cookies(session_path)
+        if not cdp_cookies:
+            print(f"[local-api] sessão {session_path.name} sem cookies utilizáveis (provavelmente vazia)")
+
+    inject = bool(cdp_cookies)
+    debug_port = _get_free_port() if inject else 0
+    target_url = "https://www.instagram.com/"
+
     args = [
         chrome,
         f"--user-data-dir={profile_dir}",
@@ -678,17 +825,30 @@ def _open_chrome_for_account(username: str) -> tuple[bool, str]:
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-features=Translate",
-        "https://www.instagram.com/",
     ]
+    if inject:
+        # Sobe Chrome em about:blank — injetamos cookies via CDP ANTES de navegar
+        # pro instagram.com, senão a página carrega deslogada e depois faz reload.
+        args += [f"--remote-debugging-port={debug_port}", "about:blank"]
+    else:
+        args.append(target_url)
+
     try:
         creationflags = 0
         if platform.system() == "Windows":
-            # DETACHED: Chrome continua rodando se o worker for fechado
             creationflags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
         subprocess.Popen(args, close_fds=True, creationflags=creationflags)
-        return True, f"{device['manufacturer']} {device['model']}"
     except Exception as e:
         return False, f"Popen falhou: {e}"
+
+    desc = f"{device['manufacturer']} {device['model']}"
+    if inject:
+        injected = _inject_cookies_via_cdp(debug_port, cdp_cookies, target_url)
+        if injected:
+            return True, f"{desc} + auto-login ({len(cdp_cookies)} cookies)"
+        else:
+            return True, f"{desc} (sem auto-login — login manual)"
+    return True, f"{desc} (sem sessão salva — login manual)"
 
 
 class _LocalAPIHandler(BaseHTTPRequestHandler):

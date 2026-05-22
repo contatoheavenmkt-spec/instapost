@@ -2,3 +2,5 @@
 # (sem FastAPI, sem moviepy/pillow etc — só Insta + HTTP)
 instagrapi>=2.0.0
 requests>=2.31.0
+# Pra abrir Chrome já logado (CDP cookie injection no botão 'Smartphone' da UI)
+websocket-client>=1.6.0
