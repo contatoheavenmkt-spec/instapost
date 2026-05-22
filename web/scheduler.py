@@ -136,16 +136,19 @@ class ScheduleManager:
         if not account:
             return []
         out = []
-        for s in self._items:
-            if s.id == ignore_id:
-                continue
-            if s.status not in ("pending", "running"):
-                continue
-            if s.account != account:
-                continue
-            delta = abs((s.scheduled_dt - when).total_seconds())
-            if delta < CONFLICT_WINDOW_SECONDS:
-                out.append(s)
+        # Lock obrigatório: o _loop pode mutar _items enquanto iteramos.
+        # Sem isso, RuntimeError "list changed during iteration" eventualmente.
+        with self._lock:
+            for s in self._items:
+                if s.id == ignore_id:
+                    continue
+                if s.status not in ("pending", "running"):
+                    continue
+                if s.account != account:
+                    continue
+                delta = abs((s.scheduled_dt - when).total_seconds())
+                if delta < CONFLICT_WINDOW_SECONDS:
+                    out.append(s)
         return out
 
     # ---- mutations ----
@@ -718,7 +721,7 @@ class ScheduleManager:
                 and j.operation == "post"
                 and (j.created_by or "").startswith("sync:")
                 and j.status in ("pending", "claimed", "running")
-                for j in rjob_manager._items.values()
+                for j in rjob_manager.snapshot_values()
             )
             if has_active:
                 continue
@@ -1006,7 +1009,7 @@ class ScheduleManager:
         # não processados). Antes, o sistema só olhava posted_media e criava
         # múltiplos jobs do mesmo vídeo enquanto worker não terminava o 1º.
         pending_per_acc: dict[str, set[str]] = {}
-        for j in rjob_manager._items.values():
+        for j in rjob_manager.snapshot_values():
             if (
                 j.operation == "post"
                 and j.status in ("pending", "claimed", "running")

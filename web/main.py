@@ -117,21 +117,58 @@ def _ctx(request: Request, **extra) -> dict:
 
 VALID_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 
+# Lock global pro accounts.json. RLock pra suportar nested load/save dentro de
+# um mesmo bloco transactional. Sem isso, 2 requests (UI + worker_result + scheduler)
+# faziam read-modify-write concorrente e a 2ª escrita sobrescrevia a 1ª silenciosamente.
+import threading as _t
+_accounts_lock = _t.RLock()
+
 
 def load_accounts() -> list[dict]:
-    if not ACCOUNTS_FILE.exists():
-        return []
-    try:
-        return json.loads(ACCOUNTS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return []
+    with _accounts_lock:
+        if not ACCOUNTS_FILE.exists():
+            return []
+        try:
+            return json.loads(ACCOUNTS_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return []
 
 
 def save_accounts(accounts: list[dict]) -> None:
-    ACCOUNTS_FILE.write_text(
-        json.dumps(accounts, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    """Atomic write: escreve em .tmp e dá rename. Evita corrupção parcial se o
+    processo cair no meio do write."""
+    with _accounts_lock:
+        path = Path(str(ACCOUNTS_FILE))
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps(accounts, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        tmp.replace(path)
+
+
+from contextlib import contextmanager as _contextmanager
+
+@_contextmanager
+def accounts_transaction():
+    """Read-modify-write atômico do accounts.json.
+
+    Use SEMPRE que precisar modificar accounts dentro de um endpoint ou thread,
+    em vez de chamar load_accounts() + ... + save_accounts() separadamente.
+
+    Exemplo:
+        with accounts_transaction() as accs:
+            for a in accs:
+                if a["username"] == target:
+                    a["foo"] = "bar"
+                    break
+
+    O save é automático no exit. Lock segura outros writers durante o bloco.
+    """
+    with _accounts_lock:
+        accs = load_accounts()
+        yield accs
+        save_accounts(accs)
 
 
 def session_status(username: str) -> str:
@@ -2196,15 +2233,14 @@ def api_worker_job_result(job_id: str, payload: WorkerResultIn, request: Request
         pattern = _is_block_error(payload.error_msg)
         if pattern:
             try:
-                accounts = load_accounts()
-                for a in accounts:
-                    if a["username"] == job.account_username:
-                        a["blocked"] = True
-                        a["blocked_at"] = scheduler_mod.now_local().isoformat(timespec="seconds")
-                        a["blocked_reason"] = f"{pattern} — {payload.error_msg[:200]}"
-                        save_accounts(accounts)
-                        print(f"[block] @{a['username']} marcada como bloqueada ({pattern})")
-                        break
+                with accounts_transaction() as accounts:
+                    for a in accounts:
+                        if a["username"] == job.account_username:
+                            a["blocked"] = True
+                            a["blocked_at"] = scheduler_mod.now_local().isoformat(timespec="seconds")
+                            a["blocked_reason"] = f"{pattern} — {payload.error_msg[:200]}"
+                            print(f"[block] @{a['username']} marcada como bloqueada ({pattern})")
+                            break
             except Exception as e:
                 print(f"[worker_result] erro marcando bloqueio: {e}")
 
@@ -2213,7 +2249,7 @@ def api_worker_job_result(job_id: str, payload: WorkerResultIn, request: Request
     # 3) post: registra mídia em posted_media (pra dedup + sync)
     if payload.success and job:
         try:
-            accounts = load_accounts()
+          with accounts_transaction() as accounts:
             for a in accounts:
                 if a["username"] == job.account_username:
                     a["connected_via_worker_id"] = w.id
@@ -2277,8 +2313,8 @@ def api_worker_job_result(job_id: str, payload: WorkerResultIn, request: Request
                         # Se veio do sync_loop, atualiza marcador
                         if (job.created_by or "").startswith("sync:"):
                             a["sync_last_post_at"] = scheduler_mod.now_local().isoformat(timespec="seconds")
-                    save_accounts(accounts)
                     break
+            # save automático no exit do accounts_transaction context manager
         except Exception as e:
             print(f"[worker_result] erro side-effects: {e}")
 

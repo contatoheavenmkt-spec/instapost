@@ -128,6 +128,17 @@ def variant_for_account(original: Path, username: str, timeout: int = 120) -> Pa
     p = _params_for(username, original.name)
     tmp = target.with_suffix(target.suffix + ".tmp")
 
+    # Mapeia extensão -> formato ffmpeg explícito.
+    # CRÍTICO: o tmp termina em ".mp4.tmp" / ".jpg.tmp" etc — ffmpeg infere o
+    # muxer pela última extensão, vê ".tmp", não conhece, e falha com
+    # "Error initializing the muxer ... Invalid argument". Sempre forçamos -f.
+    fmt_map = {
+        ".mp4": "mp4",
+        ".jpg": "image2", ".jpeg": "image2",
+        ".png": "image2", ".webp": "image2",
+    }
+    output_format = fmt_map.get(ext, "mp4" if ext in VIDEO_EXTS else "image2")
+
     try:
         if ext in VIDEO_EXTS:
             cmd = [
@@ -140,6 +151,7 @@ def variant_for_account(original: Path, username: str, timeout: int = 120) -> Pa
                 "-c:a", "aac", "-b:a", "128k",
                 "-af", f"volume={p['audio_gain']}dB",
                 "-movflags", "+faststart",
+                "-f", output_format,
                 str(tmp),
             ]
         else:  # foto
@@ -149,6 +161,7 @@ def variant_for_account(original: Path, username: str, timeout: int = 120) -> Pa
                 "-map_metadata", "-1",
                 "-vf", _ffmpeg_vf_for(p),
                 "-q:v", "2",
+                "-f", output_format,
                 str(tmp),
             ]
         subprocess.run(cmd, timeout=timeout, check=True)

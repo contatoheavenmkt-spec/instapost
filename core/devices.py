@@ -261,8 +261,16 @@ def apply_device_to_client(cl, username: str) -> Optional[Dict]:
         cl.set_user_agent(device["user_agent"])
         cl.set_locale(device["locale"])
         cl.set_timezone_offset(-3 * 60 * 60)  # BRT (UTC-3) em segundos
-        # IDs únicos por conta (não compartilhados entre Clients)
-        cl.set_device_id(device["device_id"], device["uuid"], device["phone_id"])
+        # IDs únicos por conta (não compartilhados entre Clients).
+        # instagrapi não tem set_device_id — usa set_uuids({...}) que aceita
+        # phone_id, uuid, advertising_id, android_device_id, etc.
+        # device["device_id"] já vem no formato "android-XXX" (id do device Android).
+        cl.set_uuids({
+            "android_device_id": device["device_id"],
+            "uuid": device["uuid"],
+            "phone_id": device["phone_id"],
+            "advertising_id": device["advertising_id"],
+        })
         return device
     except Exception as e:
         print(f"[device] erro aplicando device pra @{username}: {e}")

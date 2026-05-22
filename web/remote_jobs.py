@@ -125,6 +125,13 @@ class RemoteJobManager:
         self._lock = threading.Lock()
         self._load()
 
+    def snapshot_values(self) -> list:
+        """Cópia thread-safe dos jobs pra iteração externa sem lock.
+        Use em vez de iterar `_items.values()` direto, senão RuntimeError
+        quando outra thread muta o dict no meio."""
+        with self._lock:
+            return list(self._items.values())
+
     def _load(self):
         if not REMOTE_JOBS_FILE.exists():
             return
