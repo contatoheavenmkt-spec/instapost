@@ -617,6 +617,40 @@ class ProxyIn(BaseModel):
     proxy: Optional[str] = None
 
 
+def _normalize_proxy(raw: str) -> str:
+    """Converte formatos comuns de proxy pra URL padrão que requests/instagrapi entendem.
+
+    Aceita:
+      - http://user:pass@host:port           (já no formato URL)
+      - socks5://user:pass@host:port         (idem)
+      - host:port:user:pass                  (DataImpulse, Bright Data, etc)
+      - user:pass@host:port                  (sem scheme — vira http://)
+      - host:port                            (sem auth — vira http://)
+
+    Retorna string vazia se input vazio.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    # Já é URL completa
+    if "://" in raw:
+        return raw
+    # user:pass@host:port (sem scheme)
+    if "@" in raw:
+        return f"http://{raw}"
+    # Conta colons pra distinguir
+    parts = raw.split(":")
+    if len(parts) == 4:
+        # host:port:user:pass (formato DataImpulse/Bright Data/etc)
+        host, port, user, password = parts
+        return f"http://{user}:{password}@{host}:{port}"
+    if len(parts) == 2:
+        # host:port (sem auth)
+        return f"http://{raw}"
+    # Não conseguimos detectar — devolve como veio, validação subsequente alerta
+    return raw
+
+
 @app.post("/api/accounts/{username}/test-proxy")
 def api_test_proxy(username: str):
     """Testa o proxy salvo pra essa conta:
@@ -687,24 +721,24 @@ def api_test_proxy(username: str):
 def api_update_proxy(username: str, payload: ProxyIn):
     """Atualiza proxy de uma conta. String vazia ou null remove o proxy.
 
-    Formatos aceitos pelo instagrapi/requests:
-      socks5://user:pass@host:port
-      socks5://host:port
-      http://user:pass@host:port
-      http://host:port
+    Auto-converte formatos comuns:
+      socks5://user:pass@host:port  (já correto)
+      http://user:pass@host:port    (já correto)
+      host:port:user:pass           (DataImpulse, Bright Data) → vira http://user:pass@host:port
+      user:pass@host:port           (sem scheme)              → vira http://
+      host:port                     (sem auth)                → vira http://
     """
-    new_proxy = (payload.proxy or "").strip() or None
-    # Validação básica do formato (não bloqueia, só rejeita lixo óbvio)
+    raw = (payload.proxy or "").strip()
+    new_proxy = _normalize_proxy(raw) or None
+    # Validação final (após conversão)
     if new_proxy:
         if not re.match(r"^(socks5h?|socks4|http|https)://", new_proxy):
-            raise HTTPException(400, "Proxy precisa começar com socks5:// , socks5h:// , http:// ou https://")
+            raise HTTPException(400, f"Não consegui detectar formato do proxy. Recebi: '{raw}'. Use http://user:pass@host:porta ou socks5://...")
         if "@" in new_proxy:
-            # Tem auth: tem que ter host:port depois
             after_at = new_proxy.rsplit("@", 1)[1]
             if ":" not in after_at:
                 raise HTTPException(400, "Faltou :porta no final do proxy")
         else:
-            # Sem auth: scheme://host:port
             host_part = new_proxy.split("://", 1)[1]
             if ":" not in host_part:
                 raise HTTPException(400, "Faltou :porta no final do proxy")
@@ -712,8 +746,29 @@ def api_update_proxy(username: str, payload: ProxyIn):
         for a in accounts:
             if a["username"] == username:
                 a["proxy"] = new_proxy
-                return {"ok": True, "proxy": new_proxy}
+                return {"ok": True, "proxy": new_proxy, "normalized_from": raw if new_proxy != raw else None}
     raise HTTPException(404, "Conta não encontrada")
+
+
+@app.post("/api/accounts/normalize-proxies")
+def api_normalize_all_proxies():
+    """Bulk fix: normaliza TODOS os proxies já salvos pra formato URL.
+    Útil quando você importou várias contas com proxy no formato
+    'host:port:user:pass' (DataImpulse) — converte tudo de uma vez."""
+    fixed = []
+    skipped = 0
+    with accounts_transaction() as accounts:
+        for a in accounts:
+            raw = (a.get("proxy") or "").strip()
+            if not raw:
+                continue
+            normalized = _normalize_proxy(raw)
+            if normalized and normalized != raw:
+                a["proxy"] = normalized
+                fixed.append({"username": a["username"], "from": raw, "to": normalized})
+            else:
+                skipped += 1
+    return {"ok": True, "fixed_count": len(fixed), "skipped_count": skipped, "fixed": fixed}
 
 
 @app.get("/api/accounts/{username}/totp-code")

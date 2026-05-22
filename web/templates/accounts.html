@@ -838,13 +838,14 @@ elMSoYMQakO</pre>
     const acc = accounts.find(a => a.username === username);
     const currentProxy = (acc && acc.proxy) || '';
     const helpText = `Proxy de @${username}\n\n` +
-      `Formatos aceitos:\n` +
+      `Formatos aceitos (sistema converte automaticamente):\n` +
       `  socks5://user:pass@host:porta\n` +
-      `  socks5://host:porta\n` +
       `  http://user:pass@host:porta\n` +
-      `  http://host:porta\n\n` +
+      `  user:pass@host:porta\n` +
+      `  host:porta:user:pass    (DataImpulse, Bright Data)\n` +
+      `  host:porta              (sem auth)\n\n` +
       `Deixe vazio pra REMOVER o proxy.\n` +
-      (currentProxy ? `Atual: ${currentProxy}\n\n(Pra TESTAR o proxy atual, clique CANCELAR e use o botão de teste)` : 'Sem proxy configurado.');
+      (currentProxy ? `Atual: ${currentProxy}\n\n(Pra TESTAR o proxy atual, clique CANCELAR e use o botão wifi)` : 'Sem proxy configurado.');
     const value = prompt(helpText, currentProxy);
     if (value === null) return;  // cancelou
     try {
