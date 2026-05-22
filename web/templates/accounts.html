@@ -1052,20 +1052,38 @@ elMSoYMQakO</pre>
     await load();
   }
 
-  function onOpenBrowser(username) {
-    // Detecta SO do user via navigator.userAgent
+  async function onOpenBrowser(username) {
+    // 1ª tentativa: worker local roda HTTP em 127.0.0.1:17777 e abre o Chrome direto.
+    // Se o worker tá rodando, esse fetch resolve em < 1s e o Chrome abre na hora.
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 2500);
+      const r = await fetch(`http://localhost:17777/open-browser?username=${encodeURIComponent(username)}`, {
+        method: 'POST',
+        mode: 'cors',
+        signal: ctrl.signal,
+      });
+      clearTimeout(t);
+      if (r.ok) {
+        const data = await r.json().catch(() => ({}));
+        const devStr = data && data.device ? ` (${data.device})` : '';
+        toast(`📱 Abrindo Chrome pra @${username}${devStr}…`, 'success');
+        return;
+      }
+    } catch (_) {
+      // Worker offline / CORS / DNS — cai pro fallback de download
+    }
+    // Fallback: baixa o .bat/.sh — usuário executa manualmente
     const isWindows = navigator.userAgent.includes('Windows');
     const ext = isWindows ? 'bat' : 'sh';
     const url = `/api/accounts/${encodeURIComponent(username)}/launcher.${ext}`;
-    // Inicia download — user executa pra abrir Chrome com profile isolado + UA mobile
     const a = document.createElement('a');
     a.href = url;
     a.download = `open_${username}.${ext}`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    const platform = isWindows ? 'Execute o arquivo .bat baixado' : 'Execute: chmod +x open_*.sh && ./open_*.sh';
-    toast(`📱 Launcher de @${username} baixado. ${platform}`, 'success');
+    toast(`📱 Worker offline — launcher .${ext} baixado. Execute o arquivo pra abrir o Chrome.`, 'info');
   }
 
   async function onShowTotp(username) {

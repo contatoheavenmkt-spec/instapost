@@ -23,11 +23,14 @@ import os
 import platform
 import random
 import socket
+import subprocess
 import sys
 import threading
 import time
 import traceback
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from typing import Optional
 
 import requests
 
@@ -610,6 +613,151 @@ def execute_job(job: dict):
             pass
 
 
+# ----------- Local API: HTTP server pra UI abrir Chrome direto -----------
+# A UI (instapost.shop) bate em http://127.0.0.1:17777/open-browser?username=X
+# pra abrir Chrome com profile isolado + UA mobile do device fingerprint da conta.
+# Sem isso, o botão "Smartphone" da UI baixa um .bat que o usuário precisa executar.
+
+LOCAL_API_PORT = 17777
+
+
+def _find_chrome_path() -> Optional[str]:
+    """Acha o executável do Chrome no sistema."""
+    sys_name = platform.system()
+    if sys_name == "Windows":
+        candidates = [
+            os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
+            os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
+            os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"),
+        ]
+    elif sys_name == "Darwin":
+        candidates = ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
+    else:
+        candidates = [
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+        ]
+    for c in candidates:
+        if c and os.path.exists(c):
+            return c
+    from shutil import which
+    for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome"):
+        p = which(name)
+        if p:
+            return p
+    return None
+
+
+def _open_chrome_for_account(username: str) -> tuple[bool, str]:
+    """Abre Chrome com profile isolado + UA do device fingerprint da @conta.
+    Retorna (ok, info|erro)."""
+    safe = "".join(c for c in username if c.isalnum() or c in "._-")
+    if not safe:
+        return False, "username inválido"
+
+    chrome = _find_chrome_path()
+    if not chrome:
+        return False, "Chrome não encontrado nesse PC"
+
+    try:
+        from core.devices import device_for_account
+        device = device_for_account(safe)
+    except Exception as e:
+        return False, f"erro carregando device fingerprint: {e}"
+
+    profile_dir = Path.home() / "InstaposterProfiles" / safe
+    profile_dir.mkdir(parents=True, exist_ok=True)
+
+    args = [
+        chrome,
+        f"--user-data-dir={profile_dir}",
+        f"--user-agent={device['user_agent']}",
+        "--window-size=412,870",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-features=Translate",
+        "https://www.instagram.com/",
+    ]
+    try:
+        creationflags = 0
+        if platform.system() == "Windows":
+            # DETACHED: Chrome continua rodando se o worker for fechado
+            creationflags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        subprocess.Popen(args, close_fds=True, creationflags=creationflags)
+        return True, f"{device['manufacturer']} {device['model']}"
+    except Exception as e:
+        return False, f"Popen falhou: {e}"
+
+
+class _LocalAPIHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        # Silencia o log default do http.server (polui o terminal do worker)
+        pass
+
+    def _send(self, status: int, body: bytes = b"", content_type: str = "application/json"):
+        self.send_response(status)
+        # CORS liberal: o server só escuta 127.0.0.1 e só faz UMA ação (abrir Chrome).
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Requested-With")
+        # Private Network Access: Chrome novos exigem isso pra HTTPS chamar HTTP localhost
+        self.send_header("Access-Control-Allow-Private-Network", "true")
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if body:
+            self.wfile.write(body)
+
+    def do_OPTIONS(self):
+        self._send(204)
+
+    def do_GET(self):
+        from urllib.parse import urlparse
+        import json as _json
+        path = urlparse(self.path).path
+        if path == "/health":
+            body = _json.dumps({"ok": True, "worker_name": WORKER_NAME}).encode("utf-8")
+            self._send(200, body)
+        else:
+            self._send(404, b'{"error":"not found"}')
+
+    def do_POST(self):
+        from urllib.parse import urlparse, parse_qs
+        import json as _json
+        parsed = urlparse(self.path)
+        if parsed.path != "/open-browser":
+            self._send(404, b'{"error":"not found"}')
+            return
+        qs = parse_qs(parsed.query)
+        username = (qs.get("username") or [""])[0].strip()
+        if not username:
+            self._send(400, b'{"error":"username obrigatorio"}')
+            return
+        ok, info = _open_chrome_for_account(username)
+        if ok:
+            body = _json.dumps({"ok": True, "device": info}).encode("utf-8")
+            self._send(200, body)
+            print(f"[local-api] 📱 abrindo Chrome pra @{username} ({info})")
+        else:
+            body = _json.dumps({"ok": False, "error": info}).encode("utf-8")
+            self._send(500, body)
+            print(f"[local-api] ⚠️ falha abrindo @{username}: {info}")
+
+
+def _local_api_loop():
+    """HTTP server local na porta 17777 pra UI abrir Chrome direto (sem download .bat)."""
+    try:
+        server = HTTPServer(("127.0.0.1", LOCAL_API_PORT), _LocalAPIHandler)
+        print(f"[local-api] escutando em http://127.0.0.1:{LOCAL_API_PORT} (botão 'Smartphone' da UI)")
+        server.serve_forever()
+    except OSError as e:
+        print(f"[local-api] ⚠️ porta {LOCAL_API_PORT} ocupada ({e}) — UI vai cair pro download .bat")
+    except Exception as e:
+        print(f"[local-api] crash: {e}")
+
+
 # ----------- Loop principal -----------
 
 def _periodic_heartbeat():
@@ -751,6 +899,10 @@ def main():
     # Wrapper-forever reinicia automático em 10s.
     wd_thread = threading.Thread(target=_watchdog_loop, daemon=True, name="watchdog")
     wd_thread.start()
+
+    # API local na 127.0.0.1:17777 — UI da web chama isso pra abrir Chrome direto.
+    api_thread = threading.Thread(target=_local_api_loop, daemon=True, name="local-api")
+    api_thread.start()
 
     # N threads de execução de jobs
     workers: list[threading.Thread] = []
