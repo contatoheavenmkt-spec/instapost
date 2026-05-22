@@ -731,10 +731,11 @@ def _inject_cookies_via_cdp(debug_port: int, cookies: list[dict], target_url: st
     import json as _json
     import urllib.request
 
-    # Espera o CDP HTTP endpoint ficar disponível (até 5s)
+    # Espera o CDP HTTP endpoint ficar disponível (até 10s — Chrome pode demorar
+    # pra subir em PCs lentos ou quando profile tem extensions/cookies grandes)
     targets_url = f"http://127.0.0.1:{debug_port}/json"
     targets = None
-    deadline = time.time() + 5.0
+    deadline = time.time() + 10.0
     while time.time() < deadline:
         try:
             with urllib.request.urlopen(targets_url, timeout=0.5) as r:
@@ -785,6 +786,32 @@ def _inject_cookies_via_cdp(debug_port: int, cookies: list[dict], target_url: st
             pass
 
 
+def _kill_chrome_for_profile(profile_dir: Path) -> None:
+    """Mata chrome.exe que está usando esse profile dir. Necessário porque se já
+    tem Chrome aberto nessa mesma --user-data-dir, o novo launch só vira IPC
+    client (ignora --remote-debugging-port). Sem isso, auto-login não funciona
+    na 2ª+ vez que abre."""
+    if platform.system() != "Windows":
+        return
+    try:
+        # Match: chrome.exe com o nome da profile no cmdline. Username é sanitizado
+        # (alnum + ._-) então é seguro pra string match.
+        marker = profile_dir.name
+        ps_cmd = (
+            f"Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
+            f"Where-Object {{ $_.CommandLine -like '*InstaposterProfiles*{marker}*' }} | "
+            f"ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}"
+        )
+        subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command", ps_cmd],
+            capture_output=True, timeout=5,
+        )
+        # Espera Chrome liberar SingletonLock do profile (~1s na prática)
+        time.sleep(1.2)
+    except Exception as e:
+        print(f"[local-api] kill Chrome anterior falhou (ignorando): {e}")
+
+
 def _open_chrome_for_account(username: str) -> tuple[bool, str]:
     """Abre Chrome com profile isolado + UA do device fingerprint + sessão Insta
     pré-injetada (se houver session salva). Retorna (ok, info|erro)."""
@@ -804,6 +831,9 @@ def _open_chrome_for_account(username: str) -> tuple[bool, str]:
 
     profile_dir = Path.home() / "InstaposterProfiles" / safe
     profile_dir.mkdir(parents=True, exist_ok=True)
+
+    # Mata Chrome anterior que possa estar usando esse profile (senão atacha)
+    _kill_chrome_for_profile(profile_dir)
 
     # Procura sessão salva pra auto-login. Se não existe, abre Chrome vazio.
     session_path = _find_session_file(safe)
@@ -829,7 +859,13 @@ def _open_chrome_for_account(username: str) -> tuple[bool, str]:
     if inject:
         # Sobe Chrome em about:blank — injetamos cookies via CDP ANTES de navegar
         # pro instagram.com, senão a página carrega deslogada e depois faz reload.
-        args += [f"--remote-debugging-port={debug_port}", "about:blank"]
+        # --remote-allow-origins=* é OBRIGATÓRIO em Chrome 111+ pra aceitar CDP
+        # via WebSocket (senão handshake retorna 403 Forbidden).
+        args += [
+            f"--remote-debugging-port={debug_port}",
+            "--remote-allow-origins=*",
+            "about:blank",
+        ]
     else:
         args.append(target_url)
 
