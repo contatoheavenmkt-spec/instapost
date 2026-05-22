@@ -454,9 +454,12 @@ def _hours_since_first_post(a: dict) -> Optional[float]:
 
 def _is_account_warming_up(a: dict) -> bool:
     """Conta está em aquecimento (modo conservador) se:
+    - skip_warmup NÃO está ativo (override manual do usuário) E
     - Nunca postou (posted_media vazio) OU
     - 1ª postagem foi há menos de NEW_ACCOUNT_THRESHOLD_HOURS horas.
     """
+    if a.get("skip_warmup", False):
+        return False  # usuário marcou: pular aquecimento, postar normal já
     hours = _hours_since_first_post(a)
     if hours is None:
         return True  # nunca postou = muito nova
@@ -492,6 +495,7 @@ def _account_view(a: dict) -> dict:
         # Aquecimento (conta nova) — calculado a partir de posted_media
         "is_warming_up": _is_account_warming_up(a),
         "hours_since_first_post": _hours_since_first_post(a),
+        "skip_warmup": bool(a.get("skip_warmup", False)),
         # Bloqueio detectado
         "blocked": bool(a.get("blocked", False)),
         "blocked_at": a.get("blocked_at"),
@@ -735,6 +739,19 @@ def api_toggle_account(username: str):
             a["active"] = not a.get("active", True)
             save_accounts(accounts)
             return {"ok": True, "active": a["active"]}
+    raise HTTPException(404, "Conta não encontrada")
+
+
+@app.post("/api/accounts/{username}/toggle-warmup")
+def api_toggle_warmup(username: str):
+    """Liga/desliga o pular-aquecimento. Se skip_warmup=True, a conta
+    entra direto no pool de diversificar sem esperar 24h da 1ª postagem."""
+    accounts = load_accounts()
+    for a in accounts:
+        if a["username"] == username:
+            a["skip_warmup"] = not a.get("skip_warmup", False)
+            save_accounts(accounts)
+            return {"ok": True, "skip_warmup": a["skip_warmup"]}
     raise HTTPException(404, "Conta não encontrada")
 
 

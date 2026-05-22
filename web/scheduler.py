@@ -1034,27 +1034,26 @@ class ScheduleManager:
             # ===== MODO AQUECIMENTO (conta nova) =====
             # Conta sem posted_media OU com 1ª atividade < N horas é tratada como nova.
             # Default: máximo 1 post / 24h pra ela. Resto da config é ignorado.
+            # Override: se acc.skip_warmup=True, pula direto pro modo veterana.
             is_new_acc = False
-            try:
-                first_post_iso = None
-                posted_media = acc.get("posted_media") or []
-                if posted_media:
-                    first_post_iso = min(p.get("posted_at", "") for p in posted_media if p.get("posted_at"))
-                if not first_post_iso:
-                    # Sem histórico = MUITO nova
-                    is_new_acc = True
-                else:
-                    try:
+            posted_media = acc.get("posted_media") or []
+            skip_warm = bool(acc.get("skip_warmup", False))
+            if not skip_warm:
+                try:
+                    first_post_iso = None
+                    if posted_media:
+                        first_post_iso = min(p.get("posted_at", "") for p in posted_media if p.get("posted_at"))
+                    if not first_post_iso:
+                        is_new_acc = True  # sem histórico = MUITO nova
+                    else:
                         first_dt = _dt_warm.fromisoformat(first_post_iso)
                         if first_dt.tzinfo is None:
                             first_dt = first_dt.astimezone()
                         hours_active = (_now_warm.astimezone(first_dt.tzinfo) - first_dt).total_seconds() / 3600.0
                         if hours_active < new_account_threshold_hours:
                             is_new_acc = True
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+                except Exception:
+                    pass
 
             # Aplica restrições de aquecimento
             effective_max_per_acc = max_per_account

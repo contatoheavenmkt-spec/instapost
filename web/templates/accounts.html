@@ -504,9 +504,16 @@ elMSoYMQakO</pre>
       const healthBadge = (a.health_score < 30 && !a.shadowban_suspected)
         ? `<span class="badge badge-warning" title="Health score baixo (${a.health_score}/100) - views recentes muito abaixo do baseline"><i data-lucide="activity" style="width:11px;height:11px"></i> ${a.health_score}</span>`
         : '';
-      const warmupBadge = (a.is_warming_up && !a.blocked && !a.shadowban_suspected)
-        ? `<span class="badge" style="background:rgba(96,165,250,.15);color:#93c5fd;border-color:rgba(96,165,250,.3);font-size:10.5px" title="Conta nova em aquecimento — auto-loop limita a 1 post a cada 24h. Vira veterana após ${24}h da 1ª postagem."><i data-lucide="thermometer-sun" style="width:11px;height:11px"></i> AQUECENDO${a.hours_since_first_post !== null ? ` (${a.hours_since_first_post.toFixed(0)}h/24h)` : ''}</span>`
-        : '';
+      // Conta que está aquecendo de verdade (nova + sem override)
+      const warmupActive = (a.is_warming_up && !a.blocked && !a.shadowban_suspected);
+      // Conta que SERIA aquecida mas usuário desligou (skip_warmup=true e <24h da 1ª postagem)
+      const warmupSkipped = (a.skip_warmup && !a.blocked && !a.shadowban_suspected &&
+                              (a.hours_since_first_post === null || a.hours_since_first_post < 24));
+      const warmupBadge = warmupActive
+        ? `<span class="badge" style="background:rgba(96,165,250,.15);color:#93c5fd;border-color:rgba(96,165,250,.3);font-size:10.5px;cursor:pointer" onclick="onToggleWarmup('${a.username}', true)" title="Aquecimento ATIVO — auto-loop limita a 1 post a cada 24h. Clique pra DESLIGAR e mandar a conta pro pool de diversificar."><i data-lucide="thermometer-sun" style="width:11px;height:11px"></i> AQUECENDO${a.hours_since_first_post !== null ? ` (${a.hours_since_first_post.toFixed(0)}h/24h)` : ''}</span>`
+        : (warmupSkipped
+          ? `<span class="badge" style="background:rgba(251,146,60,.15);color:#fdba74;border-color:rgba(251,146,60,.3);font-size:10.5px;cursor:pointer" onclick="onToggleWarmup('${a.username}', false)" title="Aquecimento DESLIGADO pelo usuário — conta está postando normal já. Clique pra religar aquecimento."><i data-lucide="zap" style="width:11px;height:11px"></i> AQUEC. OFF</span>`
+          : '');
       const clearBtn = a.blocked
         ? `<button class="btn btn-subtle btn-sm" onclick="onClearBlock('${a.username}')" title="Marcar como resolvido (desbloqueie a conta manualmente antes)" style="color: #6ee7b7">
             <i data-lucide="check-circle-2" class="icon"></i> Resolvi
@@ -726,6 +733,21 @@ elMSoYMQakO</pre>
       toast(`@${username} ${r.active ? 'ativada' : 'pausada'}`, 'success');
       await load();
     } catch (e) { toast(e.message, 'error'); await load(); }
+  }
+
+  async function onToggleWarmup(username, currentlyWarming) {
+    // currentlyWarming=true → user quer DESLIGAR aquecimento
+    // currentlyWarming=false → user quer RELIGAR aquecimento
+    const action = currentlyWarming ? 'desligar' : 'religar';
+    const msg = currentlyWarming
+      ? `Desligar aquecimento de @${username}?\n\nA conta vai sair do modo conservador (1 post/24h) e entrar no pool de diversificar normal. Use SÓ se a conta já é morna (postou via outro app, scrollou bastante, tem seguidores).`
+      : `Religar aquecimento de @${username}?\n\nA conta volta pro modo conservador (1 post/24h) até 24h da 1ª postagem.`;
+    if (!confirm(msg)) return;
+    try {
+      const r = await api(`/api/accounts/${username}/toggle-warmup`, { method: 'POST' });
+      toast(`@${username}: aquecimento ${r.skip_warmup ? 'DESLIGADO' : 'RELIGADO'}`, 'success');
+      await load();
+    } catch (e) { toast(e.message, 'error'); }
   }
 
   async function onDelete(username) {
