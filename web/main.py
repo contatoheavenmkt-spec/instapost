@@ -605,12 +605,48 @@ class TotpIn(BaseModel):
 
 @app.post("/api/accounts/{username}/totp")
 def api_update_totp(username: str, payload: TotpIn):
-    accounts = load_accounts()
-    for a in accounts:
-        if a["username"] == username:
-            a["totp_secret"] = (payload.totp_secret or "").strip() or None
-            save_accounts(accounts)
-            return {"ok": True, "has_totp": bool(a["totp_secret"])}
+    with accounts_transaction() as accounts:
+        for a in accounts:
+            if a["username"] == username:
+                a["totp_secret"] = (payload.totp_secret or "").strip() or None
+                return {"ok": True, "has_totp": bool(a["totp_secret"])}
+    raise HTTPException(404, "Conta não encontrada")
+
+
+class ProxyIn(BaseModel):
+    proxy: Optional[str] = None
+
+
+@app.post("/api/accounts/{username}/proxy")
+def api_update_proxy(username: str, payload: ProxyIn):
+    """Atualiza proxy de uma conta. String vazia ou null remove o proxy.
+
+    Formatos aceitos pelo instagrapi/requests:
+      socks5://user:pass@host:port
+      socks5://host:port
+      http://user:pass@host:port
+      http://host:port
+    """
+    new_proxy = (payload.proxy or "").strip() or None
+    # Validação básica do formato (não bloqueia, só rejeita lixo óbvio)
+    if new_proxy:
+        if not re.match(r"^(socks5h?|socks4|http|https)://", new_proxy):
+            raise HTTPException(400, "Proxy precisa começar com socks5:// , socks5h:// , http:// ou https://")
+        if "@" in new_proxy:
+            # Tem auth: tem que ter host:port depois
+            after_at = new_proxy.rsplit("@", 1)[1]
+            if ":" not in after_at:
+                raise HTTPException(400, "Faltou :porta no final do proxy")
+        else:
+            # Sem auth: scheme://host:port
+            host_part = new_proxy.split("://", 1)[1]
+            if ":" not in host_part:
+                raise HTTPException(400, "Faltou :porta no final do proxy")
+    with accounts_transaction() as accounts:
+        for a in accounts:
+            if a["username"] == username:
+                a["proxy"] = new_proxy
+                return {"ok": True, "proxy": new_proxy}
     raise HTTPException(404, "Conta não encontrada")
 
 

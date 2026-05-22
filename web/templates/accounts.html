@@ -536,6 +536,9 @@ elMSoYMQakO</pre>
             ${a.has_totp
               ? '<span class="badge badge-success" title="2FA cadastrado"><i data-lucide="shield-check" style="width:11px;height:11px"></i> 2FA</span>'
               : '<span class="badge badge-neutral" title="Sem chave 2FA — se a conta tem 2FA ativo, conectar vai falhar"><i data-lucide="shield-off" style="width:11px;height:11px"></i> sem 2FA</span>'}
+            ${a.proxy
+              ? `<span class="badge" style="background:rgba(168,85,247,.15);color:#c4b5fd;border-color:rgba(168,85,247,.3);font-size:10.5px;cursor:pointer" onclick="onEditProxy('${a.username}', ${JSON.stringify(a.proxy)})" title="Proxy ativo: ${escapeHtml(a.proxy)}. Clique pra editar."><i data-lucide="globe" style="width:11px;height:11px"></i> PROXY</span>`
+              : ''}
           </div>
         </td>
         <td>${statusDot(a.active, a.session, a.connected_via_worker_name)}</td>
@@ -559,6 +562,9 @@ elMSoYMQakO</pre>
             </button>
             <button class="btn btn-ghost btn-sm" onclick="onEditTotp('${a.username}', ${a.has_totp})" title="${a.has_totp ? 'Atualizar' : 'Adicionar'} chave 2FA">
               <i data-lucide="shield" class="icon"></i>
+            </button>
+            <button class="btn btn-ghost btn-sm" onclick="onEditProxy('${a.username}', ${JSON.stringify(a.proxy || '')})" title="${a.proxy ? 'Trocar proxy' : 'Adicionar proxy SOCKS5/HTTP'} (ex: socks5://host:porta)">
+              <i data-lucide="globe" class="icon" style="${a.proxy ? 'color:#c4b5fd' : ''}"></i>
             </button>
             ${a.has_totp ? `<button class="btn btn-ghost btn-sm" onclick="onShowTotp('${a.username}')" title="Ver código 2FA atual (pra comparar com 2fa.ac)">
               <i data-lucide="eye" class="icon"></i>
@@ -821,6 +827,27 @@ elMSoYMQakO</pre>
       toast(`Conectando @${username}…`, 'info');
       // Recarrega após uns segundos pra refletir status
       setTimeout(() => { load(); if (window.refreshWorkerStatus) refreshWorkerStatus(); }, 8000);
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  async function onEditProxy(username, currentProxy) {
+    const helpText = `Proxy de @${username}\n\n` +
+      `Formatos aceitos:\n` +
+      `  socks5://user:pass@host:porta\n` +
+      `  socks5://host:porta\n` +
+      `  http://user:pass@host:porta\n` +
+      `  http://host:porta\n\n` +
+      `Deixe vazio pra REMOVER o proxy.\n` +
+      (currentProxy ? `Atual: ${currentProxy}` : 'Sem proxy configurado.');
+    const value = prompt(helpText, currentProxy || '');
+    if (value === null) return;  // cancelou
+    try {
+      const r = await api(`/api/accounts/${username}/proxy`, {
+        method: 'POST',
+        body: JSON.stringify({ proxy: value }),
+      });
+      toast(r.proxy ? `Proxy salvo pra @${username}: ${r.proxy}` : `Proxy removido de @${username}`, 'success');
+      await load();
     } catch (e) { toast(e.message, 'error'); }
   }
 
