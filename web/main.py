@@ -617,6 +617,72 @@ class ProxyIn(BaseModel):
     proxy: Optional[str] = None
 
 
+@app.post("/api/accounts/{username}/test-proxy")
+def api_test_proxy(username: str):
+    """Testa o proxy salvo pra essa conta:
+    1. Faz request pra ipify via o proxy → confirma egress
+    2. Mede latência
+    3. Compara com seu IP "real" (sem proxy)
+
+    Retorna: ip_via_proxy, ip_sem_proxy, latency_ms, ok
+    """
+    import time as _t
+    import requests as _rq
+
+    # Acha a conta + proxy
+    accounts = load_accounts()
+    proxy = None
+    found = False
+    for a in accounts:
+        if a["username"] == username:
+            found = True
+            proxy = a.get("proxy")
+            break
+    if not found:
+        raise HTTPException(404, "Conta não encontrada")
+    if not proxy:
+        raise HTTPException(400, "Essa conta não tem proxy configurado")
+
+    proxies = {"http": proxy, "https": proxy}
+    result = {"ok": False, "proxy": proxy}
+
+    # 1) IP sem proxy (pra comparar)
+    try:
+        r0 = _rq.get("https://api.ipify.org?format=json", timeout=5)
+        result["ip_sem_proxy"] = r0.json().get("ip")
+    except Exception as e:
+        result["ip_sem_proxy"] = f"erro: {e}"
+
+    # 2) IP via proxy
+    t0 = _t.time()
+    try:
+        r = _rq.get(
+            "https://api.ipify.org?format=json",
+            proxies=proxies,
+            timeout=10,
+        )
+        elapsed_ms = int((_t.time() - t0) * 1000)
+        result["latency_ms"] = elapsed_ms
+        if r.status_code == 200:
+            result["ip_via_proxy"] = r.json().get("ip")
+            result["ok"] = True
+            # Compara: proxy realmente roteia se o IP for diferente
+            if result["ip_via_proxy"] == result.get("ip_sem_proxy"):
+                result["warning"] = "IP via proxy = IP sem proxy (proxy pode estar bypassando)"
+        else:
+            result["error"] = f"HTTP {r.status_code}"
+    except _rq.exceptions.ProxyError as e:
+        result["error"] = f"ProxyError: {str(e)[:200]}"
+    except _rq.exceptions.ConnectionError as e:
+        result["error"] = f"ConnectionError: {str(e)[:200]}"
+    except _rq.exceptions.Timeout:
+        result["error"] = "Timeout (proxy lento ou inacessível)"
+    except Exception as e:
+        result["error"] = f"{type(e).__name__}: {str(e)[:200]}"
+
+    return result
+
+
 @app.post("/api/accounts/{username}/proxy")
 def api_update_proxy(username: str, payload: ProxyIn):
     """Atualiza proxy de uma conta. String vazia ou null remove o proxy.

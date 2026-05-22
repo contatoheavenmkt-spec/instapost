@@ -566,6 +566,9 @@ elMSoYMQakO</pre>
             <button class="btn btn-ghost btn-sm" onclick="onEditProxy('${a.username}')" title="${a.proxy ? 'Trocar proxy' : 'Adicionar proxy SOCKS5/HTTP'} (ex: socks5://host:porta)">
               <i data-lucide="globe" class="icon" style="${a.proxy ? 'color:#c4b5fd' : ''}"></i>
             </button>
+            ${a.proxy ? `<button class="btn btn-ghost btn-sm" onclick="onTestProxy('${a.username}')" title="Testar proxy: faz request e mostra o IP visto">
+              <i data-lucide="wifi" class="icon" style="color:#c4b5fd"></i>
+            </button>` : ''}
             ${a.has_totp ? `<button class="btn btn-ghost btn-sm" onclick="onShowTotp('${a.username}')" title="Ver código 2FA atual (pra comparar com 2fa.ac)">
               <i data-lucide="eye" class="icon"></i>
             </button>` : ''}
@@ -841,7 +844,7 @@ elMSoYMQakO</pre>
       `  http://user:pass@host:porta\n` +
       `  http://host:porta\n\n` +
       `Deixe vazio pra REMOVER o proxy.\n` +
-      (currentProxy ? `Atual: ${currentProxy}` : 'Sem proxy configurado.');
+      (currentProxy ? `Atual: ${currentProxy}\n\n(Pra TESTAR o proxy atual, clique CANCELAR e use o botão de teste)` : 'Sem proxy configurado.');
     const value = prompt(helpText, currentProxy);
     if (value === null) return;  // cancelou
     try {
@@ -849,8 +852,29 @@ elMSoYMQakO</pre>
         method: 'POST',
         body: JSON.stringify({ proxy: value }),
       });
-      toast(r.proxy ? `Proxy salvo pra @${username}: ${r.proxy}` : `Proxy removido de @${username}`, 'success');
+      toast(r.proxy ? `Proxy salvo pra @${username}: ${r.proxy}. Use o botão de teste pra confirmar conexão.` : `Proxy removido de @${username}`, 'success');
       await load();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  async function onTestProxy(username) {
+    // Chama endpoint que faz request via proxy e retorna o IP visto
+    toast(`Testando proxy de @${username}…`, 'info');
+    try {
+      const r = await api(`/api/accounts/${username}/test-proxy`, { method: 'POST' });
+      if (r.ok) {
+        const same = r.ip_via_proxy && r.ip_via_proxy === r.ip_sem_proxy;
+        const msg = `✅ Proxy OK pra @${username}\n\n` +
+          `IP via proxy: ${r.ip_via_proxy}\n` +
+          `IP sem proxy: ${r.ip_sem_proxy || '?'}\n` +
+          `Latência: ${r.latency_ms}ms\n` +
+          (same ? '\n⚠️ AVISO: IP via proxy = IP sem proxy. Proxy pode estar bypassando.' : '\n✓ IPs diferentes: proxy roteando de verdade.');
+        alert(msg);
+        toast(`Proxy OK — IP: ${r.ip_via_proxy} (${r.latency_ms}ms)`, 'success');
+      } else {
+        alert(`❌ Proxy FALHOU pra @${username}\n\nProxy: ${r.proxy}\nErro: ${r.error || 'desconhecido'}`);
+        toast(`Proxy falhou: ${r.error}`, 'error');
+      }
     } catch (e) { toast(e.message, 'error'); }
   }
 
