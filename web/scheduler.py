@@ -1144,15 +1144,21 @@ class ScheduleManager:
             }
 
         base = _os.environ.get("PUBLIC_BASE_URL", "").rstrip("/") or "http://127.0.0.1:8000"
-        # Stagger anti-flag: distribui jobs em janela 60s/job + jitter
-        import random as _r
+        # Stagger anti-flag: distribui jobs com distribuição exponencial.
+        # Antes: linear (i * 60s) + jitter uniforme — Insta detecta o padrão regular.
+        # Agora: exponencial (humanlike_delay) — long-tail mimics real users.
+        from core.retry import humanlike_delay
         from datetime import datetime as _dt2, timezone as _tz2, timedelta as _td2
         _now_utc = _dt2.now(_tz2.utc)
         stagger_times = []
+        cumulative_s = 0
         for i in range(len(assignments)):
-            base_s = 5 + (i * 60)
-            jitter = _r.uniform(-15, 15) if i > 0 else 0
-            stagger_times.append((_now_utc + _td2(seconds=max(0, base_s + jitter))).isoformat(timespec="seconds"))
+            # 1º job: 5s. Próximos: incremento exponencial (mean 60s, max 180s).
+            if i == 0:
+                cumulative_s = 5
+            else:
+                cumulative_s += humanlike_delay(min_s=20, mean_s=60, max_s=180)
+            stagger_times.append((_now_utc + _td2(seconds=cumulative_s)).isoformat(timespec="seconds"))
         stagger_times.sort()
 
         created = []

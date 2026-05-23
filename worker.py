@@ -1190,10 +1190,14 @@ def _worker_loop(thread_id: int):
                 with _thread_state_lock:
                     _thread_job_started[thread_id] = time.time()
 
-                # Stagger anti-detecção quando há paralelismo
+                # Stagger anti-detecção quando há paralelismo.
+                # Exponencial (humanlike_delay) em vez de uniform — padrão long-tail
+                # é mais natural que linear (random.randint), Insta tem detector
+                # de "muito regular" que pega uniforme facilmente.
                 if WORKER_CONCURRENCY > 1:
-                    jitter = random.uniform(15, 45)
-                    print(f"[T{thread_id}] aguarda {jitter:.0f}s antes de iniciar (stagger)")
+                    from core.retry import humanlike_delay
+                    jitter = humanlike_delay(min_s=15, mean_s=30, max_s=90)
+                    print(f"[T{thread_id}] aguarda {jitter}s antes de iniciar (stagger exp)")
                     if _stop_flag.wait(jitter):
                         return
                 execute_job(job)

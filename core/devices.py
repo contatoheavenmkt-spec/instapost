@@ -179,6 +179,25 @@ DEVICES = [
     },
 ]
 
+# Timezones brasileiros pra randomizar por conta (vs hardcoded SP).
+# Tupla: (nome IANA, offset em segundos do UTC). Tudo BR pra coerência com
+# proxies brasileiros do DataImpulse.
+BR_TIMEZONES = [
+    ("America/Sao_Paulo", -3 * 3600),
+    ("America/Recife", -3 * 3600),
+    ("America/Fortaleza", -3 * 3600),
+    ("America/Belem", -3 * 3600),
+    ("America/Bahia", -3 * 3600),
+    ("America/Manaus", -4 * 3600),
+    ("America/Campo_Grande", -4 * 3600),
+    ("America/Cuiaba", -4 * 3600),
+    ("America/Boa_Vista", -4 * 3600),
+    ("America/Porto_Velho", -4 * 3600),
+    ("America/Rio_Branco", -5 * 3600),
+    ("America/Eirunepe", -5 * 3600),
+    ("America/Noronha", -2 * 3600),
+]
+
 # Versões recentes do app Instagram (Android). Atualizar conforme novas saem.
 APP_VERSIONS = [
     "320.0.0.42.101",
@@ -209,6 +228,7 @@ def device_for_account(username: str) -> Dict:
 
     device = rng.choice(DEVICES)
     app_version = rng.choice(APP_VERSIONS)
+    tz_name, tz_offset = rng.choice(BR_TIMEZONES)
 
     # IDs únicos determinísticos por username
     # Gera UUIDs estilo instagrapi (16 hex chars com hifens)
@@ -234,7 +254,8 @@ def device_for_account(username: str) -> Dict:
             f"pt_BR; {rng.randint(300000000, 360000000)})"
         ),
         "locale": "pt_BR",
-        "timezone": "America/Sao_Paulo",
+        "timezone": tz_name,
+        "timezone_offset": tz_offset,
     }
 
 
@@ -260,7 +281,10 @@ def apply_device_to_client(cl, username: str) -> Optional[Dict]:
         })
         cl.set_user_agent(device["user_agent"])
         cl.set_locale(device["locale"])
-        cl.set_timezone_offset(-3 * 60 * 60)  # BRT (UTC-3) em segundos
+        # Timezone determinístico por conta (escolhido de BR_TIMEZONES via seed).
+        # Antes era fixo SP (-3h). Agora varia entre Manaus(-4h), Acre(-5h), etc.
+        # Reduz cluster detection ("todas as contas no mesmo fuso = batch óbvio").
+        cl.set_timezone_offset(device.get("timezone_offset", -3 * 3600))
         # IDs únicos por conta (não compartilhados entre Clients).
         # instagrapi não tem set_device_id — usa set_uuids({...}) que aceita
         # phone_id, uuid, advertising_id, android_device_id, etc.

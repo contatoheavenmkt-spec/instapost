@@ -158,9 +158,13 @@ def _normalize_proxy(raw: str) -> str:
 
 
 def load_accounts() -> list[dict]:
-    """Carrega contas + normaliza proxies em memória (não escreve de volta).
-    Garante que TODOS os consumers (test-proxy, worker dispatch, login) vejam
-    proxy em formato URL correto mesmo se o accounts.json ainda tem formato antigo."""
+    """Carrega contas com decrypt automático de senha/totp_secret + normalização
+    de proxy. Migração transparente: detecta plaintext, devolve como está
+    (próximo save vai encriptar).
+
+    Garante que TODOS os consumers (test-proxy, worker dispatch, login, scheduler)
+    vejam senha em PLAINTEXT na memória e proxy normalizado.
+    """
     with _accounts_lock:
         if not ACCOUNTS_FILE.exists():
             return []
@@ -168,7 +172,19 @@ def load_accounts() -> list[dict]:
             accs = json.loads(ACCOUNTS_FILE.read_text(encoding="utf-8"))
         except Exception:
             return []
+        # Decrypt password + totp_secret + normaliza proxy
+        from core.credentials import decrypt as _decrypt
         for a in accs:
+            pwd = a.get("password")
+            if pwd:
+                decrypted = _decrypt(pwd)
+                if decrypted is not None:
+                    a["password"] = decrypted
+            secret = a.get("totp_secret")
+            if secret:
+                decrypted = _decrypt(secret)
+                if decrypted is not None:
+                    a["totp_secret"] = decrypted
             raw_proxy = a.get("proxy")
             if raw_proxy:
                 normalized = _normalize_proxy(raw_proxy)
@@ -178,13 +194,23 @@ def load_accounts() -> list[dict]:
 
 
 def save_accounts(accounts: list[dict]) -> None:
-    """Atomic write: escreve em .tmp e dá rename. Evita corrupção parcial se o
-    processo cair no meio do write."""
+    """Atomic write: escreve em .tmp e dá rename. Encripta senha + totp_secret
+    ANTES de escrever (em disco fica encrypted, em memória continua plaintext)."""
     with _accounts_lock:
+        from core.credentials import encrypt as _encrypt
+        # Deep copy parcial — só os campos sensíveis. Não muta o dict in-memory.
+        to_persist = []
+        for a in accounts:
+            copy = dict(a)
+            if copy.get("password"):
+                copy["password"] = _encrypt(copy["password"])
+            if copy.get("totp_secret"):
+                copy["totp_secret"] = _encrypt(copy["totp_secret"])
+            to_persist.append(copy)
         path = Path(str(ACCOUNTS_FILE))
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(
-            json.dumps(accounts, ensure_ascii=False, indent=2),
+            json.dumps(to_persist, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         tmp.replace(path)
@@ -1296,15 +1322,19 @@ def api_bulk_import(payload: BulkImportIn, user=Depends(auth.require_user)):
     connect_jobs_created = 0
     if payload.connect_after and added:
         from datetime import datetime as _dt, timezone as _tz, timedelta as _td
-        import random as _r
+        from core.retry import humanlike_delay
         now_utc = _dt.now(_tz.utc)
-        # Stagger: 30-90s entre cada conexão (anti-flag IP)
+        # Stagger exponencial (long-tail, mimics real user) em vez de uniforme
+        # (linear, padrão detectável). Acumulado entre contas: 1ª em 0s, 2ª em
+        # 30-180s, 3ª no anterior+30-180s, etc.
+        cumulative_s = 0
         for idx, username in enumerate(added):
             acc = next((a for a in accounts if a["username"] == username), None)
             if not acc:
                 continue
-            delay_s = idx * _r.randint(30, 90)
-            scheduled_for = (now_utc + _td(seconds=delay_s)).isoformat(timespec="seconds")
+            if idx > 0:
+                cumulative_s += humanlike_delay(min_s=30, mean_s=75, max_s=180)
+            scheduled_for = (now_utc + _td(seconds=cumulative_s)).isoformat(timespec="seconds")
             try:
                 rjob_manager.create({
                     "operation": "test_login",

@@ -112,42 +112,50 @@ def get_client(
     session_file = SESSIONS_DIR / f"{username}.json"
 
     def _do_login(client: Client):
-        """Faz o login passando código TOTP se a conta tem 2FA."""
-        if totp_secret:
-            try:
-                code = client.totp_generate_code(totp_secret)
-            except Exception as e:
-                raise RuntimeError(f"Falha gerando código TOTP (chave inválida?): {e}")
-            import time as _time
-            seconds_left = 30 - int(_time.time()) % 30
-            print(f"[{username}] 🔐 Código TOTP gerado: {code} (expira em {seconds_left}s)")
-            print(f"[{username}]    Senha sendo enviada: [{len(password)} chars] (oculta por segurança)")
-            print(f"[{username}]    Abra o 2fa.ac com sua chave AGORA e confirme que mostra '{code}'.")
-            client.login(username, password, verification_code=code)
-        elif totp_fallback_handler:
-            # Não tem chave salva, mas o usuário pode digitar o código manualmente
-            # via UI. Tenta sem código primeiro pra ver se a conta tem 2FA mesmo.
-            try:
+        """Faz o login passando código TOTP se a conta tem 2FA. Wrapped em
+        retry_on_429 — se Insta retornar rate limit, espera backoff exponencial."""
+        from core.retry import with_retry
+
+        def _attempt_login():
+            if totp_secret:
+                try:
+                    code = client.totp_generate_code(totp_secret)
+                except Exception as e:
+                    raise RuntimeError(f"Falha gerando código TOTP (chave inválida?): {e}")
+                import time as _time
+                seconds_left = 30 - int(_time.time()) % 30
+                print(f"[{username}] 🔐 Código TOTP gerado: {code} (expira em {seconds_left}s)")
+                print(f"[{username}]    Senha sendo enviada: [{len(password)} chars] (oculta por segurança)")
+                print(f"[{username}]    Abra o 2fa.ac com sua chave AGORA e confirme que mostra '{code}'.")
+                client.login(username, password, verification_code=code)
+            elif totp_fallback_handler:
+                try:
+                    client.login(username, password)
+                except Exception as e:
+                    if "two_factor" in str(e).lower() or "2fa" in str(e).lower():
+                        manual_code = totp_fallback_handler()
+                        client.login(username, password, verification_code=manual_code)
+                    else:
+                        raise
+            else:
                 client.login(username, password)
-            except Exception as e:
-                if "two_factor" in str(e).lower() or "2fa" in str(e).lower():
-                    manual_code = totp_fallback_handler()
-                    client.login(username, password, verification_code=manual_code)
-                else:
-                    raise
-        else:
-            client.login(username, password)
+
+        # Retry: 3 tentativas, base 4s, max 5min — só pra erros de rate limit.
+        # Challenge/banned/etc levantam direto sem retry.
+        with_retry(_attempt_login, max_retries=3, base_delay=4.0, max_delay=300.0, label=f"login:{username}")
 
     # Tentativa 1: usar sessão salva (SEM refazer login)
-    # Bugfix: antes chamava _do_login mesmo com sessão válida, forçando TOTP
-    # toda vez. Agora só testa se a sessão ainda funciona via API call leve.
+    # File lock garante atomicidade: 2 jobs paralelos pra mesma conta esperam.
+    from core.file_lock import file_lock as _file_lock
     if session_file.exists():
         try:
-            cl.load_settings(session_file)
-            # Set creds pra que, em LoginRequired, o instagrapi possa relogar sozinho
-            cl.username = username
-            cl.password = password
-            # Teste leve da sessão. Se válida, segue sem TOTP.
+            with _file_lock(session_file, timeout=15):
+                cl.load_settings(session_file)
+                # Set creds pra que, em LoginRequired, o instagrapi possa relogar sozinho
+                cl.username = username
+                cl.password = password
+            # Teste leve da sessão. Se válida, segue sem TOTP. (FORA do lock pra
+            # não segurar 5s+ enquanto a HTTP request roda)
             cl.get_timeline_feed()
             print(f"[{username}] Sessão restaurada ✓ (sem relogin)")
             return cl
@@ -170,7 +178,9 @@ def get_client(
             cl.set_proxy(proxy)
 
         _do_login(cl)
-        cl.dump_settings(session_file)
+        # Dump sessão sob file lock — evita corrupção se 2 procs salvarem juntos
+        with _file_lock(session_file, timeout=15):
+            cl.dump_settings(session_file)
         kind = "com 2FA" if totp_secret else "sem 2FA"
         print(f"[{username}] Login novo ✓ ({kind}, sessão salva)")
         return cl
