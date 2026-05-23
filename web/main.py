@@ -124,14 +124,57 @@ import threading as _t
 _accounts_lock = _t.RLock()
 
 
+def _normalize_proxy(raw: str) -> str:
+    """Converte formatos comuns de proxy pra URL padrão que requests/instagrapi entendem.
+
+    Aceita (com ou sem scheme prefix):
+      - http://user:pass@host:port           (já no formato URL — devolve igual)
+      - socks5://user:pass@host:port         (idem)
+      - http://host:port:user:pass           (alguém colou DataImpulse + http://)
+      - host:port:user:pass                  (DataImpulse, Bright Data raw)
+      - user:pass@host:port                  (sem scheme — vira http://)
+      - host:port                            (sem auth — vira http://)
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    if "://" in raw:
+        scheme, rest = raw.split("://", 1)
+        scheme = scheme.lower()
+        if scheme not in ("http", "https", "socks4", "socks5", "socks5h"):
+            scheme = "http"
+    else:
+        scheme = "http"
+        rest = raw
+    if "@" in rest:
+        return f"{scheme}://{rest}"
+    parts = rest.split(":")
+    if len(parts) == 4:
+        host, port, user, password = parts
+        return f"{scheme}://{user}:{password}@{host}:{port}"
+    if len(parts) == 2:
+        return f"{scheme}://{rest}"
+    return raw
+
+
 def load_accounts() -> list[dict]:
+    """Carrega contas + normaliza proxies em memória (não escreve de volta).
+    Garante que TODOS os consumers (test-proxy, worker dispatch, login) vejam
+    proxy em formato URL correto mesmo se o accounts.json ainda tem formato antigo."""
     with _accounts_lock:
         if not ACCOUNTS_FILE.exists():
             return []
         try:
-            return json.loads(ACCOUNTS_FILE.read_text(encoding="utf-8"))
+            accs = json.loads(ACCOUNTS_FILE.read_text(encoding="utf-8"))
         except Exception:
             return []
+        for a in accs:
+            raw_proxy = a.get("proxy")
+            if raw_proxy:
+                normalized = _normalize_proxy(raw_proxy)
+                if normalized and normalized != raw_proxy:
+                    a["proxy"] = normalized
+        return accs
 
 
 def save_accounts(accounts: list[dict]) -> None:
@@ -617,45 +660,8 @@ class ProxyIn(BaseModel):
     proxy: Optional[str] = None
 
 
-def _normalize_proxy(raw: str) -> str:
-    """Converte formatos comuns de proxy pra URL padrão que requests/instagrapi entendem.
-
-    Aceita (com ou sem scheme prefix):
-      - http://user:pass@host:port           (já no formato URL — devolve igual)
-      - socks5://user:pass@host:port         (idem)
-      - http://host:port:user:pass           (alguém colou DataImpulse + http://)
-      - host:port:user:pass                  (DataImpulse, Bright Data raw)
-      - user:pass@host:port                  (sem scheme — vira http://)
-      - host:port                            (sem auth — vira http://)
-
-    Retorna string vazia se input vazio.
-    """
-    raw = (raw or "").strip()
-    if not raw:
-        return ""
-    # Separa scheme (se houver) do resto
-    if "://" in raw:
-        scheme, rest = raw.split("://", 1)
-        scheme = scheme.lower()
-        if scheme not in ("http", "https", "socks4", "socks5", "socks5h"):
-            scheme = "http"  # scheme estranho, força http
-    else:
-        scheme = "http"
-        rest = raw
-    # Se já tem @, é formato user:pass@host:port — só re-monta com scheme
-    if "@" in rest:
-        return f"{scheme}://{rest}"
-    # Conta colons no rest pra detectar formato
-    parts = rest.split(":")
-    if len(parts) == 4:
-        # host:port:user:pass (formato DataImpulse/Bright Data/Smartproxy/etc)
-        host, port, user, password = parts
-        return f"{scheme}://{user}:{password}@{host}:{port}"
-    if len(parts) == 2:
-        # host:port (sem auth)
-        return f"{scheme}://{rest}"
-    # Não conseguimos detectar — devolve como veio, validação subsequente alerta
-    return raw
+# _normalize_proxy() definido em cima junto com load_accounts (precisa estar
+# disponível pra normalização defensiva on-read).
 
 
 @app.post("/api/accounts/{username}/test-proxy")
@@ -684,8 +690,14 @@ def api_test_proxy(username: str):
     if not proxy:
         raise HTTPException(400, "Essa conta não tem proxy configurado")
 
+    # DEFENSIVO: normaliza na hora de testar mesmo que o salvo esteja em
+    # formato esquisito. Assim o user vê o resultado real, e na próxima vez
+    # que ele salvar, fica permanente no formato correto.
+    proxy_raw = proxy
+    proxy = _normalize_proxy(proxy_raw)
+
     proxies = {"http": proxy, "https": proxy}
-    result = {"ok": False, "proxy": proxy}
+    result = {"ok": False, "proxy_saved": proxy_raw, "proxy_used": proxy}
 
     # 1) IP sem proxy (pra comparar)
     try:
