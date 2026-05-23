@@ -584,6 +584,8 @@ def _account_view(a: dict) -> dict:
         "needs_verification": bool(a.get("needs_verification", False)),
         "verification_at": a.get("verification_at"),
         "verification_reason": a.get("verification_reason"),
+        # Pausa do worker (quando user tá usando a conta manualmente no browser)
+        "worker_paused_until": a.get("worker_paused_until"),
         # Health / shadow ban detector
         "shadowban_suspected": bool(a.get("shadowban_suspected", False)),
         "shadowban_at": a.get("shadowban_at"),
@@ -824,21 +826,32 @@ def api_normalize_all_proxies():
 
 @app.get("/api/accounts/{username}/totp-code")
 def api_show_totp(username: str):
+    """Retorna credenciais COMPLETAS da conta pra login manual:
+    senha + código TOTP atual + segundos restantes. Pra usar quando
+    abre Chrome via botão Smartphone e precisa preencher manualmente."""
     accounts = load_accounts()
     for a in accounts:
         if a["username"] == username:
+            password = a.get("password") or ""
             secret = a.get("totp_secret")
-            if not secret:
-                raise HTTPException(400, "Essa conta não tem chave 2FA cadastrada")
-            try:
-                from instagrapi import Client
-                import time as _time
-                code = Client().totp_generate_code(secret.replace(" ", "").replace("-", "").upper())
-                # TOTP padrão tem janela de 30s; calcula quanto falta
-                seconds_left = 30 - int(_time.time()) % 30
-                return {"code": code, "seconds_left": seconds_left}
-            except Exception as e:
-                raise HTTPException(400, f"Chave inválida: {e}")
+            result = {
+                "username": username,
+                "password": password,
+                "has_password": bool(password),
+                "has_totp": bool(secret),
+                "code": None,
+                "seconds_left": None,
+            }
+            if secret:
+                try:
+                    from instagrapi import Client
+                    import time as _time
+                    result["code"] = Client().totp_generate_code(secret.replace(" ", "").replace("-", "").upper())
+                    # TOTP padrão tem janela de 30s; calcula quanto falta
+                    result["seconds_left"] = 30 - int(_time.time()) % 30
+                except Exception as e:
+                    result["totp_error"] = f"Chave inválida: {e}"
+            return result
     raise HTTPException(404, "Conta não encontrada")
 
 
@@ -1779,6 +1792,33 @@ def api_clear_block(username: str, user=Depends(auth.require_user)):
                 a["blocked_at"] = None
                 a["blocked_reason"] = None
                 return {"ok": True, "account": _account_view(a)}
+    raise HTTPException(404, "Conta não encontrada")
+
+
+@app.post("/api/accounts/{username}/pause-worker")
+def api_pause_worker(username: str, minutes: int = 30, user=Depends(auth.require_user)):
+    """Pausa worker pra essa conta por N minutos (default 30).
+    Usado quando o user vai mexer manualmente no browser — evita conflito
+    'duas devices logando ao mesmo tempo' que dispara challenge no IG."""
+    from datetime import datetime as _dt_p, timedelta as _td_p, timezone as _tz_p
+    minutes = max(1, min(240, int(minutes)))  # clamp 1..240
+    until = (_dt_p.now(_tz_p.utc) + _td_p(minutes=minutes)).isoformat(timespec="seconds")
+    with accounts_transaction() as accounts:
+        for a in accounts:
+            if a["username"] == username:
+                a["worker_paused_until"] = until
+                return {"ok": True, "worker_paused_until": until, "minutes": minutes}
+    raise HTTPException(404, "Conta não encontrada")
+
+
+@app.post("/api/accounts/{username}/unpause-worker")
+def api_unpause_worker(username: str, user=Depends(auth.require_user)):
+    """Cancela a pausa do worker antes do tempo expirar."""
+    with accounts_transaction() as accounts:
+        for a in accounts:
+            if a["username"] == username:
+                a["worker_paused_until"] = None
+                return {"ok": True}
     raise HTTPException(404, "Conta não encontrada")
 
 

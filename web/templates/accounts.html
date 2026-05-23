@@ -520,6 +520,15 @@ elMSoYMQakO</pre>
       const verifyBadge = (a.needs_verification && !a.blocked)
         ? `<span class="badge" style="background:rgba(251,191,36,0.18);color:#fbbf24;border:1px solid rgba(251,191,36,0.4);font-weight:600" title="Instagram pediu verificação manual em ${(a.verification_at||'').slice(0,16).replace('T',' ')} — ${(a.verification_reason||'').slice(0,180)}"><i data-lucide="alert-triangle" style="width:11px;height:11px"></i> PRECISA VERIFICAR</span>`
         : '';
+      // Badge PAUSADA: worker_paused_until > agora (user mexendo no browser)
+      let pauseBadge = '';
+      if (a.worker_paused_until) {
+        const pu = new Date(a.worker_paused_until);
+        const remainMin = Math.round((pu - new Date()) / 60000);
+        if (remainMin > 0) {
+          pauseBadge = `<span class="badge" style="background:rgba(168,85,247,.15);color:#c4b5fd;border-color:rgba(168,85,247,.3);font-size:10.5px;cursor:pointer" onclick="onUnpauseWorker('${a.username}')" title="Worker pausado por ${remainMin}min (você abriu o browser). Clique pra despausar agora."><i data-lucide="pause" style="width:11px;height:11px"></i> PAUSADA (${remainMin}min)</span>`;
+        }
+      }
       const shadowBadge = a.shadowban_suspected
         ? `<span class="badge badge-warning" title="Suspeita desde ${(a.shadowban_at||'').slice(0,16).replace('T',' ')} - ${(a.shadowban_reason||'').slice(0,200)}"><i data-lucide="eye-off" style="width:11px;height:11px"></i> SHADOW BAN?</span>`
         : '';
@@ -557,6 +566,7 @@ elMSoYMQakO</pre>
             <div class="font-medium mono text-[13px]">@${a.username}</div>
             ${blockedBadge}
             ${verifyBadge}
+            ${pauseBadge}
             ${shadowBadge}
             ${healthBadge}
             ${warmupBadge}
@@ -695,6 +705,14 @@ elMSoYMQakO</pre>
     } catch (e) {
       toast(e.message, 'error');
     }
+  }
+
+  async function onUnpauseWorker(username) {
+    try {
+      await api(`/api/accounts/${username}/unpause-worker`, { method: 'POST' });
+      toast(`@${username} despausada — worker pode voltar a usar`, 'success');
+      await load();
+    } catch (e) { toast(e.message, 'error'); }
   }
 
   async function onClearVerification(username) {
@@ -1198,6 +1216,12 @@ elMSoYMQakO</pre>
       );
       if (!ok) return;
     }
+    // PAUSA O WORKER 30min ANTES de abrir o browser. Sem isso, worker + browser
+    // logando ao mesmo tempo = 2 devices = Instagram dispara challenge.
+    // Best-effort: se falhar, não bloqueia a abertura do browser.
+    try {
+      await api(`/api/accounts/${username}/pause-worker?minutes=30`, { method: 'POST' });
+    } catch (_) {}
     // 1ª tentativa: worker local roda HTTP em 127.0.0.1:17777 e abre o Chrome direto.
     // Se o worker tá rodando, esse fetch resolve em < 1s e o Chrome abre na hora.
     try {
@@ -1214,7 +1238,12 @@ elMSoYMQakO</pre>
         const data = await r.json().catch(() => ({}));
         const devStr = data && data.device ? ` (${data.device})` : '';
         const emoji = reset ? '🧹' : '📱';
-        toast(`${emoji} Abrindo Chrome pra @${username}${devStr}…`, 'success');
+        toast(`${emoji} Abrindo Chrome pra @${username}${devStr}… (worker pausado 30min)`, 'success');
+        // Mostra credenciais (senha + 2FA) pra caso precise digitar manual no Chrome
+        try {
+          const creds = await api(`/api/accounts/${username}/totp-code`);
+          _openCredentialsModal(creds);
+        } catch (_) {}
         return;
       }
     } catch (_) {
@@ -1236,8 +1265,76 @@ elMSoYMQakO</pre>
   async function onShowTotp(username) {
     try {
       const r = await api(`/api/accounts/${username}/totp-code`);
-      alert(`Código 2FA atual de @${username}:\n\n        ${r.code}\n\nExpira em ${r.seconds_left}s.\n\nEsse código DEVE ser idêntico ao que o 2fa.ac mostra agora. Se for diferente, a chave salva está errada.`);
+      _openCredentialsModal(r);
     } catch (e) { toast(e.message, 'error'); }
+  }
+
+  // Modal com username + senha + código 2FA, todos com botão de copiar.
+  // Pra usar quando você abre Chrome via Smartphone e precisa preencher manual.
+  function _openCredentialsModal(creds) {
+    // Remove modal existente se houver
+    const existing = document.getElementById('credentials-modal');
+    if (existing) existing.remove();
+
+    const totpBlock = creds.has_totp
+      ? (creds.code
+        ? `<div class="mb-3">
+            <label class="text-[11px] text-muted uppercase tracking-wide">Código 2FA atual</label>
+            <div class="flex items-center gap-2 mt-1">
+              <code class="flex-1 px-3 py-2 rounded text-[20px] font-bold tracking-widest" style="background:rgba(96,165,250,.1);color:#93c5fd;font-family:monospace;letter-spacing:.2em">${creds.code}</code>
+              <button class="btn btn-subtle btn-sm" onclick="_copyToClipboard('${creds.code}', this)" title="Copiar código">
+                <i data-lucide="copy" class="icon"></i>
+              </button>
+            </div>
+            <div class="text-[10.5px] text-muted mt-1">Expira em ${creds.seconds_left}s. Confira no 2fa.ac que mostra o mesmo código.</div>
+          </div>`
+        : `<div class="mb-3 text-[12px] text-warning">⚠️ ${creds.totp_error || 'Erro ao gerar TOTP'}</div>`)
+      : `<div class="mb-3 text-[11px] text-muted">Conta sem 2FA cadastrado</div>`;
+
+    const html = `
+      <div id="credentials-modal" class="fixed inset-0 z-50 flex items-center justify-center" style="background:rgba(0,0,0,.7)">
+        <div class="surface p-5 rounded-lg" style="max-width:500px;width:90%">
+          <div class="flex items-center justify-between mb-4">
+            <h3 class="text-[15px] font-semibold">Credenciais @${creds.username}</h3>
+            <button class="btn btn-ghost btn-sm" onclick="document.getElementById('credentials-modal').remove()">
+              <i data-lucide="x" class="icon"></i>
+            </button>
+          </div>
+          <div class="mb-3">
+            <label class="text-[11px] text-muted uppercase tracking-wide">Usuário</label>
+            <div class="flex items-center gap-2 mt-1">
+              <code class="flex-1 px-3 py-2 rounded text-[13px]" style="background:rgba(255,255,255,.05);font-family:monospace">${creds.username}</code>
+              <button class="btn btn-subtle btn-sm" onclick="_copyToClipboard('${creds.username}', this)" title="Copiar usuário">
+                <i data-lucide="copy" class="icon"></i>
+              </button>
+            </div>
+          </div>
+          <div class="mb-3">
+            <label class="text-[11px] text-muted uppercase tracking-wide">Senha</label>
+            <div class="flex items-center gap-2 mt-1">
+              <code class="flex-1 px-3 py-2 rounded text-[13px]" style="background:rgba(255,255,255,.05);font-family:monospace;word-break:break-all">${creds.has_password ? escapeHtml(creds.password) : '(sem senha)'}</code>
+              ${creds.has_password ? `<button class="btn btn-subtle btn-sm" onclick="_copyToClipboard(${JSON.stringify(creds.password)}, this)" title="Copiar senha">
+                <i data-lucide="copy" class="icon"></i>
+              </button>` : ''}
+            </div>
+          </div>
+          ${totpBlock}
+          <div class="text-[10.5px] text-muted mt-3">
+            💡 Dica: clique no botão Smartphone (📱) pra abrir Chrome com auto-login. Se cair em login manual, use os campos aqui.
+          </div>
+        </div>
+      </div>`;
+    document.body.insertAdjacentHTML('beforeend', html);
+    if (window.lucide) lucide.createIcons();
+  }
+
+  function _copyToClipboard(text, btn) {
+    navigator.clipboard.writeText(text).then(() => {
+      const orig = btn.innerHTML;
+      btn.innerHTML = '<i data-lucide="check" class="icon" style="color:#6ee7b7"></i>';
+      if (window.lucide) lucide.createIcons();
+      setTimeout(() => { btn.innerHTML = orig; if (window.lucide) lucide.createIcons(); }, 1200);
+    }).catch(e => toast('Falha ao copiar: ' + e.message, 'error'));
   }
 
   load();

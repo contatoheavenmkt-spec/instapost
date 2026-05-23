@@ -42,6 +42,22 @@ def now_local() -> datetime:
     return datetime.now().astimezone()
 
 
+def is_worker_paused(acc: dict) -> bool:
+    """True se acc.worker_paused_until ainda não expirou. Use pra pular
+    contas onde o user tá mexendo manualmente no browser (evita 2 devices
+    logando ao mesmo tempo, que dispara challenge no Instagram)."""
+    iso = acc.get("worker_paused_until")
+    if not iso:
+        return False
+    try:
+        dt = datetime.fromisoformat(iso)
+        if dt.tzinfo is None:
+            dt = dt.astimezone()
+        return dt > now_local()
+    except Exception:
+        return False
+
+
 def parse_iso(s: str) -> datetime:
     """Aceita ISO 8601 com ou sem timezone — se vier sem, assume local."""
     dt = datetime.fromisoformat(s)
@@ -529,6 +545,8 @@ class ScheduleManager:
                 continue
             if not acc.get("connected_via_worker_id"):
                 continue
+            if is_worker_paused(acc):
+                continue  # user tá mexendo no browser, evita conflito
 
             # Reseta contadores diários se o dia mudou
             if acc.get("auto_like_today_date") != today_str:
@@ -702,6 +720,8 @@ class ScheduleManager:
                 continue
             if not acc.get("connected_via_worker_id"):
                 continue
+            if is_worker_paused(acc):
+                continue  # user tá mexendo no browser
 
             already = {p.get("name") for p in (acc.get("posted_media") or [])}
             pending_pool = [m for m in pool_sorted if m["name"] not in already]
@@ -1029,6 +1049,10 @@ class ScheduleManager:
         _now_warm = _dt_warm.now(_tz_warm.utc)
 
         for idx, acc in enumerate(targets_sorted):
+            # PAUSA MANUAL: user tá mexendo no browser, evita 2 devices ao mesmo tempo
+            if is_worker_paused(acc):
+                print(f"[diversify] @{acc['username']} PAUSADA pelo user — skip")
+                continue
             posted_count = len(acc.get("posted_media") or [])
             already = {p.get("name") for p in (acc.get("posted_media") or []) if p.get("name")}
             in_flight = pending_per_acc.get(acc["username"], set())
@@ -1255,6 +1279,8 @@ class ScheduleManager:
                     continue
                 if not acc.get("connected_via_worker_id"):
                     continue
+                if is_worker_paused(acc):
+                    continue  # user tá mexendo no browser
                 # Ultima coleta foi a menos de 22h? Pula.
                 history = _health.load_history(acc["username"], slug)
                 if history:
