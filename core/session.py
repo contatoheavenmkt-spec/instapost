@@ -121,7 +121,7 @@ def get_client(
             import time as _time
             seconds_left = 30 - int(_time.time()) % 30
             print(f"[{username}] 🔐 Código TOTP gerado: {code} (expira em {seconds_left}s)")
-            print(f"[{username}]    Senha sendo enviada: {len(password)} chars, começa com '{password[:3]}', termina com '{password[-2:]}'")
+            print(f"[{username}]    Senha sendo enviada: [{len(password)} chars] (oculta por segurança)")
             print(f"[{username}]    Abra o 2fa.ac com sua chave AGORA e confirme que mostra '{code}'.")
             client.login(username, password, verification_code=code)
         elif totp_fallback_handler:

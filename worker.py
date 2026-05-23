@@ -19,6 +19,7 @@ Mantém rodando enquanto quiser receber jobs. Ctrl+C pra parar.
 """
 from __future__ import annotations
 
+import json
 import os
 import platform
 import random
@@ -775,6 +776,15 @@ def _inject_cookies_via_cdp(debug_port: int, cookies: list[dict], target_url: st
                 pass
 
         send("Network.enable")
+        # Limpa cookies antigos do .instagram.com ANTES de setar os novos.
+        # Sem isso, profile persistido acumula sessions de tentativas anteriores
+        # (sessionid antigo + sessionid novo) — Instagram detecta "cadeia de
+        # sessões" e marca como suspeito.
+        for cookie_name in ("sessionid", "ds_user_id", "csrftoken", "ig_did",
+                            "ig_nrcb", "rur", "shbid", "shbts", "mid"):
+            send("Network.deleteCookies", {"name": cookie_name, "domain": ".instagram.com"})
+            send("Network.deleteCookies", {"name": cookie_name, "domain": "instagram.com"})
+            send("Network.deleteCookies", {"name": cookie_name, "domain": "www.instagram.com"})
         for c in cookies:
             send("Network.setCookie", c)
         send("Page.navigate", {"url": target_url})
@@ -812,16 +822,101 @@ def _kill_chrome_for_profile(profile_dir: Path) -> None:
         print(f"[local-api] kill Chrome anterior falhou (ignorando): {e}")
 
 
-def _open_chrome_for_account(username: str, reset: bool = False) -> tuple[bool, str]:
-    """Abre Chrome com profile isolado + UA desktop + (opcional) sessão pré-injetada.
+# ===== Throttle de abertura do launcher (anti-batch-detection) =====
+# Instagram flagra "10 contas logando do mesmo IP em 5min" como bot farm.
+# Limites: 1 abertura/3min por @ + 1/60s global (evita rajada).
+_last_open_per_user: dict[str, float] = {}
+_last_open_global: float = 0.0
+_throttle_lock = threading.Lock()
+THROTTLE_PER_USER_SECONDS = 5 * 60
+THROTTLE_GLOBAL_SECONDS = 60
 
-    Se reset=True: apaga o profile dir inteiro antes de abrir (cookies, cache,
-    storage). Útil quando a sessão atual tá corrompida ou Instagram tá rejeitando
-    cookies antigos (ex: ERR_TOO_MANY_REDIRECTS).
+
+def _check_throttle(username: str) -> Optional[str]:
+    """Retorna mensagem de erro se throttle bloqueou, None se OK."""
+    global _last_open_global
+    now = time.time()
+    with _throttle_lock:
+        elapsed_global = now - _last_open_global
+        if elapsed_global < THROTTLE_GLOBAL_SECONDS:
+            return f"Espere {int(THROTTLE_GLOBAL_SECONDS - elapsed_global)}s antes de abrir outra conta (anti-batch-ban global)"
+        last_user = _last_open_per_user.get(username, 0)
+        elapsed_user = now - last_user
+        if elapsed_user < THROTTLE_PER_USER_SECONDS:
+            remaining_min = int((THROTTLE_PER_USER_SECONDS - elapsed_user) / 60) + 1
+            return f"@{username} foi aberta há pouco. Aguarde {remaining_min}min antes de reabrir (anti-ban)"
+        _last_open_global = now
+        _last_open_per_user[username] = now
+    return None
+
+
+def _build_proxy_auth_extension(extension_dir: Path, proxy_user: str, proxy_pass: str) -> None:
+    """Gera uma extensão Chrome temporária que responde automaticamente ao
+    diálogo de auth do proxy. Sem isso, Chrome popa um modal pedindo senha
+    a cada launch (chato e quebra automação)."""
+    extension_dir.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "manifest_version": 2,
+        "name": "Insta Poster Proxy Auth",
+        "version": "1.0",
+        "permissions": ["proxy", "webRequest", "webRequestBlocking", "<all_urls>"],
+        "background": {"scripts": ["bg.js"], "persistent": True},
+    }
+    bg_js = (
+        "chrome.webRequest.onAuthRequired.addListener(\n"
+        "  function(details) {\n"
+        "    return {authCredentials: {\n"
+        f"      username: {json.dumps(proxy_user)},\n"
+        f"      password: {json.dumps(proxy_pass)}\n"
+        "    }};\n"
+        "  },\n"
+        "  {urls: ['<all_urls>']},\n"
+        "  ['blocking']\n"
+        ");\n"
+    )
+    (extension_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (extension_dir / "bg.js").write_text(bg_js, encoding="utf-8")
+
+
+def _parse_proxy_for_chrome(proxy_url: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Quebra proxy URL em (chrome_proxy_str, user, pass).
+    Chrome --proxy-server não aceita user:pass na URL — precisa de extensão pra auth.
+    Retorna: ('http://host:port', 'user', 'pass') ou (raw, None, None) se sem auth."""
+    if not proxy_url:
+        return None, None, None
+    from urllib.parse import urlparse, unquote
+    try:
+        p = urlparse(proxy_url)
+        if not p.scheme or not p.hostname:
+            return None, None, None
+        port = p.port or (1080 if "socks" in p.scheme else 80)
+        chrome_proxy = f"{p.scheme}://{p.hostname}:{port}"
+        user = unquote(p.username) if p.username else None
+        pwd = unquote(p.password) if p.password else None
+        return chrome_proxy, user, pwd
+    except Exception:
+        return None, None, None
+
+
+def _open_chrome_for_account(
+    username: str,
+    reset: bool = False,
+    proxy: Optional[str] = None,
+) -> tuple[bool, str]:
+    """Abre Chrome com profile isolado + UA desktop + (opcional) sessão pré-injetada
+    + (opcional) proxy da conta + flags anti-detect.
+
+    Se reset=True: apaga o profile dir inteiro antes de abrir.
+    Se proxy: Chrome sai pelo MESMO IP que o worker usa (IP coerente, sem flag IG).
     """
     safe = "".join(c for c in username if c.isalnum() or c in "._-")
     if not safe:
         return False, "username inválido"
+
+    # Throttle: evita batch-detection (vários logins do mesmo IP em pouco tempo)
+    throttle_err = _check_throttle(safe)
+    if throttle_err:
+        return False, throttle_err
 
     chrome = _find_chrome_path()
     if not chrome:
@@ -844,7 +939,6 @@ def _open_chrome_for_account(username: str, reset: bool = False) -> tuple[bool, 
     profile_dir.mkdir(parents=True, exist_ok=True)
 
     # Procura sessão salva pra auto-login. Se reset=True, pula (queremos login manual limpo).
-    # Se não existe sessão, abre Chrome vazio também.
     cdp_cookies: list[dict] = []
     if not reset:
         session_path = _find_session_file(safe)
@@ -857,19 +951,14 @@ def _open_chrome_for_account(username: str, reset: bool = False) -> tuple[bool, 
     debug_port = _get_free_port() if inject else 0
     target_url = "https://www.instagram.com/"
 
-    # IMPORTANTE: UA DESKTOP no Chrome (não o UA Android do worker).
-    # Por quê: Instagram serve layout mobile pra UA Android, que:
-    #   - Esconde o header do perfil (foto/bio/botão "Editar perfil")
-    #   - Tenta empurrar "usar o app"
-    #   - Algumas APIs (.../web/discover/mark_su_seen/) rejeitam sessão
-    #     "emulada de mobile" → ERR_TOO_MANY_REDIRECTS
-    # Coerência de device fingerprint só importa pro worker (instagrapi).
-    # Logar de PC + mobile na mesma @ é normal (qualquer usuário real faz).
+    # UA Chrome desktop normal (não o UA Android do worker — Insta serviria layout mobile bugado)
     desktop_ua = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/131.0.0.0 Safari/537.36"
     )
+
+    # === Flags anti-detect + anti-leak ===
     args = [
         chrome,
         f"--user-data-dir={profile_dir}",
@@ -877,13 +966,41 @@ def _open_chrome_for_account(username: str, reset: bool = False) -> tuple[bool, 
         "--window-size=1280,800",
         "--no-first-run",
         "--no-default-browser-check",
-        "--disable-features=Translate",
+        # Anti-detect: Instagram olha navigator.webdriver — sem isso, score bot 100%
+        "--disable-blink-features=AutomationControlled",
+        # Anti-leak: WebRTC vaza IP REAL mesmo com proxy. Esse flag força WebRTC
+        # passar só por trás do proxy (ou desabilitar se não der)
+        "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+        # Translate prompt do Chrome em página estrangeira é signal estranho
+        "--disable-features=Translate,AcceptCHFrame,PrivacySandboxSettings4",
+        # Notificações falsas (browser sem notifs é signal)
+        "--disable-notifications",
+        # Locale pt-BR (coerente com worker BR)
+        "--lang=pt-BR",
     ]
+
+    # === Proxy COERENTE com o worker (CRÍTICO pra não flagar batch login) ===
+    proxy_user_auth = None
+    proxy_pass_auth = None
+    ext_dir = None
+    if proxy:
+        chrome_proxy, proxy_user_auth, proxy_pass_auth = _parse_proxy_for_chrome(proxy)
+        if chrome_proxy:
+            args.append(f"--proxy-server={chrome_proxy}")
+            # Resolve DNS via proxy também (evita DNS leak pro provedor local)
+            args.append(f"--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE localhost")
+            # Se proxy tem auth, monta uma extensão Chrome que responde ao auth dialog
+            if proxy_user_auth and proxy_pass_auth:
+                ext_dir = profile_dir / "_proxy_auth_ext"
+                try:
+                    _build_proxy_auth_extension(ext_dir, proxy_user_auth, proxy_pass_auth)
+                    args.append(f"--load-extension={ext_dir}")
+                except Exception as e:
+                    print(f"[local-api] ⚠️ falha criando extensão proxy auth: {e}")
+            print(f"[local-api] 🌐 Chrome via proxy {chrome_proxy} (auth: {'sim' if proxy_user_auth else 'não'})")
+
     if inject:
         # Sobe Chrome em about:blank — injetamos cookies via CDP ANTES de navegar
-        # pro instagram.com, senão a página carrega deslogada e depois faz reload.
-        # --remote-allow-origins=* é OBRIGATÓRIO em Chrome 111+ pra aceitar CDP
-        # via WebSocket (senão handshake retorna 403 Forbidden).
         args += [
             f"--remote-debugging-port={debug_port}",
             "--remote-allow-origins=*",
@@ -900,7 +1017,8 @@ def _open_chrome_for_account(username: str, reset: bool = False) -> tuple[bool, 
     except Exception as e:
         return False, f"Popen falhou: {e}"
 
-    desc = "Chrome desktop"
+    proxy_desc = " + proxy" if proxy else " (SEM proxy)"
+    desc = f"Chrome desktop{proxy_desc}"
     if reset:
         return True, f"{desc} (profile RESETADO — login manual)"
     if inject:
@@ -957,15 +1075,28 @@ class _LocalAPIHandler(BaseHTTPRequestHandler):
         if not username:
             self._send(400, b'{"error":"username obrigatorio"}')
             return
-        ok, info = _open_chrome_for_account(username, reset=reset)
+        # Proxy: aceita via query (?proxy=...) OU body JSON {"proxy":"..."}
+        proxy = (qs.get("proxy") or [""])[0].strip() or None
+        if not proxy:
+            try:
+                content_len = int(self.headers.get("Content-Length", "0"))
+                if content_len > 0:
+                    raw = self.rfile.read(content_len)
+                    body_data = _json.loads(raw.decode("utf-8"))
+                    proxy = (body_data.get("proxy") or "").strip() or None
+            except Exception:
+                pass
+        ok, info = _open_chrome_for_account(username, reset=reset, proxy=proxy)
         if ok:
-            body = _json.dumps({"ok": True, "device": info, "reset": reset}).encode("utf-8")
+            body = _json.dumps({"ok": True, "device": info, "reset": reset, "proxy_used": bool(proxy)}).encode("utf-8")
             self._send(200, body)
             emoji = "🧹" if reset else "📱"
             print(f"[local-api] {emoji} abrindo Chrome pra @{username} ({info})")
         else:
             body = _json.dumps({"ok": False, "error": info}).encode("utf-8")
-            self._send(500, body)
+            # 429 (Too Many Requests) se foi throttle, 500 se foi outro erro
+            status = 429 if "Espere" in info or "Aguarde" in info else 500
+            self._send(status, body)
             print(f"[local-api] ⚠️ falha abrindo @{username}: {info}")
 
 

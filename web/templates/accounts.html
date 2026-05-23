@@ -1222,23 +1222,36 @@ elMSoYMQakO</pre>
     try {
       await api(`/api/accounts/${username}/pause-worker?minutes=30`, { method: 'POST' });
     } catch (_) {}
+    // Pega o proxy da conta pra mandar pro worker (Chrome usa MESMO IP do worker
+    // = sem flag "2 IPs diferentes pra mesma @")
+    const acc = accounts.find(a => a.username === username);
+    const accountProxy = (acc && acc.proxy) || null;
     // 1ª tentativa: worker local roda HTTP em 127.0.0.1:17777 e abre o Chrome direto.
     // Se o worker tá rodando, esse fetch resolve em < 1s e o Chrome abre na hora.
     try {
       const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), 4000);
+      const t = setTimeout(() => ctrl.abort(), 6000);
       const url = `http://localhost:17777/open-browser?username=${encodeURIComponent(username)}${reset ? '&reset=1' : ''}`;
       const r = await fetch(url, {
         method: 'POST',
         mode: 'cors',
         signal: ctrl.signal,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ proxy: accountProxy }),
       });
       clearTimeout(t);
+      // 429 = throttle (anti-batch-ban). Mostra erro claro, não cai pro fallback.
+      if (r.status === 429) {
+        const data = await r.json().catch(() => ({}));
+        toast(`⏱️ ${data.error || 'Throttle: aguarde antes de reabrir essa conta'}`, 'warning');
+        return;
+      }
       if (r.ok) {
         const data = await r.json().catch(() => ({}));
         const devStr = data && data.device ? ` (${data.device})` : '';
         const emoji = reset ? '🧹' : '📱';
-        toast(`${emoji} Abrindo Chrome pra @${username}${devStr}… (worker pausado 30min)`, 'success');
+        const proxyMsg = accountProxy ? ' via proxy' : ' SEM proxy (risco)';
+        toast(`${emoji} Abrindo Chrome pra @${username}${devStr}${proxyMsg} (worker pausado 30min)`, 'success');
         // Mostra credenciais (senha + 2FA) pra caso precise digitar manual no Chrome
         try {
           const creds = await api(`/api/accounts/${username}/totp-code`);
