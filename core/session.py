@@ -103,8 +103,21 @@ def get_client(
     # (host:port:user:pass do DataImpulse, com ou sem http:// na frente)
     proxy = _normalize_proxy(proxy)
     if proxy:
+        # CRÍTICO: força sticky session por conta. Provedor rotativo (default
+        # DataImpulse, BrightData, etc.) dá IP DIFERENTE cada request -> Insta
+        # vê sessão pulando IP -> checkpoint imediato. Com sticky, cada @ sai
+        # de UM IP fixo, contas diferentes saem de IPs diferentes.
+        try:
+            from core.proxy_sticky import make_sticky, detect_provider
+            sticky = make_sticky(proxy, username)
+            if sticky != proxy:
+                provider = detect_provider(proxy) or "?"
+                print(f"[{username}] 🔒 sticky session aplicado ({provider})")
+                proxy = sticky
+        except Exception as e:
+            print(f"[{username}] ⚠️ sticky session falhou: {e} (usando proxy rotativo)")
         cl.set_proxy(proxy)
-        print(f"[{username}] 🌐 proxy ativo: {proxy[:40]}...")
+        print(f"[{username}] 🌐 proxy ativo: {proxy[:60]}...")
     if challenge_handler:
         cl.challenge_code_handler = challenge_handler
 

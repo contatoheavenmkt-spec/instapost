@@ -750,14 +750,20 @@ def api_test_proxy(username: str):
     if not proxy:
         raise HTTPException(400, "Essa conta não tem proxy configurado")
 
-    # DEFENSIVO: normaliza na hora de testar mesmo que o salvo esteja em
-    # formato esquisito. Assim o user vê o resultado real, e na próxima vez
-    # que ele salvar, fica permanente no formato correto.
+    # DEFENSIVO: normaliza + aplica sticky session por conta na hora de testar.
+    # Assim o user vê o IP REAL que aquela conta usaria pra postar (com sticky),
+    # não o IP genérico rotativo.
     proxy_raw = proxy
     proxy = _normalize_proxy(proxy_raw)
+    try:
+        from core.proxy_sticky import make_sticky
+        sticky = make_sticky(proxy, username)
+    except Exception:
+        sticky = proxy
+    proxy = sticky or proxy
 
     proxies = {"http": proxy, "https": proxy}
-    result = {"ok": False, "proxy_saved": proxy_raw, "proxy_used": proxy}
+    result = {"ok": False, "proxy_saved": proxy_raw, "proxy_used": proxy, "sticky_applied": (proxy != proxy_raw)}
 
     # 1) IP sem proxy (pra comparar)
     try:

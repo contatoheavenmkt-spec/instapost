@@ -984,6 +984,15 @@ def _open_chrome_for_account(
     proxy_pass_auth = None
     ext_dir = None
     if proxy:
+        # Sticky session por conta (mesmo IP entre requests do Chrome + worker)
+        try:
+            from core.proxy_sticky import make_sticky
+            sticky = make_sticky(proxy, safe)
+            if sticky != proxy:
+                print(f"[local-api] 🔒 sticky session aplicado pro Chrome")
+                proxy = sticky
+        except Exception:
+            pass
         chrome_proxy, proxy_user_auth, proxy_pass_auth = _parse_proxy_for_chrome(proxy)
         if chrome_proxy:
             args.append(f"--proxy-server={chrome_proxy}")
