@@ -554,8 +554,11 @@ elMSoYMQakO</pre>
             <button class="btn btn-subtle btn-sm" onclick="onConnectViaWorker('${a.username}')" title="Conectar conta">
               <i data-lucide="log-in" class="icon"></i> Conectar
             </button>
-            <button class="btn btn-ghost btn-sm" onclick="onOpenBrowser('${a.username}')" title="Abrir Instagram dessa conta no Chrome modo mobile (profile isolado + UA do device fingerprint)">
+            <button class="btn btn-ghost btn-sm" onclick="onOpenBrowser('${a.username}')" title="Abrir Instagram dessa conta no Chrome (profile isolado + auto-login se houver sessão salva)">
               <i data-lucide="smartphone" class="icon"></i>
+            </button>
+            <button class="btn btn-ghost btn-sm" onclick="onOpenBrowser('${a.username}', {reset: true})" title="RESETAR profile e abrir Chrome limpo (use quando aparece ERR_TOO_MANY_REDIRECTS ou perfil esquisito sem header)" style="opacity:.6">
+              <i data-lucide="refresh-ccw" class="icon"></i>
             </button>
             <button class="btn btn-ghost btn-sm" onclick="onOpenProfileEditor('${a.username}')" title="Editar perfil e automações">
               <i data-lucide="user-cog" class="icon"></i>
@@ -1129,13 +1132,25 @@ elMSoYMQakO</pre>
     await load();
   }
 
-  async function onOpenBrowser(username) {
+  async function onOpenBrowser(username, opts) {
+    const reset = opts && opts.reset === true;
+    if (reset) {
+      const ok = confirm(
+        `RESETAR o profile do Chrome de @${username}?\n\n` +
+        `Vai APAGAR cookies, cache e tudo do profile dessa conta. ` +
+        `Você vai ter que logar manualmente uma vez. Use quando o auto-login ` +
+        `tá dando ERR_TOO_MANY_REDIRECTS, perfil aparece esquisito ou Instagram ` +
+        `tá rejeitando a sessão.`
+      );
+      if (!ok) return;
+    }
     // 1ª tentativa: worker local roda HTTP em 127.0.0.1:17777 e abre o Chrome direto.
     // Se o worker tá rodando, esse fetch resolve em < 1s e o Chrome abre na hora.
     try {
       const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), 2500);
-      const r = await fetch(`http://localhost:17777/open-browser?username=${encodeURIComponent(username)}`, {
+      const t = setTimeout(() => ctrl.abort(), 4000);
+      const url = `http://localhost:17777/open-browser?username=${encodeURIComponent(username)}${reset ? '&reset=1' : ''}`;
+      const r = await fetch(url, {
         method: 'POST',
         mode: 'cors',
         signal: ctrl.signal,
@@ -1144,7 +1159,8 @@ elMSoYMQakO</pre>
       if (r.ok) {
         const data = await r.json().catch(() => ({}));
         const devStr = data && data.device ? ` (${data.device})` : '';
-        toast(`📱 Abrindo Chrome pra @${username}${devStr}…`, 'success');
+        const emoji = reset ? '🧹' : '📱';
+        toast(`${emoji} Abrindo Chrome pra @${username}${devStr}…`, 'success');
         return;
       }
     } catch (_) {

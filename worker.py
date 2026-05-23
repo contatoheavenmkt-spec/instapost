@@ -812,9 +812,13 @@ def _kill_chrome_for_profile(profile_dir: Path) -> None:
         print(f"[local-api] kill Chrome anterior falhou (ignorando): {e}")
 
 
-def _open_chrome_for_account(username: str) -> tuple[bool, str]:
-    """Abre Chrome com profile isolado + UA do device fingerprint + sessão Insta
-    pré-injetada (se houver session salva). Retorna (ok, info|erro)."""
+def _open_chrome_for_account(username: str, reset: bool = False) -> tuple[bool, str]:
+    """Abre Chrome com profile isolado + UA desktop + (opcional) sessão pré-injetada.
+
+    Se reset=True: apaga o profile dir inteiro antes de abrir (cookies, cache,
+    storage). Útil quando a sessão atual tá corrompida ou Instagram tá rejeitando
+    cookies antigos (ex: ERR_TOO_MANY_REDIRECTS).
+    """
     safe = "".join(c for c in username if c.isalnum() or c in "._-")
     if not safe:
         return False, "username inválido"
@@ -823,35 +827,54 @@ def _open_chrome_for_account(username: str) -> tuple[bool, str]:
     if not chrome:
         return False, "Chrome não encontrado nesse PC"
 
-    try:
-        from core.devices import device_for_account
-        device = device_for_account(safe)
-    except Exception as e:
-        return False, f"erro carregando device fingerprint: {e}"
-
     profile_dir = Path.home() / "InstaposterProfiles" / safe
-    profile_dir.mkdir(parents=True, exist_ok=True)
 
-    # Mata Chrome anterior que possa estar usando esse profile (senão atacha)
+    # Mata Chrome anterior PRIMEIRO (senão não conseguimos deletar profile dir bloqueado)
     _kill_chrome_for_profile(profile_dir)
 
-    # Procura sessão salva pra auto-login. Se não existe, abre Chrome vazio.
-    session_path = _find_session_file(safe)
+    # Reset: apaga tudo e abre limpo
+    if reset and profile_dir.exists():
+        try:
+            import shutil
+            shutil.rmtree(profile_dir)
+            print(f"[local-api] 🧹 profile resetado: {profile_dir}")
+        except Exception as e:
+            print(f"[local-api] ⚠️ falha apagando profile: {e}")
+
+    profile_dir.mkdir(parents=True, exist_ok=True)
+
+    # Procura sessão salva pra auto-login. Se reset=True, pula (queremos login manual limpo).
+    # Se não existe sessão, abre Chrome vazio também.
     cdp_cookies: list[dict] = []
-    if session_path:
-        cdp_cookies = _extract_cdp_cookies(session_path)
-        if not cdp_cookies:
-            print(f"[local-api] sessão {session_path.name} sem cookies utilizáveis (provavelmente vazia)")
+    if not reset:
+        session_path = _find_session_file(safe)
+        if session_path:
+            cdp_cookies = _extract_cdp_cookies(session_path)
+            if not cdp_cookies:
+                print(f"[local-api] sessão {session_path.name} sem cookies utilizáveis (provavelmente vazia)")
 
     inject = bool(cdp_cookies)
     debug_port = _get_free_port() if inject else 0
     target_url = "https://www.instagram.com/"
 
+    # IMPORTANTE: UA DESKTOP no Chrome (não o UA Android do worker).
+    # Por quê: Instagram serve layout mobile pra UA Android, que:
+    #   - Esconde o header do perfil (foto/bio/botão "Editar perfil")
+    #   - Tenta empurrar "usar o app"
+    #   - Algumas APIs (.../web/discover/mark_su_seen/) rejeitam sessão
+    #     "emulada de mobile" → ERR_TOO_MANY_REDIRECTS
+    # Coerência de device fingerprint só importa pro worker (instagrapi).
+    # Logar de PC + mobile na mesma @ é normal (qualquer usuário real faz).
+    desktop_ua = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/131.0.0.0 Safari/537.36"
+    )
     args = [
         chrome,
         f"--user-data-dir={profile_dir}",
-        f"--user-agent={device['user_agent']}",
-        "--window-size=412,870",
+        f"--user-agent={desktop_ua}",
+        "--window-size=1280,800",
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-features=Translate",
@@ -877,7 +900,9 @@ def _open_chrome_for_account(username: str) -> tuple[bool, str]:
     except Exception as e:
         return False, f"Popen falhou: {e}"
 
-    desc = f"{device['manufacturer']} {device['model']}"
+    desc = "Chrome desktop"
+    if reset:
+        return True, f"{desc} (profile RESETADO — login manual)"
     if inject:
         injected = _inject_cookies_via_cdp(debug_port, cdp_cookies, target_url)
         if injected:
@@ -928,14 +953,16 @@ class _LocalAPIHandler(BaseHTTPRequestHandler):
             return
         qs = parse_qs(parsed.query)
         username = (qs.get("username") or [""])[0].strip()
+        reset = (qs.get("reset") or ["0"])[0] in ("1", "true", "yes")
         if not username:
             self._send(400, b'{"error":"username obrigatorio"}')
             return
-        ok, info = _open_chrome_for_account(username)
+        ok, info = _open_chrome_for_account(username, reset=reset)
         if ok:
-            body = _json.dumps({"ok": True, "device": info}).encode("utf-8")
+            body = _json.dumps({"ok": True, "device": info, "reset": reset}).encode("utf-8")
             self._send(200, body)
-            print(f"[local-api] 📱 abrindo Chrome pra @{username} ({info})")
+            emoji = "🧹" if reset else "📱"
+            print(f"[local-api] {emoji} abrindo Chrome pra @{username} ({info})")
         else:
             body = _json.dumps({"ok": False, "error": info}).encode("utf-8")
             self._send(500, body)
