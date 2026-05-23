@@ -28,6 +28,45 @@ def _clean_totp_secret(secret: Optional[str]) -> Optional[str]:
     return cleaned or None
 
 
+def _normalize_proxy(raw: Optional[str]) -> Optional[str]:
+    """Converte formatos comuns de proxy pra URL padrão.
+
+    Defensivo: o worker recebe proxy do server e nem sempre o server normalizou
+    (ex: VPS rodando código antigo). Aqui garantimos que o instagrapi/requests
+    sempre vê o formato URL correto antes de tentar usar.
+
+    Aceita:
+      - http://user:pass@host:port           (já no formato URL)
+      - socks5://user:pass@host:port         (idem)
+      - http://host:port:user:pass           (DataImpulse + http:// na frente)
+      - host:port:user:pass                  (DataImpulse, Bright Data raw)
+      - user:pass@host:port                  (sem scheme — vira http://)
+      - host:port                            (sem auth — vira http://)
+    """
+    if not raw:
+        return None
+    raw = raw.strip()
+    if not raw:
+        return None
+    if "://" in raw:
+        scheme, rest = raw.split("://", 1)
+        scheme = scheme.lower()
+        if scheme not in ("http", "https", "socks4", "socks5", "socks5h"):
+            scheme = "http"
+    else:
+        scheme = "http"
+        rest = raw
+    if "@" in rest:
+        return f"{scheme}://{rest}"
+    parts = rest.split(":")
+    if len(parts) == 4:
+        host, port, user, password = parts
+        return f"{scheme}://{user}:{password}@{host}:{port}"
+    if len(parts) == 2:
+        return f"{scheme}://{rest}"
+    return raw
+
+
 def get_client(
     username: str,
     password: str,
@@ -60,8 +99,12 @@ def get_client(
     except Exception as e:
         print(f"[{username}] ⚠️ device fingerprint falhou: {e} — usando default do instagrapi")
 
+    # Normaliza defensivamente — server pode mandar formato esquisito
+    # (host:port:user:pass do DataImpulse, com ou sem http:// na frente)
+    proxy = _normalize_proxy(proxy)
     if proxy:
         cl.set_proxy(proxy)
+        print(f"[{username}] 🌐 proxy ativo: {proxy[:40]}...")
     if challenge_handler:
         cl.challenge_code_handler = challenge_handler
 
