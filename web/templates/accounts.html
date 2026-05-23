@@ -77,7 +77,20 @@
       <i data-lucide="alert-triangle" style="width:18px;height:18px;color:var(--danger)"></i>
       <div>
         <div class="text-[13px] font-semibold"><span id="blocked-count">0</span> conta(s) bloqueada(s) pelo Instagram</div>
-        <div class="text-[11.5px] text-soft">Instagram pediu verificação, checkpoint ou marcou atividade suspeita. Faça login manual no app, resolva o challenge, depois clique em "Resolvi" na linha da conta.</div>
+        <div class="text-[11.5px] text-soft">Rate limit, conta desabilitada ou IP banido. Resolva manualmente e clique em "Resolvi" na linha da conta.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Banner de contas precisando verificação -->
+<div id="verification-banner" class="surface px-4 py-3 mb-3 hidden" style="border-left: 3px solid #fbbf24; background: rgba(251,191,36,0.08)">
+  <div class="flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <i data-lucide="alert-triangle" style="width:18px;height:18px;color:#fbbf24"></i>
+      <div>
+        <div class="text-[13px] font-semibold"><span id="verification-count">0</span> conta(s) precisam de verificação manual</div>
+        <div class="text-[11.5px] text-soft">Instagram pediu checkpoint/challenge (código por email, captcha, etc) e não dá pra resolver via API. <strong>Logue no app Instagram</strong> (ou via botão Smartphone), passe pelo desafio, depois clique em "Verifiquei" na linha da conta.</div>
       </div>
     </div>
   </div>
@@ -131,6 +144,9 @@
     </button>
     <button class="btn btn-ghost btn-sm status-filter" data-status="blocked" onclick="setStatusFilter('blocked')">
       <span class="dot dot-danger" style="margin-right:4px"></span>Bloqueadas <span id="sf-count-blocked" class="text-muted ml-1">0</span>
+    </button>
+    <button class="btn btn-ghost btn-sm status-filter" data-status="verification" onclick="setStatusFilter('verification')" title="Contas que precisam de verificação manual no app Instagram (challenge/checkpoint)">
+      <i data-lucide="alert-triangle" style="width:11px;height:11px;display:inline;vertical-align:-1px;color:#fbbf24"></i> Verificação <span id="sf-count-verification" class="text-muted ml-1">0</span>
     </button>
     <button class="btn btn-ghost btn-sm status-filter" data-status="paused" onclick="setStatusFilter('paused')">
       <span class="dot dot-muted" style="margin-right:4px"></span>Pausadas <span id="sf-count-paused" class="text-muted ml-1">0</span>
@@ -437,7 +453,8 @@ elMSoYMQakO</pre>
     if (filter === 'all') return true;
     if (filter === 'paused') return !a.active;
     if (filter === 'blocked') return a.blocked || a.shadowban_suspected;
-    if (filter === 'connected') return a.active && (a.session === 'saved' || a.connected_via_worker_id) && !a.blocked;
+    if (filter === 'verification') return a.needs_verification && !a.blocked;
+    if (filter === 'connected') return a.active && (a.session === 'saved' || a.connected_via_worker_id) && !a.blocked && !a.needs_verification;
     if (filter === 'disconnected') return a.active && a.session !== 'saved' && !a.connected_via_worker_id && !a.blocked;
     if (filter === 'warming') return a.active && a.is_warming_up;
     return true;
@@ -461,6 +478,7 @@ elMSoYMQakO</pre>
     document.getElementById('sf-count-connected').textContent = accounts.filter(a => _matchStatus(a, 'connected')).length;
     document.getElementById('sf-count-disconnected').textContent = accounts.filter(a => _matchStatus(a, 'disconnected')).length;
     document.getElementById('sf-count-blocked').textContent = accounts.filter(a => _matchStatus(a, 'blocked')).length;
+    document.getElementById('sf-count-verification').textContent = accounts.filter(a => _matchStatus(a, 'verification')).length;
     document.getElementById('sf-count-paused').textContent = accounts.filter(a => _matchStatus(a, 'paused')).length;
     document.getElementById('sf-count-warming').textContent = accounts.filter(a => _matchStatus(a, 'warming')).length;
   }
@@ -494,9 +512,13 @@ elMSoYMQakO</pre>
 
     tbody.innerHTML = filtered.map(a => {
       const blockedRow = a.blocked ? 'style="background: rgba(239,68,68,0.06); border-left: 3px solid var(--danger)"' : '';
-      const shadowRow = (!a.blocked && a.shadowban_suspected) ? 'style="background: rgba(245,158,11,0.06); border-left: 3px solid var(--warning)"' : '';
+      const verifyRow = (!a.blocked && a.needs_verification) ? 'style="background: rgba(251,191,36,0.08); border-left: 3px solid #fbbf24"' : '';
+      const shadowRow = (!a.blocked && !a.needs_verification && a.shadowban_suspected) ? 'style="background: rgba(245,158,11,0.06); border-left: 3px solid var(--warning)"' : '';
       const blockedBadge = a.blocked
         ? `<span class="badge badge-danger" title="Bloqueada em ${(a.blocked_at||'').slice(0,16).replace('T',' ')} - ${(a.blocked_reason||'').slice(0,140)}"><i data-lucide="alert-triangle" style="width:11px;height:11px"></i> BLOQUEADA</span>`
+        : '';
+      const verifyBadge = (a.needs_verification && !a.blocked)
+        ? `<span class="badge" style="background:rgba(251,191,36,0.18);color:#fbbf24;border:1px solid rgba(251,191,36,0.4);font-weight:600" title="Instagram pediu verificação manual em ${(a.verification_at||'').slice(0,16).replace('T',' ')} — ${(a.verification_reason||'').slice(0,180)}"><i data-lucide="alert-triangle" style="width:11px;height:11px"></i> PRECISA VERIFICAR</span>`
         : '';
       const shadowBadge = a.shadowban_suspected
         ? `<span class="badge badge-warning" title="Suspeita desde ${(a.shadowban_at||'').slice(0,16).replace('T',' ')} - ${(a.shadowban_reason||'').slice(0,200)}"><i data-lucide="eye-off" style="width:11px;height:11px"></i> SHADOW BAN?</span>`
@@ -518,18 +540,23 @@ elMSoYMQakO</pre>
         ? `<button class="btn btn-subtle btn-sm" onclick="onClearBlock('${a.username}')" title="Marcar como resolvido (desbloqueie a conta manualmente antes)" style="color: #6ee7b7">
             <i data-lucide="check-circle-2" class="icon"></i> Resolvi
           </button>`
-        : (a.shadowban_suspected
-          ? `<button class="btn btn-subtle btn-sm" onclick="onClearShadowban('${a.username}')" title="Falso positivo? Marca como resolvido" style="color: #fcd34d">
-              <i data-lucide="check-circle-2" class="icon"></i> Falso alarme
+        : (a.needs_verification
+          ? `<button class="btn btn-subtle btn-sm" onclick="onClearVerification('${a.username}')" title="Após logar manualmente no app Instagram e passar pelo challenge, clica aqui pra desmarcar" style="color: #fbbf24">
+              <i data-lucide="check-circle-2" class="icon"></i> Verifiquei
             </button>`
-          : '');
+          : (a.shadowban_suspected
+            ? `<button class="btn btn-subtle btn-sm" onclick="onClearShadowban('${a.username}')" title="Falso positivo? Marca como resolvido" style="color: #fcd34d">
+                <i data-lucide="check-circle-2" class="icon"></i> Falso alarme
+              </button>`
+            : ''));
       return `
-      <tr data-username="${a.username}" ${blockedRow}${shadowRow}>
+      <tr data-username="${a.username}" ${blockedRow}${verifyRow}${shadowRow}>
         <td><input type="checkbox" class="check row-check" value="${a.username}" ${selection.has(a.username) ? 'checked' : ''} onchange="onSelect(this)" /></td>
         <td>
           <div class="flex items-center gap-2 flex-wrap">
             <div class="font-medium mono text-[13px]">@${a.username}</div>
             ${blockedBadge}
+            ${verifyBadge}
             ${shadowBadge}
             ${healthBadge}
             ${warmupBadge}
@@ -598,6 +625,17 @@ elMSoYMQakO</pre>
         banner.classList.add('hidden');
       }
     }
+    // Verification banner
+    const verify = accounts.filter(a => a.needs_verification && !a.blocked);
+    const vBanner = document.getElementById('verification-banner');
+    if (vBanner) {
+      if (verify.length) {
+        document.getElementById('verification-count').textContent = verify.length;
+        vBanner.classList.remove('hidden');
+      } else {
+        vBanner.classList.add('hidden');
+      }
+    }
     // Shadow ban banner
     const shadow = accounts.filter(a => a.shadowban_suspected);
     const sbBanner = document.getElementById('shadowban-banner');
@@ -653,6 +691,22 @@ elMSoYMQakO</pre>
     try {
       await api(`/api/accounts/${username}/clear-block`, { method: 'POST' });
       toast(`@${username} desmarcada como bloqueada`, 'success');
+      await load();
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  }
+
+  async function onClearVerification(username) {
+    const ok = await confirmModal({
+      title: `Verificação de @${username} resolvida?`,
+      message: 'Confirme APENAS DEPOIS de logar manualmente no app Instagram (ou no Chrome via botão Smartphone) e passar pela verificação (código por email/SMS, captcha, etc). Aí o worker pode tentar conectar de novo sem cair no challenge.',
+      confirmText: 'Sim, já resolvi no app',
+    });
+    if (!ok) return;
+    try {
+      await api(`/api/accounts/${username}/clear-verification`, { method: 'POST' });
+      toast(`@${username} desmarcada — pode conectar de novo`, 'success');
       await load();
     } catch (e) {
       toast(e.message, 'error');

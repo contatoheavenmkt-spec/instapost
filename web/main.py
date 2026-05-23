@@ -576,10 +576,14 @@ def _account_view(a: dict) -> dict:
         "is_warming_up": _is_account_warming_up(a),
         "hours_since_first_post": _hours_since_first_post(a),
         "skip_warmup": bool(a.get("skip_warmup", False)),
-        # Bloqueio detectado
+        # Bloqueio detectado (rate limit / disabled — sério)
         "blocked": bool(a.get("blocked", False)),
         "blocked_at": a.get("blocked_at"),
         "blocked_reason": a.get("blocked_reason"),
+        # Verificação requerida (challenge/checkpoint — resolúvel manual no app)
+        "needs_verification": bool(a.get("needs_verification", False)),
+        "verification_at": a.get("verification_at"),
+        "verification_reason": a.get("verification_reason"),
         # Health / shadow ban detector
         "shadowban_suspected": bool(a.get("shadowban_suspected", False)),
         "shadowban_at": a.get("shadowban_at"),
@@ -591,9 +595,25 @@ def _account_view(a: dict) -> dict:
 
 # ---------- DETECÇÃO DE BLOQUEIO ----------
 
-BLOCK_PATTERNS = (
-    "challenge_required", "challenge",
+# Erros que indicam "precisa verificação manual" (Instagram pediu challenge,
+# checkpoint, ou similar). Conta volta a funcionar depois que o user resolve no app.
+# RESOLÚVEIS pelo user.
+CHALLENGE_PATTERNS = (
+    "challenge_required", "challengeresolve",
     "checkpoint_required", "checkpoint",
+    "podemos enviar um email",                   # IG pt-BR
+    "we can send you an email",                  # IG en
+    "two-factor", "two_factor",
+    "verify your account", "verifique sua conta",
+    "suspicious login", "tentativa de login suspeita",
+    "unusual activity", "atividade incomum",
+    "step_name",                                 # bloks challenge resolver
+    "não foi possível encontrar uma conta",      # IG mente quando IP flagrado
+)
+
+# Erros que indicam bloqueio MAIS SÉRIO (rate limit, conta desabilitada, IP banido).
+# Diferente de challenge: aqui não tem ação clara pro user resolver na hora.
+BLOCK_PATTERNS = (
     "feedback_required",
     "login_required",
     "please_wait", "please wait",
@@ -604,8 +624,20 @@ BLOCK_PATTERNS = (
 )
 
 
+def _is_challenge_error(error_msg: Optional[str]) -> Optional[str]:
+    """Retorna o padrão casado se for erro de challenge/verificação, senão None.
+    Tem prioridade sobre _is_block_error — challenge é o estado mais específico."""
+    if not error_msg:
+        return None
+    low = error_msg.lower()
+    for pat in CHALLENGE_PATTERNS:
+        if pat in low:
+            return pat
+    return None
+
+
 def _is_block_error(error_msg: Optional[str]) -> Optional[str]:
-    """Retorna o padrão casado se for erro de bloqueio, senão None."""
+    """Retorna o padrão casado se for erro de bloqueio (rate/disabled), senão None."""
     if not error_msg:
         return None
     low = error_msg.lower()
@@ -1740,14 +1772,27 @@ def api_get_health(username: str, user=Depends(auth.require_user)):
 def api_clear_block(username: str, user=Depends(auth.require_user)):
     """Desmarca a conta como bloqueada — use quando resolver o bloqueio manualmente
     (passou no challenge, mudou senha, etc)."""
-    accounts = load_accounts()
-    for a in accounts:
-        if a["username"] == username:
-            a["blocked"] = False
-            a["blocked_at"] = None
-            a["blocked_reason"] = None
-            save_accounts(accounts)
-            return {"ok": True, "account": _account_view(a)}
+    with accounts_transaction() as accounts:
+        for a in accounts:
+            if a["username"] == username:
+                a["blocked"] = False
+                a["blocked_at"] = None
+                a["blocked_reason"] = None
+                return {"ok": True, "account": _account_view(a)}
+    raise HTTPException(404, "Conta não encontrada")
+
+
+@app.post("/api/accounts/{username}/clear-verification")
+def api_clear_verification(username: str, user=Depends(auth.require_user)):
+    """Desmarca needs_verification — use quando você fez login manual no app
+    Instagram e passou pelo challenge/checkpoint."""
+    with accounts_transaction() as accounts:
+        for a in accounts:
+            if a["username"] == username:
+                a["needs_verification"] = False
+                a["verification_at"] = None
+                a["verification_reason"] = None
+                return {"ok": True, "account": _account_view(a)}
     raise HTTPException(404, "Conta não encontrada")
 
 
@@ -2404,21 +2449,32 @@ def api_worker_job_result(job_id: str, payload: WorkerResultIn, request: Request
         raise HTTPException(404, "Job não encontrado ou não atribuído a esse worker")
 
     # Side-effects pós-resultado:
-    # Failure: se error_msg casa com padrão de bloqueio, marca conta como blocked
+    # Failure: classifica o erro em 2 níveis:
+    #   - challenge/verificação (resolúvel manual) → needs_verification=True
+    #   - bloqueio sério (rate/disabled) → blocked=True
+    # Challenge tem prioridade: muitas vezes o IG retorna challenge antes de blocar.
     if (not payload.success) and job and payload.error_msg:
-        pattern = _is_block_error(payload.error_msg)
-        if pattern:
+        chal_pattern = _is_challenge_error(payload.error_msg)
+        block_pattern = None if chal_pattern else _is_block_error(payload.error_msg)
+        if chal_pattern or block_pattern:
             try:
                 with accounts_transaction() as accounts:
                     for a in accounts:
                         if a["username"] == job.account_username:
-                            a["blocked"] = True
-                            a["blocked_at"] = scheduler_mod.now_local().isoformat(timespec="seconds")
-                            a["blocked_reason"] = f"{pattern} — {payload.error_msg[:200]}"
-                            print(f"[block] @{a['username']} marcada como bloqueada ({pattern})")
+                            now_iso = scheduler_mod.now_local().isoformat(timespec="seconds")
+                            if chal_pattern:
+                                a["needs_verification"] = True
+                                a["verification_at"] = now_iso
+                                a["verification_reason"] = f"{chal_pattern} — {payload.error_msg[:200]}"
+                                print(f"[verify] @{a['username']} precisa verificação ({chal_pattern})")
+                            else:
+                                a["blocked"] = True
+                                a["blocked_at"] = now_iso
+                                a["blocked_reason"] = f"{block_pattern} — {payload.error_msg[:200]}"
+                                print(f"[block] @{a['username']} marcada como bloqueada ({block_pattern})")
                             break
             except Exception as e:
-                print(f"[worker_result] erro marcando bloqueio: {e}")
+                print(f"[worker_result] erro marcando bloqueio/verificação: {e}")
 
     # 1) Sucesso em qualquer op = marca conta como "conectada via worker"
     # 2) auto_follow_back: atualiza cache seen_followers no accounts.json
@@ -2437,6 +2493,12 @@ def api_worker_job_result(job_id: str, payload: WorkerResultIn, request: Request
                         a["blocked_at"] = None
                         a["blocked_reason"] = None
                         print(f"[block] @{a['username']} desmarcada (voltou a funcionar)")
+                    # Mesma coisa pra needs_verification — login OK = challenge resolvido
+                    if a.get("needs_verification"):
+                        a["needs_verification"] = False
+                        a["verification_at"] = None
+                        a["verification_reason"] = None
+                        print(f"[verify] @{a['username']} verificação desmarcada (login OK)")
                     if job.operation == "auto_follow_back" and payload.result_data:
                         new_seen = payload.result_data.get("seen_followers")
                         if isinstance(new_seen, list) and new_seen:
