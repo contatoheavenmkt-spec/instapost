@@ -88,16 +88,23 @@ def get_client(
     cl = Client()
     cl.delay_range = [2, 5]
 
-    # Device fingerprint determinístico por conta: cada @ aparece como
-    # um celular Android diferente (modelo, versão, IDs). Reduz cluster
-    # detection do Instagram.
-    try:
-        from core.devices import apply_device_to_client
-        device_info = apply_device_to_client(cl, username)
-        if device_info:
-            print(f"[{username}] 📱 device: {device_info['manufacturer']} {device_info['model']} (Android {device_info['android_release']})")
-    except Exception as e:
-        print(f"[{username}] ⚠️ device fingerprint falhou: {e} — usando default do instagrapi")
+    session_file = SESSIONS_DIR / f"{username}.json"
+    session_existed = session_file.exists()
+
+    # Device fingerprint: APENAS pra contas SEM sessão prévia.
+    # Pra contas COM sessão, mantém o device que a conta JÁ TEM (load_settings
+    # carrega no Tentativa 1; pra Tentativa 2 fresh-login, lemos manualmente).
+    # Por que: mudar device numa conta que IG já conhece = "novo aparelho
+    # detectado" = login pra verificação. Isso afundou contas que antes
+    # logavam normal — random device aplicado em conta com histórico antigo.
+    if not session_existed:
+        try:
+            from core.devices import apply_device_to_client
+            device_info = apply_device_to_client(cl, username)
+            if device_info:
+                print(f"[{username}] 📱 device random (1ª vez): {device_info['manufacturer']} {device_info['model']}")
+        except Exception as e:
+            print(f"[{username}] ⚠️ device fingerprint falhou: {e} — usando default do instagrapi")
 
     # Normaliza defensivamente — server pode mandar formato esquisito
     # (host:port:user:pass do DataImpulse, com ou sem http:// na frente)
@@ -122,7 +129,7 @@ def get_client(
         cl.challenge_code_handler = challenge_handler
 
     totp_secret = _clean_totp_secret(totp_secret)
-    session_file = SESSIONS_DIR / f"{username}.json"
+    # session_file já definido lá em cima (precisava antes do device check)
 
     def _do_login(client: Client):
         """Faz o login passando código TOTP se a conta tem 2FA. Wrapped em
@@ -181,14 +188,47 @@ def get_client(
     try:
         cl = Client()
         cl.delay_range = [2, 5]
-        # Re-aplica device fingerprint no Client novo (fresh login)
-        try:
-            from core.devices import apply_device_to_client
-            apply_device_to_client(cl, username)
-        except Exception:
-            pass
+        # Device: se já tinha sessão (mesmo expirada), reusa o device DELA
+        # pra IG ver continuidade. Se conta nova (sem sessão), aplica random.
+        if session_existed:
+            try:
+                import json as _json
+                old = _json.loads(session_file.read_text(encoding="utf-8"))
+                if old.get("device_settings"):
+                    cl.set_device(old["device_settings"])
+                if old.get("user_agent"):
+                    cl.set_user_agent(old["user_agent"])
+                if old.get("locale"):
+                    cl.set_locale(old["locale"])
+                if old.get("timezone_offset") is not None:
+                    cl.set_timezone_offset(old["timezone_offset"])
+                if old.get("uuids"):
+                    cl.set_uuids(old["uuids"])
+                ds = old.get("device_settings") or {}
+                print(f"[{username}] 📱 device da sessão antiga reusado: {ds.get('manufacturer','?')} {ds.get('model','?')} (continuidade IG)")
+            except Exception as e:
+                print(f"[{username}] ⚠️ não consegui ler device da sessão antiga ({e}), usando random")
+                try:
+                    from core.devices import apply_device_to_client
+                    apply_device_to_client(cl, username)
+                except Exception:
+                    pass
+        else:
+            # Conta nunca logou — random device + UUIDs novos
+            try:
+                from core.devices import apply_device_to_client
+                apply_device_to_client(cl, username)
+            except Exception:
+                pass
+
+        # Re-aplica proxy (sticky session se aplicável) no Client novo
         if proxy:
-            cl.set_proxy(proxy)
+            try:
+                from core.proxy_sticky import make_sticky
+                proxy_sticky = make_sticky(proxy, username)
+                cl.set_proxy(proxy_sticky)
+            except Exception:
+                cl.set_proxy(proxy)
 
         _do_login(cl)
         # Dump sessão sob file lock — evita corrupção se 2 procs salvarem juntos
