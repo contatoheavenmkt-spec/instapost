@@ -620,10 +620,11 @@ class ProxyIn(BaseModel):
 def _normalize_proxy(raw: str) -> str:
     """Converte formatos comuns de proxy pra URL padrão que requests/instagrapi entendem.
 
-    Aceita:
-      - http://user:pass@host:port           (já no formato URL)
+    Aceita (com ou sem scheme prefix):
+      - http://user:pass@host:port           (já no formato URL — devolve igual)
       - socks5://user:pass@host:port         (idem)
-      - host:port:user:pass                  (DataImpulse, Bright Data, etc)
+      - http://host:port:user:pass           (alguém colou DataImpulse + http://)
+      - host:port:user:pass                  (DataImpulse, Bright Data raw)
       - user:pass@host:port                  (sem scheme — vira http://)
       - host:port                            (sem auth — vira http://)
 
@@ -632,21 +633,27 @@ def _normalize_proxy(raw: str) -> str:
     raw = (raw or "").strip()
     if not raw:
         return ""
-    # Já é URL completa
+    # Separa scheme (se houver) do resto
     if "://" in raw:
-        return raw
-    # user:pass@host:port (sem scheme)
-    if "@" in raw:
-        return f"http://{raw}"
-    # Conta colons pra distinguir
-    parts = raw.split(":")
+        scheme, rest = raw.split("://", 1)
+        scheme = scheme.lower()
+        if scheme not in ("http", "https", "socks4", "socks5", "socks5h"):
+            scheme = "http"  # scheme estranho, força http
+    else:
+        scheme = "http"
+        rest = raw
+    # Se já tem @, é formato user:pass@host:port — só re-monta com scheme
+    if "@" in rest:
+        return f"{scheme}://{rest}"
+    # Conta colons no rest pra detectar formato
+    parts = rest.split(":")
     if len(parts) == 4:
-        # host:port:user:pass (formato DataImpulse/Bright Data/etc)
+        # host:port:user:pass (formato DataImpulse/Bright Data/Smartproxy/etc)
         host, port, user, password = parts
-        return f"http://{user}:{password}@{host}:{port}"
+        return f"{scheme}://{user}:{password}@{host}:{port}"
     if len(parts) == 2:
         # host:port (sem auth)
-        return f"http://{raw}"
+        return f"{scheme}://{rest}"
     # Não conseguimos detectar — devolve como veio, validação subsequente alerta
     return raw
 
