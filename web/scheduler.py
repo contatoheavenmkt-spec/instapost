@@ -851,13 +851,6 @@ class ScheduleManager:
         from core import paths as _paths
         from web.workers import manager as worker_manager
 
-        # Janela 7h-22h (horario local servidor)
-        hour = _dt.now().hour
-        if hour < 7 or hour >= 22:
-            if _dt.now().minute < 5:
-                print(f"[diversify] fora da janela 7h-22h (atual: {hour}h), aguardando")
-            return
-
         # GUARDA CRÍTICA: se NÃO tem worker online, NÃO cria jobs novos
         # (anti-inchar fila quando worker caiu de madrugada).
         # Worker quando volta, vai pegar os pending antigos + auto-loop volta a criar novos.
@@ -869,6 +862,7 @@ class ScheduleManager:
             return
 
         # Itera por todos os workspaces existentes em disco
+        # Janela de horário agora é POR WORKSPACE (lida em _diversify_tick_for_workspace)
         for slug in _paths.list_workspace_slugs():
             try:
                 self._diversify_tick_for_workspace(slug)
@@ -887,6 +881,19 @@ class ScheduleManager:
 
         settings = _diversify.load(slug)
         if not settings.get("enabled"):
+            return
+
+        # Janela de horário por workspace (default 6h-24h, antes era hardcoded 7-22)
+        # Bug anterior: 7-22 bloqueava hour=22 (22 >= 22 True), então qualquer
+        # próximo run agendado entre 22:00-22:59 nunca disparava.
+        win_start = int(settings.get("window_start_hour", 6))
+        win_end = int(settings.get("window_end_hour", 24))
+        hour = _dt.now().hour
+        # Janela é [start, end) — end EXCLUSIVO. 24 = inclui 23h.
+        in_window = (win_start <= hour < win_end) if win_end <= 24 else (hour >= win_start or hour < (win_end - 24))
+        if not in_window:
+            if _dt.now().minute < 5:
+                print(f"[diversify] ws='{slug}' fora da janela {win_start}h-{win_end}h (atual: {hour}h), aguardando")
             return
 
         interval_h = float(settings.get("interval_hours", 6))

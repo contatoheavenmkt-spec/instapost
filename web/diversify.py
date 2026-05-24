@@ -41,6 +41,10 @@ DEFAULTS = {
     "repetitions_per_video": 3,         # quantas vezes mesmo video por conta antes de avançar
     "new_account_threshold_hours": 24,  # quanto tempo após 1º post conta é "nova"
     "new_account_interval_hours": 6,    # ritmo de aquecimento da conta nova
+    # Janela de horário permitido pra rodar auto-loop (anti-detect "posta de
+    # madrugada"). Default: 6h-24h (só bloqueia 0-6h). 0-24 = sem janela.
+    "window_start_hour": 6,
+    "window_end_hour": 24,
 }
 
 
@@ -72,6 +76,13 @@ def save(data: dict, slug: Optional[str] = None):
         current["repetitions_per_video"] = max(1, min(10, int(current.get("repetitions_per_video", 3))))
         current["new_account_threshold_hours"] = max(1, min(168, int(current.get("new_account_threshold_hours", 24))))
         current["new_account_interval_hours"] = max(1, min(72, int(current.get("new_account_interval_hours", 6))))
+        # Janela de horário: clamp [0,24] e garante end > start
+        ws = max(0, min(23, int(current.get("window_start_hour", 6))))
+        we = max(1, min(24, int(current.get("window_end_hour", 24))))
+        if we <= ws:
+            we = min(24, ws + 1)  # mínimo 1h de janela
+        current["window_start_hour"] = ws
+        current["window_end_hour"] = we
         try:
             p.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception as e:
