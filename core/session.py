@@ -235,32 +235,81 @@ def get_client(
             except Exception:
                 pass
 
-        # Login com IP ROTATION: se DataImpulse IP atual estiver na blacklist
-        # do IG, tenta proximo IP do pool (sid attempt+1) até 5x.
-        MAX_STICKY_ATTEMPTS = 5
+        # Login com IP ROTATION + POOL CHECK:
+        # 1. Antes de tentar logar, descobre o IP atual via proxy (ipify)
+        # 2. Checa no banco de IPs: tá queimado? Tá em uso por OUTRA conta?
+        # 3. Se sim, rotaciona sid sem nem tentar logar (economiza tempo + evita
+        #    desperdiçar tentativa em IP ruim)
+        # 4. Após login, marca resultado no banco (ok / blacklisted / challenge)
+        MAX_STICKY_ATTEMPTS = 8  # mais tentativas porque agora pulamos rápido IPs ruins
         winning_attempt = None
+        current_ip = None
         for ip_try in range(sticky_attempt, sticky_attempt + MAX_STICKY_ATTEMPTS):
             # Re-aplica proxy com sticky attempt ip_try
             if proxy_base:
                 try:
                     from core.proxy_sticky import make_sticky
-                    proxy_sticky = make_sticky(proxy_base, username, attempt=ip_try)
-                    cl.set_proxy(proxy_sticky)
+                    proxy_sticky_url = make_sticky(proxy_base, username, attempt=ip_try)
+                    cl.set_proxy(proxy_sticky_url)
                     if ip_try > sticky_attempt:
-                        print(f"[{username}] 🔄 tentando IP #{ip_try + 1} do pool DataImpulse")
+                        print(f"[{username}] 🔄 tentando sticky #{ip_try + 1}")
                 except Exception:
                     cl.set_proxy(proxy_base)
+                    proxy_sticky_url = proxy_base
+            else:
+                proxy_sticky_url = None
+
+            # Pre-check: descobre IP atual, checa banco
+            if proxy_sticky_url:
+                try:
+                    from core.ip_pool import get_current_ip_via_proxy, is_burnt, is_owned_by_other
+                    candidate_ip = get_current_ip_via_proxy(proxy_sticky_url)
+                    if candidate_ip:
+                        current_ip = candidate_ip
+                        if is_burnt(candidate_ip):
+                            print(f"[{username}] 🚫 IP {candidate_ip} JÁ MARCADO BURNT no banco — rotaciona sem tentar")
+                            if (ip_try - sticky_attempt) < MAX_STICKY_ATTEMPTS - 1:
+                                import time as _t2; _t2.sleep(1)
+                                continue
+                        if is_owned_by_other(candidate_ip, username):
+                            other = "outra conta"
+                            print(f"[{username}] 🔒 IP {candidate_ip} já é de {other} (cluster!) — rotaciona")
+                            if (ip_try - sticky_attempt) < MAX_STICKY_ATTEMPTS - 1:
+                                import time as _t2; _t2.sleep(1)
+                                continue
+                        print(f"[{username}] ✓ IP {candidate_ip} livre no banco — vai tentar login")
+                except Exception as e:
+                    print(f"[{username}] ⚠️ pre-check IP falhou ({e}) — segue mesmo assim")
+
             try:
                 _do_login(cl)
                 winning_attempt = ip_try
+                # Marca IP como OK no banco
+                if current_ip:
+                    try:
+                        from core.ip_pool import mark_outcome
+                        mark_outcome(current_ip, username, "ok")
+                    except Exception:
+                        pass
                 break  # sucesso
             except Exception as e:
                 msg = str(e).lower()
-                # IP blacklist OU challenge "change your IP" → tenta outro IP do pool
-                if ("blacklist" in msg or "change your ip" in msg) and (ip_try - sticky_attempt) < MAX_STICKY_ATTEMPTS - 1:
-                    print(f"[{username}] 🚫 IP #{ip_try + 1} blacklist/queimado — tentando próximo do pool em 2s")
-                    import time as _t2
-                    _t2.sleep(2)
+                # Classifica o erro pra registrar no banco
+                outcome = "unknown"
+                if "blacklist" in msg or "change your ip" in msg:
+                    outcome = "blacklisted"
+                elif "challenge" in msg or "checkpoint" in msg or "podemos enviar" in msg:
+                    outcome = "challenge"
+                if current_ip:
+                    try:
+                        from core.ip_pool import mark_outcome
+                        mark_outcome(current_ip, username, outcome, error_msg=str(e))
+                    except Exception:
+                        pass
+                # IP problemático → rotaciona
+                if outcome in ("blacklisted", "challenge") and (ip_try - sticky_attempt) < MAX_STICKY_ATTEMPTS - 1:
+                    print(f"[{username}] 🚫 IP {current_ip or '?'} resultou em {outcome} — banco atualizado, rotacionando")
+                    import time as _t2; _t2.sleep(2)
                     continue
                 raise
 
