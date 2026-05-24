@@ -109,6 +109,19 @@ def get_client(
     # Normaliza defensivamente — server pode mandar formato esquisito
     # (host:port:user:pass do DataImpulse, com ou sem http:// na frente)
     proxy = _normalize_proxy(proxy)
+
+    # Lê "sticky attempt" salvo (qual IP do pool já provou que funciona pra
+    # essa conta). Se sessão anterior teve que rotacionar até achar IP limpo,
+    # esse arquivinho lembra qual foi.
+    proxy_base = proxy  # mantém base pra rotação
+    sticky_attempt_file = SESSIONS_DIR / f"{username}_sticky.txt"
+    sticky_attempt = 0
+    if sticky_attempt_file.exists():
+        try:
+            sticky_attempt = int(sticky_attempt_file.read_text(encoding="utf-8").strip() or "0")
+        except Exception:
+            sticky_attempt = 0
+
     if proxy:
         # CRÍTICO: força sticky session por conta. Provedor rotativo (default
         # DataImpulse, BrightData, etc.) dá IP DIFERENTE cada request -> Insta
@@ -116,10 +129,11 @@ def get_client(
         # de UM IP fixo, contas diferentes saem de IPs diferentes.
         try:
             from core.proxy_sticky import make_sticky, detect_provider
-            sticky = make_sticky(proxy, username)
+            sticky = make_sticky(proxy_base, username, attempt=sticky_attempt)
             if sticky != proxy:
                 provider = detect_provider(proxy) or "?"
-                print(f"[{username}] 🔒 sticky session aplicado ({provider})")
+                tag = f"#{sticky_attempt+1}" if sticky_attempt > 0 else ""
+                print(f"[{username}] 🔒 sticky session aplicado ({provider}) {tag}")
                 proxy = sticky
         except Exception as e:
             print(f"[{username}] ⚠️ sticky session falhou: {e} (usando proxy rotativo)")
@@ -221,16 +235,43 @@ def get_client(
             except Exception:
                 pass
 
-        # Re-aplica proxy (sticky session se aplicável) no Client novo
-        if proxy:
+        # Login com IP ROTATION: se DataImpulse IP atual estiver na blacklist
+        # do IG, tenta proximo IP do pool (sid attempt+1) até 5x.
+        MAX_STICKY_ATTEMPTS = 5
+        winning_attempt = None
+        for ip_try in range(sticky_attempt, sticky_attempt + MAX_STICKY_ATTEMPTS):
+            # Re-aplica proxy com sticky attempt ip_try
+            if proxy_base:
+                try:
+                    from core.proxy_sticky import make_sticky
+                    proxy_sticky = make_sticky(proxy_base, username, attempt=ip_try)
+                    cl.set_proxy(proxy_sticky)
+                    if ip_try > sticky_attempt:
+                        print(f"[{username}] 🔄 tentando IP #{ip_try + 1} do pool DataImpulse")
+                except Exception:
+                    cl.set_proxy(proxy_base)
             try:
-                from core.proxy_sticky import make_sticky
-                proxy_sticky = make_sticky(proxy, username)
-                cl.set_proxy(proxy_sticky)
-            except Exception:
-                cl.set_proxy(proxy)
+                _do_login(cl)
+                winning_attempt = ip_try
+                break  # sucesso
+            except Exception as e:
+                msg = str(e).lower()
+                # IP blacklist OU challenge "change your IP" → tenta outro IP do pool
+                if ("blacklist" in msg or "change your ip" in msg) and (ip_try - sticky_attempt) < MAX_STICKY_ATTEMPTS - 1:
+                    print(f"[{username}] 🚫 IP #{ip_try + 1} blacklist/queimado — tentando próximo do pool em 2s")
+                    import time as _t2
+                    _t2.sleep(2)
+                    continue
+                raise
 
-        _do_login(cl)
+        # Salva o "winning attempt" pra reusar nas próximas sessões dessa conta
+        if winning_attempt is not None and winning_attempt != sticky_attempt:
+            try:
+                sticky_attempt_file.write_text(str(winning_attempt), encoding="utf-8")
+                print(f"[{username}] 💾 salvando winning sticky #{winning_attempt + 1} pra próximas sessões")
+            except Exception:
+                pass
+
         # Dump sessão sob file lock — evita corrupção se 2 procs salvarem juntos
         with _file_lock(session_file, timeout=15):
             cl.dump_settings(session_file)

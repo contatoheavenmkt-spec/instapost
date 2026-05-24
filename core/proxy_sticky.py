@@ -56,19 +56,28 @@ _PROVIDER_HANDLERS = [
 ]
 
 
-def _sid_from_username(account_username: str) -> str:
-    """SID determinístico por conta — 12 hex chars do sha1(username)."""
-    return hashlib.sha1(account_username.lower().encode("utf-8")).hexdigest()[:12]
+def _sid_from_username(account_username: str, attempt: int = 0) -> str:
+    """SID determinístico por conta — 12 hex chars do sha1(username).
+    Se attempt > 0, anexa 'r<N>' pra forçar IP DIFERENTE no pool do provedor
+    (útil quando o IP atual tá queimado pelo Instagram)."""
+    base = hashlib.sha1(account_username.lower().encode("utf-8")).hexdigest()[:12]
+    if attempt > 0:
+        return f"{base}r{attempt}"
+    return base
 
 
-def make_sticky(proxy_url: Optional[str], account_username: Optional[str]) -> Optional[str]:
+def make_sticky(
+    proxy_url: Optional[str],
+    account_username: Optional[str],
+    attempt: int = 0,
+) -> Optional[str]:
     """Retorna proxy_url com sticky session id injetado, se possível.
 
-    Se não conhecer o provedor (hostname não casa com nenhum), devolve
-    o proxy original sem mexer — assim o user que tem proxy próprio
-    custom não é afetado.
+    attempt: 0 = IP padrão, 1+ = força IPs diferentes (mesmo username = série
+    determinística de IPs do pool). Útil pra retry quando IP atual tá blacklist.
 
-    Idempotente: se já tem session, devolve sem duplicar.
+    Se não conhecer o provedor (hostname não casa com nenhum), devolve
+    o proxy original sem mexer.
     """
     if not proxy_url or not account_username:
         return proxy_url
@@ -84,8 +93,11 @@ def make_sticky(proxy_url: Optional[str], account_username: Optional[str]) -> Op
                 break
         if handler is None:
             return proxy_url  # provedor desconhecido — não mexe
-        sid = _sid_from_username(account_username)
-        new_user = handler(p.username, sid)
+        sid = _sid_from_username(account_username, attempt=attempt)
+        # Remove sticky anterior antes de aplicar novo (idempotência com attempt)
+        cleaned_user = re.sub(r"__sid\.[A-Za-z0-9]+", "", p.username)
+        cleaned_user = re.sub(r"-session-[A-Za-z0-9]+", "", cleaned_user)
+        new_user = handler(cleaned_user, sid)
         if new_user == p.username:
             return proxy_url  # nada mudou
         # Re-monta URL com o novo username (preserva password, host, port, etc)
