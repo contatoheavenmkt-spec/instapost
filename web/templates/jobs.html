@@ -184,7 +184,7 @@
               <i data-lucide="repeat" style="width:14px;height:14px;color:var(--accent)"></i>
               Postar sozinho até finalizar (auto-loop)
             </div>
-            <div class="text-[11px] text-soft mt-0.5">Sistema dispara N posts por conta a cada X horas (janela 7h–22h) até acabar todos os vídeos.</div>
+            <div class="text-[11px] text-soft mt-0.5">Sistema dispara N posts por conta a cada X horas (janela padrão 6h–24h) até acabar todos os vídeos.</div>
           </div>
           <span id="autoloop-badge" class="badge" style="font-size:11px;padding:4px 10px">OFF</span>
         </div>
@@ -742,7 +742,7 @@
         txt = `<span style="color:#6ee7b7"><i data-lucide="check-circle-2" style="width:13px;height:13px;display:inline;vertical-align:-2px"></i> Pool completo — desligado em ${s.completed_at.slice(0, 16).replace('T',' ')}</span>`;
       } else if (s.enabled) {
         const last = s.last_run_at ? s.last_run_at.slice(0, 16).replace('T',' ') : 'nunca';
-        const next = s.next_run_at ? s.next_run_at.slice(0, 16).replace('T',' ') : '<em>na próxima janela 7h-22h</em>';
+        const next = s.next_run_at ? s.next_run_at.slice(0, 16).replace('T',' ') : '<em>na próxima janela</em>';
         txt = `<i data-lucide="zap" style="width:13px;height:13px;display:inline;vertical-align:-2px;color:var(--accent)"></i> ATIVO · última: ${last} · próxima: ${next}`;
       } else {
         txt = '<span class="text-muted">Desligado</span>';
