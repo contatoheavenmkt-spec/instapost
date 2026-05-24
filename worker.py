@@ -902,6 +902,7 @@ def _open_chrome_for_account(
     username: str,
     reset: bool = False,
     proxy: Optional[str] = None,
+    no_proxy: bool = False,
 ) -> tuple[bool, str]:
     """Abre Chrome com profile isolado + UA desktop + (opcional) sessão pré-injetada
     + (opcional) proxy da conta + flags anti-detect.
@@ -980,9 +981,18 @@ def _open_chrome_for_account(
     ]
 
     # === Proxy COERENTE com o worker (CRÍTICO pra não flagar batch login) ===
+    # Modo no_proxy: abre Chrome com IP RESIDENCIAL (sem proxy nenhum). Use SÓ
+    # pra logar manualmente em conta nova/comprada — Chrome aceita auth do IG mais
+    # facilmente quando o IP "bate" com o do celular onde a conta foi criada.
+    # AVISO: depois de logar manual, vai criar inconsistência se worker tentar
+    # logar via proxy depois — IG vê IP diferente. Solução: logar tudo via proxy
+    # OU desativar proxy permanentemente nessa conta.
     proxy_user_auth = None
     proxy_pass_auth = None
     ext_dir = None
+    if no_proxy:
+        proxy = None  # força sem proxy nesse launch
+        print(f"[local-api] ⚠️ Chrome SEM PROXY (modo manual login) — IP residencial vai aparecer pro Insta")
     if proxy:
         # Sticky session por conta (mesmo IP entre requests do Chrome + worker)
         try:
@@ -996,8 +1006,11 @@ def _open_chrome_for_account(
         chrome_proxy, proxy_user_auth, proxy_pass_auth = _parse_proxy_for_chrome(proxy)
         if chrome_proxy:
             args.append(f"--proxy-server={chrome_proxy}")
-            # Resolve DNS via proxy também (evita DNS leak pro provedor local)
-            args.append(f"--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE localhost")
+            # NOTA: removido --host-resolver-rules=MAP * ~NOTFOUND. Esse flag
+            # bloqueava DNS de TUDO (incluindo o próprio hostname do proxy),
+            # resultando em "sem internet" no Chrome. Pra HTTP proxy, o proxy
+            # resolve target DNS sozinho — Chrome só precisa resolver o hostname
+            # do proxy via DNS normal (do sistema). Sem leak relevante.
             # Se proxy tem auth, monta uma extensão Chrome que responde ao auth dialog
             if proxy_user_auth and proxy_pass_auth:
                 ext_dir = profile_dir / "_proxy_auth_ext"
@@ -1081,6 +1094,7 @@ class _LocalAPIHandler(BaseHTTPRequestHandler):
         qs = parse_qs(parsed.query)
         username = (qs.get("username") or [""])[0].strip()
         reset = (qs.get("reset") or ["0"])[0] in ("1", "true", "yes")
+        no_proxy = (qs.get("no_proxy") or ["0"])[0] in ("1", "true", "yes")
         if not username:
             self._send(400, b'{"error":"username obrigatorio"}')
             return
@@ -1095,11 +1109,11 @@ class _LocalAPIHandler(BaseHTTPRequestHandler):
                     proxy = (body_data.get("proxy") or "").strip() or None
             except Exception:
                 pass
-        ok, info = _open_chrome_for_account(username, reset=reset, proxy=proxy)
+        ok, info = _open_chrome_for_account(username, reset=reset, proxy=proxy, no_proxy=no_proxy)
         if ok:
-            body = _json.dumps({"ok": True, "device": info, "reset": reset, "proxy_used": bool(proxy)}).encode("utf-8")
+            body = _json.dumps({"ok": True, "device": info, "reset": reset, "proxy_used": bool(proxy) and not no_proxy, "no_proxy": no_proxy}).encode("utf-8")
             self._send(200, body)
-            emoji = "🧹" if reset else "📱"
+            emoji = "⚠️" if no_proxy else ("🧹" if reset else "📱")
             print(f"[local-api] {emoji} abrindo Chrome pra @{username} ({info})")
         else:
             body = _json.dumps({"ok": False, "error": info}).encode("utf-8")

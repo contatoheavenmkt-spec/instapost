@@ -597,6 +597,9 @@ elMSoYMQakO</pre>
             <button class="btn btn-ghost btn-sm" onclick="onOpenBrowser('${a.username}', {reset: true})" title="RESETAR profile e abrir Chrome limpo (use quando aparece ERR_TOO_MANY_REDIRECTS ou perfil esquisito sem header)" style="opacity:.6">
               <i data-lucide="refresh-ccw" class="icon"></i>
             </button>
+            <button class="btn btn-ghost btn-sm" onclick="onOpenBrowser('${a.username}', {no_proxy: true, reset: true})" title="ABRIR SEM PROXY: Chrome usa seu IP residencial (NÃO o proxy da conta). Use pra logar manualmente em conta nova/comprada quando o proxy tá com problema. ATENÇÃO: cria inconsistência de IP — só use pra primeiro login, depois worker volta a usar proxy." style="opacity:.5">
+              <i data-lucide="unplug" class="icon" style="color:#fbbf24"></i>
+            </button>
             <button class="btn btn-ghost btn-sm" onclick="onOpenProfileEditor('${a.username}')" title="Editar perfil e automações">
               <i data-lucide="user-cog" class="icon"></i>
             </button>
@@ -1206,7 +1209,21 @@ elMSoYMQakO</pre>
 
   async function onOpenBrowser(username, opts) {
     const reset = opts && opts.reset === true;
-    if (reset) {
+    const noProxy = opts && opts.no_proxy === true;
+    if (noProxy) {
+      const ok = confirm(
+        `Abrir Chrome SEM PROXY pra @${username}?\n\n` +
+        `Chrome vai sair pelo SEU IP residencial (não o proxy da conta).\n\n` +
+        `USE pra: logar manualmente em conta NOVA/comprada quando o proxy tá ` +
+        `com problema, ou Insta tá rejeitando o IP do proxy.\n\n` +
+        `ATENÇÃO: depois desse login, IG vai associar a conta ao seu IP. ` +
+        `Se worker tentar logar via proxy depois, IG vê IP diferente = challenge. ` +
+        `Recomendação: APÓS logar manual, edite o proxy dessa conta pra "" ` +
+        `(remove), ou aceite que primeiro post será do seu IP.`
+      );
+      if (!ok) return;
+    }
+    if (reset && !noProxy) {
       const ok = confirm(
         `RESETAR o profile do Chrome de @${username}?\n\n` +
         `Vai APAGAR cookies, cache e tudo do profile dessa conta. ` +
@@ -1218,20 +1235,20 @@ elMSoYMQakO</pre>
     }
     // PAUSA O WORKER 30min ANTES de abrir o browser. Sem isso, worker + browser
     // logando ao mesmo tempo = 2 devices = Instagram dispara challenge.
-    // Best-effort: se falhar, não bloqueia a abertura do browser.
     try {
       await api(`/api/accounts/${username}/pause-worker?minutes=30`, { method: 'POST' });
     } catch (_) {}
-    // Pega o proxy da conta pra mandar pro worker (Chrome usa MESMO IP do worker
-    // = sem flag "2 IPs diferentes pra mesma @")
+    // Pega o proxy da conta pra mandar pro worker (Chrome usa MESMO IP do worker)
     const acc = accounts.find(a => a.username === username);
     const accountProxy = (acc && acc.proxy) || null;
     // 1ª tentativa: worker local roda HTTP em 127.0.0.1:17777 e abre o Chrome direto.
-    // Se o worker tá rodando, esse fetch resolve em < 1s e o Chrome abre na hora.
     try {
       const ctrl = new AbortController();
       const t = setTimeout(() => ctrl.abort(), 6000);
-      const url = `http://localhost:17777/open-browser?username=${encodeURIComponent(username)}${reset ? '&reset=1' : ''}`;
+      const params = [`username=${encodeURIComponent(username)}`];
+      if (reset) params.push('reset=1');
+      if (noProxy) params.push('no_proxy=1');
+      const url = `http://localhost:17777/open-browser?${params.join('&')}`;
       const r = await fetch(url, {
         method: 'POST',
         mode: 'cors',
