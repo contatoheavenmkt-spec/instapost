@@ -221,12 +221,27 @@ class RemoteJobManager:
         """Cria novo job. Pra operation='post' com video_name, retorna job existente
         se já houver um ATIVO (pending/claimed/running) pra mesma (account, video).
         Isso evita race condition de 2 callers criarem o mesmo job simultaneamente.
+
+        Side effects automáticos pra post jobs:
+        1. Caption passa por humanize_caption() — spinner {a|b|c} + hashtag shuffle
+           por conta. Cada @ recebe variação ÚNICA do mesmo template.
+        2. Anti-duplicate: dentro de 24h, se a mesma @ já postou o mesmo vídeo,
+           bloqueia (evita ban acidental por duplo-post).
         """
         with self._lock:
-            # Anti-duplicate atômico (dentro do mesmo lock que cria)
+            # Humaniza caption ANTES de qualquer check (caption final = source of truth)
             if payload.get("operation", "post") == "post":
                 acc = payload.get("account_username")
                 video = payload.get("video_name")
+                caption = payload.get("caption") or ""
+                if acc and caption:
+                    try:
+                        from core.spinner import humanize_caption
+                        payload["caption"] = humanize_caption(caption, acc)
+                    except Exception as _e:
+                        pass  # se spinner falhar, usa caption raw
+
+                # Anti-duplicate ATIVO (job ainda na fila)
                 if acc and video:
                     for j in self._items.values():
                         if (
@@ -235,8 +250,48 @@ class RemoteJobManager:
                             and j.video_name == video
                             and j.status in ("pending", "claimed", "running")
                         ):
-                            # Job já existe ativo — devolve o existente em vez de duplicar
                             return j
+
+                # Anti-duplicate HISTÓRICO (já postou esse vídeo nessa @ nas últimas 24h)
+                # Evita: usuário acidentalmente coloca mesmo vídeo na fila 2x =
+                # 2x posts seguidos na mesma @ = flag automático de IG por spam.
+                if acc and video:
+                    try:
+                        from web.main import load_accounts
+                        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+                        accounts = load_accounts()
+                        now_utc = _dt.now(_tz.utc)
+                        for a in accounts:
+                            if a.get("username") != acc:
+                                continue
+                            for posted in (a.get("posted_media") or []):
+                                if posted.get("name") != video:
+                                    continue
+                                posted_at = posted.get("posted_at")
+                                if not posted_at:
+                                    continue
+                                try:
+                                    pd = _dt.fromisoformat(posted_at)
+                                    if pd.tzinfo is None:
+                                        pd = pd.astimezone()
+                                    elapsed_h = (now_utc - pd.astimezone(_tz.utc)).total_seconds() / 3600
+                                    if elapsed_h < 24:
+                                        # Cria job "fake" que retorna erro imediato (não cria de verdade)
+                                        # Pra UI mostrar feedback claro em vez de silenciar
+                                        print(f"[remote_jobs] 🚫 DUPLICATE BLOQUEADO: @{acc} já postou {video} há {elapsed_h:.1f}h")
+                                        raise ValueError(
+                                            f"@{acc} já postou '{video}' há {elapsed_h:.1f}h "
+                                            f"(< 24h). Bloqueado pra evitar ban por spam."
+                                        )
+                                except ValueError:
+                                    raise
+                                except Exception:
+                                    pass
+                    except ValueError:
+                        raise
+                    except Exception as _e:
+                        pass  # se check falhar, não bloqueia criação
+
             payload["id"] = "rj_" + uuid.uuid4().hex[:12]
             payload["status"] = "pending"
             payload["created_at"] = now_iso()
