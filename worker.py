@@ -956,38 +956,28 @@ def _open_chrome_for_account(
 
     profile_dir.mkdir(parents=True, exist_ok=True)
 
-    # === MODO ANTIDETECT MOBILE (Dolphin Anty style) ===
-    # clean_mobile=True: mobile UA + mobile window + SEM cookie inject.
-    # Usuário navega livre e loga manual no Insta. Depois clica "Salvar Sessão"
-    # pra extrair cookies do Chrome aberto.
-    # PROXY: se a conta tem proxy configurado, USA (sai pelo IP do proxy).
-    #        Se não tem, vai pelo IP residencial. Em ambos modos cookies NÃO
-    #        são injetados — login fresh manual.
+    # === MODO LOGIN MANUAL (clean_mobile=True) ===
+    # Originalmente era mobile UA estilo Dolphin Anty, MAS Instagram mobile web
+    # NÃO PERMITE login confiável — redireciona pra página de marketing pedindo
+    # baixar o app, mesmo digitando credenciais corretas. Pra login efetivo,
+    # precisa do desktop web do Insta.
+    #
+    # Configuração agora:
+    # - Desktop UA Chrome 131 Windows (Insta aceita login normal)
+    # - Window 1280x800 (desktop layout completo)
+    # - SEM cookie inject (login fresh manual)
+    # - Proxy da conta SE configurado (via forwarder local que resolve auth)
     cdp_cookies: list[dict] = []
     if clean_mobile:
-        # Não injeta cookies, mas mantém o proxy se a conta tiver (a menos
-        # que no_proxy=True explicito).
-        # Mobile UA específico da conta (device fingerprint determinístico)
-        try:
-            from core.devices import device_for_account
-            device = device_for_account(safe)
-            user_agent = device.get("user_agent") or (
-                "Mozilla/5.0 (Linux; Android 14; SM-G991B) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/131.0.0.0 Mobile Safari/537.36"
-            )
-            print(f"[local-api] 📱 antidetect mobile: {device.get('manufacturer','?')} {device.get('model','?')}")
-        except Exception:
-            user_agent = (
-                "Mozilla/5.0 (Linux; Android 14; SM-G991B) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/131.0.0.0 Mobile Safari/537.36"
-            )
-        window_size = "412,870"
-        # IG mobile web tenta redirecionar /accounts/login/ pra /u/profile/ (deep
-        # link pra app) após login bem-sucedido. Abrir direto na raiz / faz IG
-        # mandar pro feed normal — login funciona e mostra timeline corretamente.
-        target_url = "https://www.instagram.com/"
+        # Desktop UA — Instagram desktop web aceita login manual confiavelmente.
+        user_agent = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/131.0.0.0 Safari/537.36"
+        )
+        window_size = "1280,800"
+        target_url = "https://www.instagram.com/accounts/login/"
+        print(f"[local-api] 🖥️ modo login manual: desktop UA + 1280x800 + proxy={'sim' if proxy else 'não'}")
     else:
         # Modo antigo: tenta auto-login com cookies + proxy
         if not reset:
