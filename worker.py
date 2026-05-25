@@ -32,6 +32,7 @@ import traceback
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 import requests
 
@@ -1034,11 +1035,8 @@ def _open_chrome_for_account(
     # AVISO: depois de logar manual, vai criar inconsistência se worker tentar
     # logar via proxy depois — IG vê IP diferente. Solução: logar tudo via proxy
     # OU desativar proxy permanentemente nessa conta.
-    proxy_user_auth = None
-    proxy_pass_auth = None
-    ext_dir = None
     if no_proxy:
-        proxy = None  # força sem proxy nesse launch
+        proxy = None
         print(f"[local-api] ⚠️ Chrome SEM PROXY (modo manual login) — IP residencial vai aparecer pro Insta")
     if proxy:
         # Sticky session por conta (mesmo IP entre requests do Chrome + worker)
@@ -1050,23 +1048,25 @@ def _open_chrome_for_account(
                 proxy = sticky
         except Exception:
             pass
-        chrome_proxy, proxy_user_auth, proxy_pass_auth = _parse_proxy_for_chrome(proxy)
-        if chrome_proxy:
-            args.append(f"--proxy-server={chrome_proxy}")
-            # NOTA: removido --host-resolver-rules=MAP * ~NOTFOUND. Esse flag
-            # bloqueava DNS de TUDO (incluindo o próprio hostname do proxy),
-            # resultando em "sem internet" no Chrome. Pra HTTP proxy, o proxy
-            # resolve target DNS sozinho — Chrome só precisa resolver o hostname
-            # do proxy via DNS normal (do sistema). Sem leak relevante.
-            # Se proxy tem auth, monta uma extensão Chrome que responde ao auth dialog
-            if proxy_user_auth and proxy_pass_auth:
-                ext_dir = profile_dir / "_proxy_auth_ext"
-                try:
-                    _build_proxy_auth_extension(ext_dir, proxy_user_auth, proxy_pass_auth)
-                    args.append(f"--load-extension={ext_dir}")
-                except Exception as e:
-                    print(f"[local-api] ⚠️ falha criando extensão proxy auth: {e}")
-            print(f"[local-api] 🌐 Chrome via proxy {chrome_proxy} (auth: {'sim' if proxy_user_auth else 'não'})")
+        # NOVA ESTRATÉGIA: Local Forwarder em vez de extensão Chrome.
+        # Chrome conecta em 127.0.0.1:PORT_LOCAL (sem auth dialog), forwarder
+        # em Python autentica com o upstream (DataImpulse). Bypassa o bug do
+        # auth dialog repetitivo que MV2/MV3 extension não resolvia.
+        try:
+            from core.proxy_forwarder import start_forwarder
+            fwd_server, fwd_port = start_forwarder(proxy)
+            args.append(f"--proxy-server=http://127.0.0.1:{fwd_port}")
+            print(f"[local-api] 🌐 Chrome via forwarder local 127.0.0.1:{fwd_port} → upstream {urlparse(proxy).hostname}")
+            # NOTA: forwarder roda em daemon thread, morre com o worker.
+            # Pra fechar antes (quando Chrome fecha), seria preciso watcher
+            # do processo Chrome — não implementado por enquanto, OK pra MVP.
+        except Exception as e:
+            print(f"[local-api] ⚠️ falha iniciando forwarder ({e}) — tentando direto sem auth")
+            # Fallback: passa proxy direto pro Chrome (vai falhar com auth dialog
+            # mas pelo menos algo tenta)
+            chrome_proxy, _, _ = _parse_proxy_for_chrome(proxy)
+            if chrome_proxy:
+                args.append(f"--proxy-server={chrome_proxy}")
 
     # SEMPRE habilita debug port pra feature "Salvar Sessão" funcionar mesmo
     # quando não estamos injetando cookies (ex: login manual em conta nova).
