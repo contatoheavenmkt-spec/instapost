@@ -591,7 +591,7 @@ elMSoYMQakO</pre>
             <button class="btn btn-subtle btn-sm" onclick="onConnectViaWorker('${a.username}')" title="Conectar conta">
               <i data-lucide="log-in" class="icon"></i> Conectar
             </button>
-            <button class="btn btn-ghost btn-sm" onclick="onOpenBrowser('${a.username}')" title="Abrir Instagram dessa conta no Chrome (profile isolado + auto-login se houver sessão salva)">
+            <button class="btn btn-ghost btn-sm" onclick="onOpenBrowser('${a.username}', {clean_mobile: true})" title="📲 SIMULADOR MOBILE (Dolphin-Anty style): abre Chrome com User-Agent Android + janela mobile 412x870, SEM proxy, SEM cookies injetados. Você navega LIVRE (Google, Insta, qualquer site), loga manual no Insta. Depois clica 'Salvar Sessão' (botão disco verde) pra capturar os cookies. RESOLVE 'Chrome em branco' e 'IP queimado'.">
               <i data-lucide="smartphone" class="icon"></i>
             </button>
             <button class="btn btn-ghost btn-sm" onclick="onOpenBrowser('${a.username}', {reset: true})" title="RESETAR profile e abrir Chrome limpo (use quando aparece ERR_TOO_MANY_REDIRECTS ou perfil esquisito sem header)" style="opacity:.6">
@@ -1249,7 +1249,21 @@ elMSoYMQakO</pre>
   async function onOpenBrowser(username, opts) {
     const reset = opts && opts.reset === true;
     const noProxy = opts && opts.no_proxy === true;
-    if (noProxy) {
+    const cleanMobile = opts && opts.clean_mobile === true;
+    if (cleanMobile) {
+      const ok = confirm(
+        `📲 Abrir SIMULADOR MOBILE pra @${username}?\n\n` +
+        `Chrome vai abrir como CELULAR (mobile UA + janela 412x870), SEM PROXY, ` +
+        `SEM cookies injetados.\n\n` +
+        `O QUE FAZER NA JANELA:\n` +
+        `1. Vai pro Insta e LOGA MANUAL (usuário + senha + 2FA)\n` +
+        `2. Confirma que vê o feed\n` +
+        `3. Volta aqui e clica 'Salvar Sessão' (botão disco verde)\n\n` +
+        `Pronto: worker passa a usar os cookies que você acabou de gerar = ` +
+        `sem login API = sem challenge/IP queimado.\n\nContinuar?`
+      );
+      if (!ok) return;
+    } else if (noProxy) {
       const ok = confirm(
         `Abrir Chrome SEM PROXY pra @${username}?\n\n` +
         `Chrome vai sair pelo SEU IP residencial (não o proxy da conta).\n\n` +
@@ -1287,6 +1301,7 @@ elMSoYMQakO</pre>
       const params = [`username=${encodeURIComponent(username)}`];
       if (reset) params.push('reset=1');
       if (noProxy) params.push('no_proxy=1');
+      if (cleanMobile) params.push('clean_mobile=1');
       const url = `http://localhost:17777/open-browser?${params.join('&')}`;
       const r = await fetch(url, {
         method: 'POST',

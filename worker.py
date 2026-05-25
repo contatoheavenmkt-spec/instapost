@@ -903,6 +903,7 @@ def _open_chrome_for_account(
     reset: bool = False,
     proxy: Optional[str] = None,
     no_proxy: bool = False,
+    clean_mobile: bool = False,
 ) -> tuple[bool, str]:
     """Abre Chrome com profile isolado + UA desktop + (opcional) sessão pré-injetada
     + (opcional) proxy da conta + flags anti-detect.
@@ -939,32 +940,60 @@ def _open_chrome_for_account(
 
     profile_dir.mkdir(parents=True, exist_ok=True)
 
-    # Procura sessão salva pra auto-login. Se reset=True, pula (queremos login manual limpo).
+    # === MODO ANTIDETECT MOBILE (Dolphin Anty style) ===
+    # clean_mobile=True: mobile UA + mobile window + SEM proxy + SEM cookie inject.
+    # Usuário navega livre (Google, Insta, qualquer site) e loga manual no Insta.
+    # Depois clica "Salvar Sessão" — worker extrai cookies do Chrome aberto.
+    # Resolve o problema de "Chrome em branco" causado por proxy auth dialog +
+    # cookies inválidos sendo injetados.
     cdp_cookies: list[dict] = []
-    if not reset:
-        session_path = _find_session_file(safe)
-        if session_path:
-            cdp_cookies = _extract_cdp_cookies(session_path)
-            if not cdp_cookies:
-                print(f"[local-api] sessão {session_path.name} sem cookies utilizáveis (provavelmente vazia)")
+    if clean_mobile:
+        # Força modo limpo: ignora proxy, ignora sessão salva
+        proxy = None
+        no_proxy = True
+        # Mobile UA específico da conta (device fingerprint determinístico)
+        try:
+            from core.devices import device_for_account
+            device = device_for_account(safe)
+            user_agent = device.get("user_agent") or (
+                "Mozilla/5.0 (Linux; Android 14; SM-G991B) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Mobile Safari/537.36"
+            )
+            print(f"[local-api] 📱 antidetect mobile: {device.get('manufacturer','?')} {device.get('model','?')}")
+        except Exception:
+            user_agent = (
+                "Mozilla/5.0 (Linux; Android 14; SM-G991B) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Mobile Safari/537.36"
+            )
+        window_size = "412,870"
+        target_url = "https://www.instagram.com/accounts/login/"
+    else:
+        # Modo antigo: tenta auto-login com cookies + proxy
+        if not reset:
+            session_path = _find_session_file(safe)
+            if session_path:
+                cdp_cookies = _extract_cdp_cookies(session_path)
+                if not cdp_cookies:
+                    print(f"[local-api] sessão {session_path.name} sem cookies utilizáveis (provavelmente vazia)")
+        user_agent = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/131.0.0.0 Safari/537.36"
+        )
+        window_size = "1280,800"
+        target_url = "https://www.instagram.com/"
 
-    inject = bool(cdp_cookies)
-    debug_port = _get_free_port() if inject else 0
-    target_url = "https://www.instagram.com/"
-
-    # UA Chrome desktop normal (não o UA Android do worker — Insta serviria layout mobile bugado)
-    desktop_ua = (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/131.0.0.0 Safari/537.36"
-    )
+    inject = bool(cdp_cookies) and not clean_mobile
+    debug_port = _get_free_port()  # SEMPRE habilita debug port pra Save Session funcionar
 
     # === Flags anti-detect + anti-leak ===
     args = [
         chrome,
         f"--user-data-dir={profile_dir}",
-        f"--user-agent={desktop_ua}",
-        "--window-size=1280,800",
+        f"--user-agent={user_agent}",
+        f"--window-size={window_size}",
         "--no-first-run",
         "--no-default-browser-check",
         # Anti-detect: Instagram olha navigator.webdriver — sem isso, score bot 100%
@@ -979,6 +1008,9 @@ def _open_chrome_for_account(
         # Locale pt-BR (coerente com worker BR)
         "--lang=pt-BR",
     ]
+    if clean_mobile:
+        # Touch events emulation pra IG servir layout mobile
+        args.append("--touch-events=enabled")
 
     # === Proxy COERENTE com o worker (CRÍTICO pra não flagar batch login) ===
     # Modo no_proxy: abre Chrome com IP RESIDENCIAL (sem proxy nenhum). Use SÓ
@@ -1286,6 +1318,7 @@ class _LocalAPIHandler(BaseHTTPRequestHandler):
         username = (qs.get("username") or [""])[0].strip()
         reset = (qs.get("reset") or ["0"])[0] in ("1", "true", "yes")
         no_proxy = (qs.get("no_proxy") or ["0"])[0] in ("1", "true", "yes")
+        clean_mobile = (qs.get("clean_mobile") or ["0"])[0] in ("1", "true", "yes")
         if not username:
             self._send(400, b'{"error":"username obrigatorio"}')
             return
@@ -1300,11 +1333,11 @@ class _LocalAPIHandler(BaseHTTPRequestHandler):
                     proxy = (body_data.get("proxy") or "").strip() or None
             except Exception:
                 pass
-        ok, info = _open_chrome_for_account(username, reset=reset, proxy=proxy, no_proxy=no_proxy)
+        ok, info = _open_chrome_for_account(username, reset=reset, proxy=proxy, no_proxy=no_proxy, clean_mobile=clean_mobile)
         if ok:
-            body = _json.dumps({"ok": True, "device": info, "reset": reset, "proxy_used": bool(proxy) and not no_proxy, "no_proxy": no_proxy}).encode("utf-8")
+            body = _json.dumps({"ok": True, "device": info, "reset": reset, "clean_mobile": clean_mobile, "proxy_used": bool(proxy) and not no_proxy and not clean_mobile}).encode("utf-8")
             self._send(200, body)
-            emoji = "⚠️" if no_proxy else ("🧹" if reset else "📱")
+            emoji = "📲" if clean_mobile else ("⚠️" if no_proxy else ("🧹" if reset else "📱"))
             print(f"[local-api] {emoji} abrindo Chrome pra @{username} ({info})")
         else:
             body = _json.dumps({"ok": False, "error": info}).encode("utf-8")
