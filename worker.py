@@ -984,7 +984,10 @@ def _open_chrome_for_account(
                 "Chrome/131.0.0.0 Mobile Safari/537.36"
             )
         window_size = "412,870"
-        target_url = "https://www.instagram.com/accounts/login/"
+        # IG mobile web tenta redirecionar /accounts/login/ pra /u/profile/ (deep
+        # link pra app) após login bem-sucedido. Abrir direto na raiz / faz IG
+        # mandar pro feed normal — login funciona e mostra timeline corretamente.
+        target_url = "https://www.instagram.com/"
     else:
         # Modo antigo: tenta auto-login com cookies + proxy
         if not reset:
