@@ -600,6 +600,9 @@ elMSoYMQakO</pre>
             <button class="btn btn-ghost btn-sm" onclick="onOpenBrowser('${a.username}', {no_proxy: true, reset: true})" title="ABRIR SEM PROXY: Chrome usa seu IP residencial (NÃO o proxy da conta). Use pra logar manualmente em conta nova/comprada quando o proxy tá com problema. ATENÇÃO: cria inconsistência de IP — só use pra primeiro login, depois worker volta a usar proxy." style="opacity:.5">
               <i data-lucide="unplug" class="icon" style="color:#fbbf24"></i>
             </button>
+            <button class="btn btn-ghost btn-sm" onclick="onSaveSession('${a.username}')" title="💾 SALVAR SESSÃO DO CHROME: extrai os cookies do Chrome aberto e gera session.json pro worker. Use DEPOIS de logar manualmente no Chrome — worker vai usar essa sessão validada sem precisar fazer login API (evita challenge/IP burnt). Resolve conta comprada / acabou de logar no celular." style="opacity:.7">
+              <i data-lucide="save" class="icon" style="color:#6ee7b7"></i>
+            </button>
             <button class="btn btn-ghost btn-sm" onclick="onOpenProfileEditor('${a.username}')" title="Editar perfil e automações">
               <i data-lucide="user-cog" class="icon"></i>
             </button>
@@ -706,6 +709,42 @@ elMSoYMQakO</pre>
       toast(`@${username} desmarcada como bloqueada`, 'success');
       await load();
     } catch (e) {
+      toast(e.message, 'error');
+    }
+  }
+
+  async function onSaveSession(username) {
+    // Extrai cookies do Chrome aberto e salva session.json no worker.
+    // Pré-requisito: usuário já abriu Chrome via Smartphone E logou manualmente.
+    const ok = confirm(
+      `Salvar sessão do Chrome pra @${username}?\n\n` +
+      `Pré-requisitos:\n` +
+      `1. Chrome JÁ TÁ ABERTO via botão Smartphone dessa conta\n` +
+      `2. Você JÁ LOGOU MANUALMENTE no Instagram nessa janela do Chrome\n` +
+      `3. Está vendo o feed (ou perfil) do Insta dentro do Chrome aberto\n\n` +
+      `Vai extrair os cookies e gerar session.json. Worker passa a usar essa ` +
+      `sessão VALIDADA sem precisar fazer login API (evita challenge / IP burnt).\n\n` +
+      `Continuar?`
+    );
+    if (!ok) return;
+    toast(`Salvando sessão de @${username}…`, 'info');
+    try {
+      const r = await fetch(`http://localhost:17777/save-session?username=${encodeURIComponent(username)}`, {
+        method: 'POST',
+        mode: 'cors',
+      });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok && data.ok) {
+        toast(`✅ Sessão salva! ${data.message || ''}`, 'success');
+        // Recarrega lista pra mostrar sessão verde
+        await load();
+      } else {
+        const err = data.error || `HTTP ${r.status}`;
+        alert(`❌ Falha ao salvar sessão pra @${username}\n\n${err}\n\nDicas:\n- Confirme que Chrome ainda tá aberto\n- Confirme que está LOGADO no Insta no Chrome\n- Se acabou de logar, espera a página carregar 100% antes`);
+        toast(`Falha: ${err}`, 'error');
+      }
+    } catch (e) {
+      alert(`Erro de conexão com o worker local:\n${e.message}\n\nVerifica se o worker tá rodando (porta 17777).`);
       toast(e.message, 'error');
     }
   }

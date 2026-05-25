@@ -1021,13 +1021,18 @@ def _open_chrome_for_account(
                     print(f"[local-api] ⚠️ falha criando extensão proxy auth: {e}")
             print(f"[local-api] 🌐 Chrome via proxy {chrome_proxy} (auth: {'sim' if proxy_user_auth else 'não'})")
 
+    # SEMPRE habilita debug port pra feature "Salvar Sessão" funcionar mesmo
+    # quando não estamos injetando cookies (ex: login manual em conta nova).
+    # Chrome escreve em DevToolsActivePort dentro do profile, _save_session_from_chrome lê.
+    if debug_port == 0:
+        debug_port = _get_free_port()
+    args += [
+        f"--remote-debugging-port={debug_port}",
+        "--remote-allow-origins=*",
+    ]
     if inject:
         # Sobe Chrome em about:blank — injetamos cookies via CDP ANTES de navegar
-        args += [
-            f"--remote-debugging-port={debug_port}",
-            "--remote-allow-origins=*",
-            "about:blank",
-        ]
+        args.append("about:blank")
     else:
         args.append(target_url)
 
@@ -1050,6 +1055,173 @@ def _open_chrome_for_account(
         else:
             return True, f"{desc} (sem auto-login — login manual)"
     return True, f"{desc} (sem sessão salva — login manual)"
+
+
+def _save_session_from_chrome(username: str) -> tuple[bool, str]:
+    """Extrai cookies do Chrome aberto e monta session.json válida pro instagrapi.
+
+    Workflow esperado:
+    1. User clica Smartphone → Chrome abre com debug port
+    2. User loga manual no Insta (IG aceita por ser browser real)
+    3. User chama esse endpoint → lê cookies → gera session.json
+    4. Worker passa a usar essa sessão SEM precisar de API login
+
+    Resolve o problema 'celular loga normal mas worker dá challenge'
+    porque a sessão SAIU de um login real validado.
+    """
+    safe = "".join(c for c in username if c.isalnum() or c in "._-")
+    if not safe:
+        return False, "username inválido"
+
+    profile_dir = Path.home() / "InstaposterProfiles" / safe
+    if not profile_dir.exists():
+        return False, "Profile não existe. Clica Smartphone primeiro, loga, depois Salvar Sessão."
+
+    # Lê DevToolsActivePort que o Chrome escreve com a porta debug ativa
+    port_file = profile_dir / "DevToolsActivePort"
+    if not port_file.exists():
+        return False, "Chrome não tá aberto OU não foi iniciado com debug port. Clica Smartphone (sem reset) e tenta de novo."
+
+    try:
+        lines = port_file.read_text(encoding="utf-8").strip().split("\n")
+        port = int(lines[0])
+    except Exception as e:
+        return False, f"erro lendo DevToolsActivePort: {e}"
+
+    # Conecta via CDP, lê cookies
+    try:
+        import websocket as _ws
+        import urllib.request as _urllib
+        # Lista targets pra achar uma page do Insta
+        r = _urllib.urlopen(f"http://127.0.0.1:{port}/json", timeout=5)
+        targets = json.loads(r.read().decode("utf-8"))
+        # Procura page do instagram primeiro, senão qualquer page
+        page = next((t for t in targets if t.get("type") == "page" and "instagram" in (t.get("url", "").lower())), None)
+        if not page:
+            page = next((t for t in targets if t.get("type") == "page"), None)
+        if not page:
+            return False, "Nenhuma aba aberta no Chrome"
+        ws_url = page.get("webSocketDebuggerUrl")
+        if not ws_url:
+            return False, "websocket URL não disponível"
+        ws_conn = _ws.create_connection(ws_url, timeout=8)
+    except Exception as e:
+        return False, f"erro conectando CDP: {e}"
+
+    try:
+        ws_conn.send(json.dumps({"id": 1, "method": "Network.getAllCookies"}))
+        # Pode receber events antes da resposta — drena até achar id=1
+        cookies_list = None
+        for _ in range(30):
+            try:
+                response = json.loads(ws_conn.recv())
+            except Exception:
+                break
+            if response.get("id") == 1:
+                cookies_list = response.get("result", {}).get("cookies", [])
+                break
+        if cookies_list is None:
+            return False, "CDP não retornou cookies"
+
+        # Filtra cookies do Instagram (qualquer domínio .instagram.com / instagram.com / www.instagram.com)
+        ig_cookies = {}
+        for c in cookies_list:
+            dom = (c.get("domain") or "").lower()
+            if "instagram.com" not in dom:
+                continue
+            ig_cookies[c["name"]] = c["value"]
+
+        sessionid = ig_cookies.get("sessionid")
+        ds_user_id = ig_cookies.get("ds_user_id")
+        if not sessionid or not ds_user_id:
+            return False, f"Não tá logado no Insta. Faltam sessionid ou ds_user_id. Cookies encontrados: {list(ig_cookies.keys())[:10]}"
+
+        # Monta session.json no formato esperado pelo instagrapi
+        import secrets as _secrets
+        import uuid as _uuid_mod
+        def _uuid():
+            return str(_uuid_mod.uuid4())
+
+        session_data = {
+            "uuids": {
+                "phone_id": _uuid(),
+                "uuid": _uuid(),
+                "client_session_id": _uuid(),
+                "advertising_id": _uuid(),
+                "android_device_id": "android-" + _secrets.token_hex(8),
+                "request_id": _uuid(),
+                "tray_session_id": _uuid(),
+            },
+            "mid": ig_cookies.get("mid", ""),
+            "ig_u_rur": ig_cookies.get("rur"),
+            "ig_www_claim": "",
+            "authorization_data": {
+                "ds_user_id": ds_user_id,
+                "sessionid": sessionid,
+            },
+            "cookies": ig_cookies,
+            "last_login": time.time(),
+            # Device padrão Android (Pixel 8 Pro) — instagrapi usa pra montar headers.
+            # Worker vai usar device_continuity em fresh login, mas como temos sessão
+            # válida, fresh login provavelmente nem acontece.
+            "device_settings": {
+                "app_version": "428.0.0.47.67",
+                "android_version": 34,
+                "android_release": "14",
+                "dpi": "480dpi",
+                "resolution": "1344x2992",
+                "manufacturer": "Google/google",
+                "device": "husky",
+                "model": "Pixel 8 Pro",
+                "cpu": "husky",
+                "version_code": "961145276",
+            },
+            "user_agent": "Instagram 428.0.0.47.67 Android (34/14; 480dpi; 1344x2992; Google/google; Pixel 8 Pro; husky; husky; pt_BR; 961145276)",
+            "country": "BR",
+            "country_code": 55,
+            "locale": "pt_BR",
+            "timezone_offset": -10800,
+        }
+
+        # Acha sessions dir do workspace (mesmo lookup que _find_session_file faz, mas inverso)
+        project_root = Path(__file__).resolve().parent
+        data_dir = Path(os.environ.get("DATA_DIR", str(project_root)))
+        ws_root = data_dir / "workspaces"
+        # Tenta achar workspace existente que tem essa conta. Senão usa "default".
+        target_dir = None
+        if ws_root.exists():
+            for ws_dir in ws_root.iterdir():
+                if not ws_dir.is_dir():
+                    continue
+                # Procura accounts.json com essa @
+                acc_file = ws_dir / "accounts.json"
+                if acc_file.exists():
+                    try:
+                        accs = json.loads(acc_file.read_text(encoding="utf-8"))
+                        if any(a.get("username") == safe for a in accs):
+                            target_dir = ws_dir / "sessions"
+                            break
+                    except Exception:
+                        pass
+        if not target_dir:
+            target_dir = ws_root / "default" / "sessions"
+
+        target_dir.mkdir(parents=True, exist_ok=True)
+        session_file = target_dir / f"{safe}.json"
+        # Backup da sessão anterior se houver
+        if session_file.exists():
+            backup = session_file.with_suffix(".json.bak")
+            try:
+                backup.write_bytes(session_file.read_bytes())
+            except Exception:
+                pass
+        session_file.write_text(json.dumps(session_data, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True, f"Sessão salva em {session_file.name} ({len(ig_cookies)} cookies, sessionid: ...{sessionid[-12:]})"
+    finally:
+        try:
+            ws_conn.close()
+        except Exception:
+            pass
 
 
 class _LocalAPIHandler(BaseHTTPRequestHandler):
@@ -1088,6 +1260,25 @@ class _LocalAPIHandler(BaseHTTPRequestHandler):
         from urllib.parse import urlparse, parse_qs
         import json as _json
         parsed = urlparse(self.path)
+
+        # /save-session: extrai cookies do Chrome aberto e gera session.json
+        if parsed.path == "/save-session":
+            qs = parse_qs(parsed.query)
+            username = (qs.get("username") or [""])[0].strip()
+            if not username:
+                self._send(400, b'{"error":"username obrigatorio"}')
+                return
+            ok, info = _save_session_from_chrome(username)
+            if ok:
+                body = _json.dumps({"ok": True, "message": info}).encode("utf-8")
+                self._send(200, body)
+                print(f"[local-api] 💾 sessão SALVA pra @{username}: {info}")
+            else:
+                body = _json.dumps({"ok": False, "error": info}).encode("utf-8")
+                self._send(400, body)
+                print(f"[local-api] ⚠️ save-session @{username} falhou: {info}")
+            return
+
         if parsed.path != "/open-browser":
             self._send(404, b'{"error":"not found"}')
             return
