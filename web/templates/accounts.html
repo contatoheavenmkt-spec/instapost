@@ -1251,16 +1251,21 @@ elMSoYMQakO</pre>
     const noProxy = opts && opts.no_proxy === true;
     const cleanMobile = opts && opts.clean_mobile === true;
     if (cleanMobile) {
+      const acc = accounts.find(a => a.username === username);
+      const hasProxy = !!(acc && acc.proxy);
+      const proxyMsg = hasProxy
+        ? `🌐 PROXY DA CONTA SERÁ USADO (IP fixo do proxy)`
+        : `⚠️ SEM proxy (IP residencial seu)`;
       const ok = confirm(
         `📲 Abrir SIMULADOR MOBILE pra @${username}?\n\n` +
-        `Chrome vai abrir como CELULAR (mobile UA + janela 412x870), SEM PROXY, ` +
-        `SEM cookies injetados.\n\n` +
+        `Modo: mobile UA + janela 412x870 + sem cookies injetados.\n` +
+        `${proxyMsg}\n\n` +
         `O QUE FAZER NA JANELA:\n` +
         `1. Vai pro Insta e LOGA MANUAL (usuário + senha + 2FA)\n` +
         `2. Confirma que vê o feed\n` +
         `3. Volta aqui e clica 'Salvar Sessão' (botão disco verde)\n\n` +
-        `Pronto: worker passa a usar os cookies que você acabou de gerar = ` +
-        `sem login API = sem challenge/IP queimado.\n\nContinuar?`
+        `Worker passa a usar os cookies que você gerar = sem login API = ` +
+        `sem challenge/IP queimado.\n\nContinuar?`
       );
       if (!ok) return;
     } else if (noProxy) {

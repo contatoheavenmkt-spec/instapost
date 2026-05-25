@@ -851,30 +851,45 @@ def _check_throttle(username: str) -> Optional[str]:
 
 
 def _build_proxy_auth_extension(extension_dir: Path, proxy_user: str, proxy_pass: str) -> None:
-    """Gera uma extensão Chrome temporária que responde automaticamente ao
-    diálogo de auth do proxy. Sem isso, Chrome popa um modal pedindo senha
-    a cada launch (chato e quebra automação)."""
+    """Gera extensão Chrome temporária pra auth automática de proxy.
+
+    Usa Manifest V3 (MV2 tá deprecated em Chrome 127+ e estava deixando o
+    browser em branco). MV3 pra onAuthRequired precisa:
+    - permission 'webRequest' + 'webRequestAuthProvider'
+    - listener com modo 'asyncBlocking'
+
+    Sem essa extensão, Chrome popa modal pedindo user/senha do proxy
+    em CADA request (chato e quebra carregamento de página)."""
     extension_dir.mkdir(parents=True, exist_ok=True)
     manifest = {
-        "manifest_version": 2,
+        "manifest_version": 3,
         "name": "Insta Poster Proxy Auth",
         "version": "1.0",
-        "permissions": ["proxy", "webRequest", "webRequestBlocking", "<all_urls>"],
-        "background": {"scripts": ["bg.js"], "persistent": True},
+        "permissions": ["webRequest", "webRequestAuthProvider"],
+        "host_permissions": ["<all_urls>"],
+        "background": {"service_worker": "bg.js"},
     }
     bg_js = (
+        "// Auto-responde ao proxy auth challenge.\n"
+        "// asyncBlocking permite resolver o callback async com credenciais.\n"
         "chrome.webRequest.onAuthRequired.addListener(\n"
-        "  function(details) {\n"
-        "    return {authCredentials: {\n"
-        f"      username: {json.dumps(proxy_user)},\n"
-        f"      password: {json.dumps(proxy_pass)}\n"
-        "    }};\n"
+        "  function(details, callback) {\n"
+        "    // Só responde se for auth do PROXY (não auth de sites)\n"
+        "    if (details.isProxy) {\n"
+        "      callback({authCredentials: {\n"
+        f"        username: {json.dumps(proxy_user)},\n"
+        f"        password: {json.dumps(proxy_pass)}\n"
+        "      }});\n"
+        "    } else {\n"
+        "      callback();\n"
+        "    }\n"
         "  },\n"
         "  {urls: ['<all_urls>']},\n"
-        "  ['blocking']\n"
+        "  ['asyncBlocking']\n"
         ");\n"
+        "console.log('[InstaPosterProxyAuth] MV3 listener registrado');\n"
     )
-    (extension_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (extension_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     (extension_dir / "bg.js").write_text(bg_js, encoding="utf-8")
 
 
@@ -941,16 +956,16 @@ def _open_chrome_for_account(
     profile_dir.mkdir(parents=True, exist_ok=True)
 
     # === MODO ANTIDETECT MOBILE (Dolphin Anty style) ===
-    # clean_mobile=True: mobile UA + mobile window + SEM proxy + SEM cookie inject.
-    # Usuário navega livre (Google, Insta, qualquer site) e loga manual no Insta.
-    # Depois clica "Salvar Sessão" — worker extrai cookies do Chrome aberto.
-    # Resolve o problema de "Chrome em branco" causado por proxy auth dialog +
-    # cookies inválidos sendo injetados.
+    # clean_mobile=True: mobile UA + mobile window + SEM cookie inject.
+    # Usuário navega livre e loga manual no Insta. Depois clica "Salvar Sessão"
+    # pra extrair cookies do Chrome aberto.
+    # PROXY: se a conta tem proxy configurado, USA (sai pelo IP do proxy).
+    #        Se não tem, vai pelo IP residencial. Em ambos modos cookies NÃO
+    #        são injetados — login fresh manual.
     cdp_cookies: list[dict] = []
     if clean_mobile:
-        # Força modo limpo: ignora proxy, ignora sessão salva
-        proxy = None
-        no_proxy = True
+        # Não injeta cookies, mas mantém o proxy se a conta tiver (a menos
+        # que no_proxy=True explicito).
         # Mobile UA específico da conta (device fingerprint determinístico)
         try:
             from core.devices import device_for_account
