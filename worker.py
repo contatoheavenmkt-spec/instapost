@@ -798,27 +798,58 @@ def _inject_cookies_via_cdp(debug_port: int, cookies: list[dict], target_url: st
 
 
 def _kill_chrome_for_profile(profile_dir: Path) -> None:
-    """Mata chrome.exe que está usando esse profile dir. Necessário porque se já
-    tem Chrome aberto nessa mesma --user-data-dir, o novo launch só vira IPC
-    client (ignora --remote-debugging-port). Sem isso, auto-login não funciona
-    na 2ª+ vez que abre."""
+    """Mata chrome.exe que está usando esse profile dir + remove lock files.
+
+    Necessário porque se já tem Chrome aberto nessa mesma --user-data-dir, o
+    novo launch vira IPC client (ignora --remote-debugging-port). Sem
+    debug port, Save Sessão não funciona.
+
+    Estratégia robusta:
+    1. Lista TODAS as PIDs do Chrome com essa profile (filtro cmdline)
+    2. Mata cada uma com taskkill /F /T (force + tree — mata renderers/GPU/network)
+    3. Repete até 3x se Chrome auto-restart
+    4. Remove SingletonLock/Cookie/Socket pro novo Chrome iniciar limpo
+    """
     if platform.system() != "Windows":
         return
+    marker = profile_dir.name
     try:
-        # Match: chrome.exe com o nome da profile no cmdline. Username é sanitizado
-        # (alnum + ._-) então é seguro pra string match.
-        marker = profile_dir.name
-        ps_cmd = (
-            f"Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
-            f"Where-Object {{ $_.CommandLine -like '*InstaposterProfiles*{marker}*' }} | "
-            f"ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}"
-        )
-        subprocess.run(
-            ["powershell.exe", "-NoProfile", "-Command", ps_cmd],
-            capture_output=True, timeout=5,
-        )
-        # Espera Chrome liberar SingletonLock do profile (~1s na prática)
-        time.sleep(1.2)
+        for attempt in range(3):
+            # Pega PIDs ativas
+            ps_get = (
+                f"Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
+                f"Where-Object {{ $_.CommandLine -like '*InstaposterProfiles*{marker}*' }} | "
+                f"Select-Object -ExpandProperty ProcessId"
+            )
+            result = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-Command", ps_get],
+                capture_output=True, text=True, timeout=5,
+            )
+            pids = [p.strip() for p in (result.stdout or "").splitlines() if p.strip().isdigit()]
+            if not pids:
+                break  # nada pra matar
+            if attempt == 0:
+                print(f"[local-api] matando {len(pids)} Chrome(s) anterior(es) de @{marker}")
+            # taskkill /F /T = force + tree (mata processo + filhos)
+            for pid in pids:
+                try:
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", pid],
+                        capture_output=True, timeout=3,
+                    )
+                except Exception:
+                    pass
+            time.sleep(1.0)
+        # Remove SingletonLock e amigos — Chrome usa pra detectar "outra instância"
+        # Se sobrou (Chrome morreu sem cleanup), bloqueia novo Chrome de iniciar.
+        for lock_name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+            try:
+                lock_file = profile_dir / lock_name
+                if lock_file.exists() or lock_file.is_symlink():
+                    lock_file.unlink()
+            except Exception:
+                pass
+        time.sleep(0.3)  # margem pra FS liberar
     except Exception as e:
         print(f"[local-api] kill Chrome anterior falhou (ignorando): {e}")
 
