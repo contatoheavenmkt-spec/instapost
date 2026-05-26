@@ -1118,10 +1118,55 @@ def _save_session_from_chrome(username: str) -> tuple[bool, str]:
     if not profile_dir.exists():
         return False, "Profile não existe. Clica Smartphone primeiro, loga, depois Salvar Sessão."
 
-    # Lê DevToolsActivePort que o Chrome escreve com a porta debug ativa
+    # Lê DevToolsActivePort que o Chrome escreve com a porta debug ativa.
+    # Chrome deleta esse arquivo quando fecha — se sumiu = Chrome morreu/fechou.
     port_file = profile_dir / "DevToolsActivePort"
     if not port_file.exists():
-        return False, "Chrome não tá aberto OU não foi iniciado com debug port. Clica Smartphone (sem reset) e tenta de novo."
+        # Diagnóstico detalhado
+        profile_exists = profile_dir.exists()
+        chrome_running = False
+        running_profiles: list[str] = []
+        if platform.system() == "Windows":
+            try:
+                ps_cmd = (
+                    "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
+                    "Where-Object { $_.CommandLine -like '*InstaposterProfiles*' } | "
+                    "Select-Object -ExpandProperty CommandLine"
+                )
+                result = subprocess.run(
+                    ["powershell.exe", "-NoProfile", "-Command", ps_cmd],
+                    capture_output=True, text=True, timeout=5,
+                )
+                lines = (result.stdout or "").strip().splitlines()
+                for line in lines:
+                    # Extrai o nome da profile (após InstaposterProfiles\)
+                    import re as _re
+                    m = _re.search(r"InstaposterProfiles[\\/]([^\\\"\s/]+)", line)
+                    if m:
+                        running_profiles.append(m.group(1))
+                chrome_running = bool(running_profiles)
+            except Exception:
+                pass
+
+        if chrome_running and safe in running_profiles:
+            msg = (
+                f"Chrome tá aberto pra @{safe} MAS sem debug port (DevToolsActivePort não existe). "
+                f"Provavel: Chrome foi aberto sem o --remote-debugging-port. "
+                f"FECHE essa janela Chrome e clique Smartphone DE NOVO."
+            )
+        elif chrome_running:
+            msg = (
+                f"Você tem Chrome aberto pra: {', '.join('@' + p for p in running_profiles)}. "
+                f"Mas NÃO pra @{safe}. Você quer Salvar Sessão de qual conta? "
+                f"Clique 'Salvar Sessão' na linha da conta CORRETA OU abra @{safe} via Smartphone primeiro."
+            )
+        else:
+            msg = (
+                f"Nenhum Chrome aberto pra essa conta. "
+                f"Profile dir esperado: {profile_dir} (existe: {profile_exists}). "
+                f"Clica Smartphone na @{safe} primeiro, loga, mantem Chrome aberto e DAÍ clica Salvar Sessão."
+            )
+        return False, msg
 
     try:
         lines = port_file.read_text(encoding="utf-8").strip().split("\n")
