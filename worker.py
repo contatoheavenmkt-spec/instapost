@@ -1179,9 +1179,9 @@ def _open_chrome_for_account(
             creationflags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
         # Debug: imprime args (ofusca paths/tokens longos)
         debug_args = [a if len(a) < 100 else a[:80] + "..." for a in args]
-        print(f"[local-api] launching Chrome PID-novo args: {' '.join(debug_args)}")
+        print(f"[local-api] launching Chrome PID-novo args: {' '.join(debug_args)}", flush=True)
         proc_chrome = subprocess.Popen(args, close_fds=True, creationflags=creationflags)
-        print(f"[local-api] Chrome lançado PID={proc_chrome.pid}")
+        print(f"[local-api] Chrome lançado PID={proc_chrome.pid} profile={profile_dir}", flush=True)
     except Exception as e:
         return False, f"Popen falhou: {e}"
 
@@ -1195,7 +1195,7 @@ def _open_chrome_for_account(
             try:
                 lines = port_file.read_text(encoding="utf-8").strip().split("\n")
                 actual_port = int(lines[0])
-                print(f"[local-api] ✓ DevToolsActivePort criado: porta={actual_port} em {profile_dir.name}")
+                print(f"[local-api] ✓ DevToolsActivePort criado: porta={actual_port} em {profile_dir.name}", flush=True)
                 # Atualiza debug_port pra usar a porta REAL que Chrome bindou
                 debug_port = actual_port
                 break
@@ -1203,8 +1203,8 @@ def _open_chrome_for_account(
                 pass
         _t_wait.sleep(0.4)
     else:
-        print(f"[local-api] ⚠️ DevToolsActivePort NÃO criado em 12s em {profile_dir}")
-        print(f"[local-api]    → Chrome atachou a outra instância OU falhou ao bindar porta")
+        print(f"[local-api] ⚠️ DevToolsActivePort NÃO criado em 12s em {profile_dir}", flush=True)
+        print(f"[local-api]    → Chrome atachou a outra instância OU falhou ao bindar porta", flush=True)
         # Lista processos chrome pra diagnóstico
         try:
             ps_get = (
@@ -1247,12 +1247,9 @@ def _save_session_from_chrome(username: str) -> tuple[bool, str]:
     if not safe:
         return False, "username inválido"
 
-    # Estratégia nova: profiles têm timestamp suffix (<user>_<ts>).
-    # Procura o profile MAIS RECENTE dessa @ que tem DevToolsActivePort ativo
-    # (= Chrome rodando com debug port).
+    # Estratégia: profiles têm timestamp suffix (<user>_<ts>).
     profile_base = Path.home() / "InstaposterProfiles"
     candidates: list[Path] = []
-    # Inclui formato novo (<user>_<ts>) E formato antigo (<user>) pra retrocompat
     if (profile_base / safe).exists():
         candidates.append(profile_base / safe)
     if profile_base.exists():
@@ -1262,12 +1259,62 @@ def _save_session_from_chrome(username: str) -> tuple[bool, str]:
             reverse=True,
         ))
 
+    # Etapa 1: tenta achar Chrome rodando E debug port ativo.
+    # Método A: DevToolsActivePort file no profile dir (preferido)
+    # Método B: Extrair --remote-debugging-port do cmdline + verificar se debug
+    #           server responde (fallback quando DevToolsActivePort não foi escrito)
     profile_dir = None
+    debug_port_found = None
+
+    # Método A: scan profile dirs por DevToolsActivePort
     for cand in candidates:
-        port_file = cand / "DevToolsActivePort"
-        if port_file.exists():
-            profile_dir = cand
-            break
+        port_file_check = cand / "DevToolsActivePort"
+        if port_file_check.exists():
+            try:
+                lines = port_file_check.read_text(encoding="utf-8").strip().split("\n")
+                debug_port_found = int(lines[0])
+                profile_dir = cand
+                break
+            except Exception:
+                pass
+
+    # Método B: se A falhou, scan Chrome processes pra achar debug port no cmdline
+    if profile_dir is None and platform.system() == "Windows":
+        try:
+            import re as _re_cmd
+            ps_get = (
+                f"Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
+                f"Where-Object {{ $_.CommandLine -like '*InstaposterProfiles*{safe}*' "
+                f"-and $_.CommandLine -like '*remote-debugging-port*' "
+                f"-and $_.CommandLine -notlike '*--type=*' }} | "
+                f"Select-Object -ExpandProperty CommandLine"
+            )
+            result = subprocess.run(["powershell.exe", "-NoProfile", "-Command", ps_get],
+                                  capture_output=True, text=True, timeout=5)
+            for line in (result.stdout or "").splitlines():
+                m_port = _re_cmd.search(r"remote-debugging-port=(\d+)", line)
+                m_dir = _re_cmd.search(r"--user-data-dir=([^\"\s]+)", line) or \
+                        _re_cmd.search(r"InstaposterProfiles[\\\\/](\w[\w.-]*)", line)
+                if m_port and m_dir:
+                    port_candidate = int(m_port.group(1))
+                    # Verifica se debug server REALMENTE responde
+                    try:
+                        import urllib.request as _urlr
+                        _urlr.urlopen(f"http://127.0.0.1:{port_candidate}/json/version", timeout=2).read()
+                        # Sucesso: porta tá listening
+                        dir_name = m_dir.group(1).split("\\")[-1].split("/")[-1] if m_dir.group(1).startswith("--") else m_dir.group(1)
+                        # Reconstrói path do profile dir
+                        possible_profile = profile_base / dir_name
+                        if possible_profile.exists():
+                            profile_dir = possible_profile
+                            debug_port_found = port_candidate
+                            print(f"[local-api] 💡 achou Chrome debug via cmdline scan: porta={port_candidate} profile={dir_name}")
+                            break
+                    except Exception:
+                        # Porta no cmdline mas não responde — Chrome bindou em outra OU não bindou
+                        continue
+        except Exception as e:
+            print(f"[local-api] cmdline scan falhou: {e}")
 
     if profile_dir is None:
         # Diagnóstico detalhado
@@ -1318,11 +1365,10 @@ def _save_session_from_chrome(username: str) -> tuple[bool, str]:
             )
         return False, msg
 
-    try:
-        lines = port_file.read_text(encoding="utf-8").strip().split("\n")
-        port = int(lines[0])
-    except Exception as e:
-        return False, f"erro lendo DevToolsActivePort: {e}"
+    # Porta debug já descoberta acima (Método A: DevToolsActivePort, ou B: cmdline scan)
+    port = debug_port_found
+    if not port:
+        return False, "Não consegui descobrir a porta debug do Chrome"
 
     # Conecta via CDP, lê cookies
     try:
