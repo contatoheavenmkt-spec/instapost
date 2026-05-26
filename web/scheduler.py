@@ -75,6 +75,8 @@ class Schedule:
         self.status: str = data.get("status", "pending")  # pending | running | done | error | cancelled | missed
         self.created_at: str = data.get("created_at") or now_local().isoformat(timespec="seconds")
         self.created_by: Optional[str] = data.get("created_by")
+        # Workspace do schedule — usado pra isolamento na UI. Vazio = "default".
+        self.workspace_slug: str = data.get("workspace_slug") or "default"
         # Legacy: job_id era único quando disparava local. Agora usamos remote_job_ids (N jobs).
         self.job_id: Optional[str] = data.get("job_id")
         self.remote_job_ids: list[str] = data.get("remote_job_ids", []) or []
@@ -91,6 +93,7 @@ class Schedule:
             "status": self.status,
             "created_at": self.created_at,
             "created_by": self.created_by,
+            "workspace_slug": self.workspace_slug,
             "job_id": self.job_id,
             "remote_job_ids": self.remote_job_ids,
             "via": self.via,
@@ -134,9 +137,13 @@ class ScheduleManager:
 
     # ---- queries ----
 
-    def list(self) -> list[dict]:
+    def list(self, workspace_slug: Optional[str] = None) -> list[dict]:
+        """Lista schedules. Se workspace_slug for fornecido, filtra apenas dele.
+        None = retorna todos (admin/internal)."""
         with self._lock:
             items = sorted(self._items, key=lambda s: s.scheduled_at)
+            if workspace_slug:
+                items = [s for s in items if s.workspace_slug == workspace_slug]
             return [s.to_dict() for s in items]
 
     def get(self, schedule_id: str) -> Optional[Schedule]:
@@ -169,7 +176,14 @@ class ScheduleManager:
 
     # ---- mutations ----
 
-    def create(self, video: str, account: Optional[str], scheduled_at: datetime, created_by: Optional[str] = None) -> Schedule:
+    def create(self, video: str, account: Optional[str], scheduled_at: datetime, created_by: Optional[str] = None, workspace_slug: Optional[str] = None) -> Schedule:
+        # Auto-popular workspace do contexto se não veio explícito
+        if not workspace_slug:
+            try:
+                from core.paths import get_workspace
+                workspace_slug = get_workspace()
+            except Exception:
+                workspace_slug = "default"
         sched = Schedule({
             "id": uuid.uuid4().hex[:12],
             "video": video,
@@ -178,6 +192,7 @@ class ScheduleManager:
             "status": "pending",
             "created_at": now_local().isoformat(timespec="seconds"),
             "created_by": created_by,
+            "workspace_slug": workspace_slug,
         })
         with self._lock:
             self._items.append(sched)
@@ -411,10 +426,15 @@ class ScheduleManager:
         """
         # Importações lazy pra evitar ciclo
         from web.remote_jobs import manager as rjob_manager
+        from core import paths as _paths
         from core.paths import PENDING_DIR, ACCOUNTS_FILE
         from core.poster import load_meta, detect_media_kind, load_caption
         from web.shortener import manager as link_manager
         import os as _os, json as _json
+
+        # Setta contexto do workspace ANTES de qualquer leitura/criação — assim
+        # ACCOUNTS_FILE, PENDING_DIR, e create() do rjob herdam o ws certo.
+        _paths.set_workspace(s.workspace_slug or "default")
 
         # Lê accounts.json
         try:
@@ -474,6 +494,7 @@ class ScheduleManager:
 
             rj = rjob_manager.create({
                 "operation": "post",
+                "workspace_slug": s.workspace_slug or "default",
                 "params": {"auto_highlight_title": highlight_title} if highlight_title else {},
                 "account_username": acc["username"],
                 "account_password": acc["password"],
@@ -513,17 +534,33 @@ class ScheduleManager:
             self._stop_event.wait(interval)
 
     def _automation_tick(self):
-        """Pra cada conta com automação ligada e que ainda não bateu o limite
-        do dia, com chance aleatória, cria 1 remote_job. Só age durante 'janela
-        ativa' (7h-22h horário do servidor) pra simular humano."""
-        import json as _json, random as _r
+        """Pra cada workspace, pra cada conta com automação ligada e que ainda
+        não bateu o limite do dia, com chance aleatória, cria 1 remote_job.
+        Só age durante 'janela ativa' (7h-22h horário do servidor) pra simular humano."""
         from datetime import datetime as _dt
-        from core.paths import ACCOUNTS_FILE
+        from core import paths as _paths
 
         # Janela de atividade 07:00 - 22:00
         hour = _dt.now().hour
         if hour < 7 or hour >= 22:
             return
+
+        # Itera por todos os workspaces — cada um tem seu próprio accounts.json
+        for slug in _paths.list_workspace_slugs():
+            try:
+                self._automation_tick_for_workspace(slug)
+            except Exception as e:
+                print(f"[automation] erro no ws '{slug}': {e}")
+
+    def _automation_tick_for_workspace(self, slug: str):
+        """Roda 1 rodada do automation tick em 1 workspace específico."""
+        import json as _json, random as _r
+        from datetime import datetime as _dt
+        from core import paths as _paths
+
+        # CRÍTICO: setta contexto antes de ACCOUNTS_FILE/create() pegarem o ws
+        _paths.set_workspace(slug)
+        from core.paths import ACCOUNTS_FILE
 
         try:
             with open(ACCOUNTS_FILE, encoding="utf-8") as f:
@@ -573,6 +610,7 @@ class ScheduleManager:
                         per_run = _r.randint(1, min(3, remaining))
                         rj = rjob_manager.create({
                             "operation": "auto_like_own",
+                            "workspace_slug": slug,
                             "params": {"max_likes": per_run},
                             "account_username": acc["username"],
                             "account_password": acc["password"],
@@ -582,7 +620,7 @@ class ScheduleManager:
                         })
                         acc["auto_like_today_count"] = done + per_run
                         changed = True
-                        print(f"[automation] auto_like_own @{acc['username']} +{per_run} (total dia: {acc['auto_like_today_count']}/{limit})")
+                        print(f"[automation] auto_like_own @{acc['username']} +{per_run} (ws={slug}, total dia: {acc['auto_like_today_count']}/{limit})")
 
             # ------ AUTO FOLLOW BACK ------
             if acc.get("auto_follow_back_enabled"):
@@ -595,6 +633,7 @@ class ScheduleManager:
                         per_run = _r.randint(1, min(2, remaining_f))
                         rj = rjob_manager.create({
                             "operation": "auto_follow_back",
+                            "workspace_slug": slug,
                             "params": {
                                 "max_follows": per_run,
                                 "seen_followers": acc.get("auto_follow_back_seen_followers", []),
@@ -608,7 +647,7 @@ class ScheduleManager:
                         # Reserva os slots (worker vai atualizar count real depois)
                         acc["auto_follow_back_today_count"] = done_f + per_run
                         changed = True
-                        print(f"[automation] auto_follow_back @{acc['username']} +{per_run} (total dia: {acc['auto_follow_back_today_count']}/{limit_f})")
+                        print(f"[automation] auto_follow_back @{acc['username']} +{per_run} (ws={slug}, total dia: {acc['auto_follow_back_today_count']}/{limit_f})")
 
         # Salva accounts.json se mudou
         if changed:
@@ -616,7 +655,7 @@ class ScheduleManager:
                 with open(ACCOUNTS_FILE, "w", encoding="utf-8") as f:
                     _json.dump(accounts, f, ensure_ascii=False, indent=2)
             except Exception as e:
-                print(f"[automation] erro salvando accounts: {e}")
+                print(f"[automation] erro salvando accounts (ws={slug}): {e}")
 
     # ===================== SYNC / BACKFILL =====================
 
@@ -736,11 +775,13 @@ class ScheduleManager:
                 continue
 
             # Já tem job de sync pendente/rodando pra essa conta? Pula.
+            # Filtra por ws pra não cruzar contas iguais entre workspaces.
             has_active = any(
                 j.account_username == acc["username"]
                 and j.operation == "post"
                 and (j.created_by or "").startswith("sync:")
                 and j.status in ("pending", "claimed", "running")
+                and j.workspace_slug == slug
                 for j in rjob_manager.snapshot_values()
             )
             if has_active:
@@ -801,6 +842,7 @@ class ScheduleManager:
 
             rjob_manager.create({
                 "operation": "post",
+                "workspace_slug": slug,
                 "params": {"auto_highlight_title": highlight_title} if highlight_title else {},
                 "account_username": acc["username"],
                 "account_password": acc["password"],
@@ -1035,12 +1077,14 @@ class ScheduleManager:
         # pending/claimed/running ATUALMENTE (jobs de rodadas anteriores ainda
         # não processados). Antes, o sistema só olhava posted_media e criava
         # múltiplos jobs do mesmo vídeo enquanto worker não terminava o 1º.
+        # Filtra por ws pra isolamento.
         pending_per_acc: dict[str, set[str]] = {}
         for j in rjob_manager.snapshot_values():
             if (
                 j.operation == "post"
                 and j.status in ("pending", "claimed", "running")
                 and j.video_name
+                and j.workspace_slug == slug
             ):
                 pending_per_acc.setdefault(j.account_username, set()).add(j.video_name)
 
@@ -1201,6 +1245,7 @@ class ScheduleManager:
             try:
                 job = rjob_manager.create({
                     "operation": "post",
+                    "workspace_slug": slug,
                     "params": {"auto_highlight_title": highlight_title} if highlight_title else {},
                     "account_username": acc["username"],
                     "account_password": acc["password"],
@@ -1307,6 +1352,7 @@ class ScheduleManager:
                 try:
                     rjob_manager.create({
                         "operation": "collect_insights",
+                        "workspace_slug": slug,
                         "account_username": acc["username"],
                         "account_password": acc["password"],
                         "account_totp_secret": acc.get("totp_secret"),

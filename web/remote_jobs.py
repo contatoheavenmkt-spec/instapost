@@ -51,6 +51,9 @@ class RemoteJob:
         # Operação: "post" | "test_login" | "edit_profile" | "change_picture"
         # | "auto_like_own" | "auto_follow_back" | "get_profile_info"
         self.operation: str = data.get("operation", "post")
+        # Workspace do job — usado pra ISOLAMENTO de dados na UI. Jobs antigos
+        # sem campo viram "default" pra retrocompat. Worker ignora (claim global).
+        self.workspace_slug: str = data.get("workspace_slug") or "default"
         # Params específicos por operation (dict livre)
         self.params: dict = data.get("params", {}) or {}
         # Auth da conta (sempre obrigatório)
@@ -88,6 +91,7 @@ class RemoteJob:
         d = {
             "id": self.id,
             "operation": self.operation,
+            "workspace_slug": self.workspace_slug,
             "params": self.params,
             "account_username": self.account_username,
             "video_name": self.video_name,
@@ -204,15 +208,24 @@ class RemoteJobManager:
 
     # ---- queries ----
 
-    def list(self) -> list[dict]:
+    def list(self, workspace_slug: Optional[str] = None) -> list[dict]:
+        """Lista jobs. Se workspace_slug for fornecido, filtra apenas dele.
+        None = retorna todos (usado por worker/admin)."""
         with self._lock:
             items = sorted(self._items.values(), key=lambda j: j.created_at, reverse=True)
+            if workspace_slug:
+                items = [j for j in items if j.workspace_slug == workspace_slug]
             return [j.to_dict(include_secrets=False) for j in items]
 
     def get(self, job_id: str) -> Optional[RemoteJob]:
         return self._items.get(job_id)
 
-    def pending_count(self) -> int:
+    def pending_count(self, workspace_slug: Optional[str] = None) -> int:
+        if workspace_slug:
+            return sum(
+                1 for j in self._items.values()
+                if j.status == "pending" and j.workspace_slug == workspace_slug
+            )
         return sum(1 for j in self._items.values() if j.status == "pending")
 
     # ---- mutations ----
@@ -229,6 +242,16 @@ class RemoteJobManager:
            bloqueia (evita ban acidental por duplo-post).
         """
         with self._lock:
+            # Resolve workspace_slug ANTES do dedupe — dedupe deve respeitar isolamento
+            # (mesma @ em workspaces diferentes = jobs diferentes, não duplicata).
+            if not payload.get("workspace_slug"):
+                try:
+                    from core.paths import get_workspace
+                    payload["workspace_slug"] = get_workspace()
+                except Exception:
+                    payload["workspace_slug"] = "default"
+            ws_slug = payload["workspace_slug"]
+
             # Humaniza caption ANTES de qualquer check (caption final = source of truth)
             if payload.get("operation", "post") == "post":
                 acc = payload.get("account_username")
@@ -241,13 +264,14 @@ class RemoteJobManager:
                     except Exception as _e:
                         pass  # se spinner falhar, usa caption raw
 
-                # Anti-duplicate ATIVO (job ainda na fila)
+                # Anti-duplicate ATIVO (job ainda na fila) — scoped por workspace
                 if acc and video:
                     for j in self._items.values():
                         if (
                             j.operation == "post"
                             and j.account_username == acc
                             and j.video_name == video
+                            and j.workspace_slug == ws_slug
                             and j.status in ("pending", "claimed", "running")
                         ):
                             return j
@@ -295,6 +319,7 @@ class RemoteJobManager:
             payload["id"] = "rj_" + uuid.uuid4().hex[:12]
             payload["status"] = "pending"
             payload["created_at"] = now_iso()
+            # workspace_slug já foi resolvido no topo (antes do dedupe)
             job = RemoteJob(payload)
             self._items[job.id] = job
             self._save()
@@ -420,22 +445,26 @@ class RemoteJobManager:
             self._save()
             return True
 
-    def dedupe_pending(self) -> int:
+    def dedupe_pending(self, workspace_slug: Optional[str] = None) -> int:
         """Remove jobs pending/claimed duplicados: pra cada par (account, video_name)
         mantém apenas 1 job ativo, deleta os outros.
 
         Útil pra limpar fila quando algum bug criou múltiplos jobs do mesmo
         vídeo pra mesma conta (ex: race condition antes do anti-duplicate).
+
+        Se workspace_slug for fornecido, age apenas em jobs desse ws.
         """
         with self._lock:
-            seen: dict[tuple[str, str], str] = {}  # (acc, video) -> job_id que mantém
+            seen: dict[tuple[str, str, str], str] = {}  # (ws, acc, video) -> job_id mantém
             to_delete: list[str] = []
             for j in self._items.values():
                 if j.status not in ("pending", "claimed"):
                     continue
                 if j.operation != "post" or not j.video_name:
                     continue
-                key = (j.account_username, j.video_name)
+                if workspace_slug and j.workspace_slug != workspace_slug:
+                    continue
+                key = (j.workspace_slug, j.account_username, j.video_name)
                 if key in seen:
                     # Já tem outro job ativo pra esse par — marca pra deletar
                     to_delete.append(j.id)
@@ -447,17 +476,20 @@ class RemoteJobManager:
                 self._save()
             return len(to_delete)
 
-    def requeue_stuck(self) -> int:
+    def requeue_stuck(self, workspace_slug: Optional[str] = None) -> int:
         """Re-enfileira TODOS os jobs que estão presos: pending com scheduled_for
         no futuro, ou claimed/running sem update recente, ou pending sem worker
         ha mais de 10min.
 
+        Se workspace_slug for fornecido, age apenas em jobs desse ws.
         Retorna quantos foram re-enfileirados.
         """
         now = now_iso()
         count = 0
         with self._lock:
             for job in self._items.values():
+                if workspace_slug and job.workspace_slug != workspace_slug:
+                    continue
                 stuck = False
                 # Pending com scheduled_for ainda no futuro: forca pra agora
                 if job.status == "pending" and job.scheduled_for and job.scheduled_for > now:

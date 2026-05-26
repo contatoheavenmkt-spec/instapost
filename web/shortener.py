@@ -51,6 +51,9 @@ class Link:
         self.parent_slug: Optional[str] = data.get("parent_slug")  # grupo (multi-conta)
         self.created_at: str = data.get("created_at") or now_iso()
         self.created_by: Optional[str] = data.get("created_by")
+        # Workspace dono do link — isolamento na UI. Links antigos sem campo = "default".
+        # Redirect via /r/SLUG continua funcionando sem filtro de ws (slug é global).
+        self.workspace_slug: str = data.get("workspace_slug") or "default"
         self.active: bool = data.get("active", True)
         self.click_count: int = data.get("click_count", 0)
         self.clicks: list = data.get("clicks", [])
@@ -64,6 +67,7 @@ class Link:
             "parent_slug": self.parent_slug,
             "created_at": self.created_at,
             "created_by": self.created_by,
+            "workspace_slug": self.workspace_slug,
             "active": self.active,
             "click_count": self.click_count,
             "clicks": self.clicks[-MAX_CLICKS_KEPT_PER_LINK:],
@@ -94,9 +98,13 @@ class LinkManager:
 
     # ---- queries ----
 
-    def list(self) -> list[dict]:
+    def list(self, workspace_slug: Optional[str] = None) -> list[dict]:
+        """Lista links. Se workspace_slug for fornecido, filtra apenas dele.
+        None = retorna todos. Redirect via /r/SLUG NÃO usa esse filtro (slugs são globais)."""
         with self._lock:
             items = sorted(self._items.values(), key=lambda l: l.created_at, reverse=True)
+            if workspace_slug:
+                items = [l for l in items if l.workspace_slug == workspace_slug]
             return [l.to_dict() for l in items]
 
     def get(self, slug: str) -> Optional[Link]:
@@ -106,12 +114,21 @@ class LinkManager:
 
     def create(self, target_url: str, label: Optional[str] = None,
                account: Optional[str] = None, parent_slug: Optional[str] = None,
-               created_by: Optional[str] = None, slug: Optional[str] = None) -> Link:
+               created_by: Optional[str] = None, slug: Optional[str] = None,
+               workspace_slug: Optional[str] = None) -> Link:
         target_url = (target_url or "").strip()
         if not target_url:
             raise ValueError("target_url obrigatório")
         if not (target_url.startswith("http://") or target_url.startswith("https://")):
             target_url = "https://" + target_url
+
+        # Auto-popular workspace do contexto se caller não setou
+        if not workspace_slug:
+            try:
+                from core.paths import get_workspace
+                workspace_slug = get_workspace()
+            except Exception:
+                workspace_slug = "default"
 
         with self._lock:
             # Slug customizado ou gera aleatório (com retry se colidir)
@@ -136,6 +153,7 @@ class LinkManager:
                 "parent_slug": parent_slug,
                 "created_at": now_iso(),
                 "created_by": created_by,
+                "workspace_slug": workspace_slug,
                 "active": True,
                 "click_count": 0,
                 "clicks": [],

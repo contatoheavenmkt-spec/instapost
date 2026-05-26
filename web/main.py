@@ -391,8 +391,9 @@ def page_dashboard(request: Request):
         if session_status(a["username"]) == "saved" or a.get("connected_via_worker_id")
     ]
 
-    # Próximos agendamentos (status pending)
-    all_schedules = schedule_manager.list()
+    # Próximos agendamentos (status pending) — só do workspace ativo
+    from core import paths as _paths
+    all_schedules = schedule_manager.list(workspace_slug=_paths.get_workspace())
     upcoming_schedules = [s for s in all_schedules if s["status"] == "pending"][:5]
     upcoming_count = sum(1 for s in all_schedules if s["status"] == "pending")
 
@@ -2289,7 +2290,9 @@ class ScheduleIn(BaseModel):
 
 @app.get("/api/schedules")
 def api_list_schedules():
-    return schedule_manager.list()
+    # Isolamento por workspace ativo
+    from core import paths as _paths
+    return schedule_manager.list(workspace_slug=_paths.get_workspace())
 
 
 @app.post("/api/schedules")
@@ -2385,9 +2388,11 @@ def api_list_links(
     until: Optional[str] = None,    # ISO (ex: 2026-05-21T00:00:00Z)
 ):
     """Lista links. Se since/until fornecidos, recalcula click_count_filtered
-    contando só cliques na janela (mantém click_count total intacto)."""
+    contando só cliques na janela (mantém click_count total intacto).
+    Filtra pelo workspace ativo — isolamento."""
+    from core import paths as _paths
     out = []
-    raw_links = link_manager.list()
+    raw_links = link_manager.list(workspace_slug=_paths.get_workspace())
     for d in raw_links:
         d = _link_dict_view(d, request)
         if since or until:
@@ -2607,6 +2612,13 @@ class WorkerResultIn(BaseModel):
 def api_worker_job_result(job_id: str, payload: WorkerResultIn, request: Request):
     w = _require_worker(request)
     job = rjob_manager.get(job_id)
+    # CRÍTICO pra isolamento: setta o workspace do JOB (não da sessão do request).
+    # Worker tem token global e bate no endpoint sem cookie de sessão — sem isso,
+    # accounts_transaction() abaixo iria escrever no accounts.json do workspace
+    # DEFAULT (ou do último set_workspace da thread) em vez do dono do job.
+    if job:
+        from core import paths as _paths
+        _paths.set_workspace(job.workspace_slug or "default")
     ok = rjob_manager.report_result(
         job_id=job_id, worker_id=w.id,
         success=payload.success,
@@ -2740,13 +2752,19 @@ class RemoteJobIn(BaseModel):
 
 @app.get("/api/remote-jobs")
 def api_list_remote_jobs(user=Depends(auth.require_user)):
-    return rjob_manager.list()
+    # Filtra pelo workspace ativo na sessão — isolamento entre workspaces.
+    from core import paths as _paths
+    return rjob_manager.list(workspace_slug=_paths.get_workspace())
 
 
 @app.get("/api/remote-jobs/{job_id}")
 def api_get_remote_job(job_id: str, user=Depends(auth.require_user)):
     j = rjob_manager.get(job_id)
     if not j:
+        raise HTTPException(404, "Job não encontrado")
+    # Isolamento por workspace: só devolve se job pertence ao ws ativo
+    from core import paths as _paths
+    if j.workspace_slug != _paths.get_workspace():
         raise HTTPException(404, "Job não encontrado")
     return j.to_dict(include_secrets=False)
 
@@ -2962,13 +2980,16 @@ def api_dispatch_diversified(payload: DiversifiedDispatchIn, request: Request, u
 
     # ANTI-DUPLICATE: jobs em pending/claimed/running ATUAIS contam como "já pegos"
     # pra cada conta, evitando criar 2x o mesmo vídeo na fila enquanto worker
-    # ainda não terminou o primeiro.
+    # ainda não terminou o primeiro. Scoped por workspace pra não cruzar dados.
+    from core import paths as _paths
+    _ws_now = _paths.get_workspace()
     pending_per_acc: dict[str, set[str]] = {}
     for j in rjob_manager._items.values():
         if (
             j.operation == "post"
             and j.status in ("pending", "claimed", "running")
             and j.video_name
+            and j.workspace_slug == _ws_now
         ):
             pending_per_acc.setdefault(j.account_username, set()).add(j.video_name)
 
@@ -3213,8 +3234,20 @@ def api_reset_posted(payload: ResetPostedIn, user=Depends(auth.require_user)):
     }
 
 
+def _check_job_ws_or_404(job_id: str) -> None:
+    """Isolamento: cancel/delete/requeue só funcionam pra jobs do ws ativo.
+    Evita user de ws A mexer em jobs de ws B mesmo que tenha o ID."""
+    j = rjob_manager.get(job_id)
+    if not j:
+        raise HTTPException(404, "Job não encontrado")
+    from core import paths as _paths
+    if j.workspace_slug != _paths.get_workspace():
+        raise HTTPException(404, "Job não encontrado")
+
+
 @app.post("/api/remote-jobs/{job_id}/cancel")
 def api_cancel_remote_job(job_id: str, user=Depends(auth.require_user)):
+    _check_job_ws_or_404(job_id)
     if not rjob_manager.cancel(job_id):
         raise HTTPException(400, "Job não pode ser cancelado (já rodou ou foi removido)")
     return {"ok": True}
@@ -3222,6 +3255,7 @@ def api_cancel_remote_job(job_id: str, user=Depends(auth.require_user)):
 
 @app.post("/api/remote-jobs/{job_id}/delete")
 def api_delete_remote_job(job_id: str, user=Depends(auth.require_user)):
+    _check_job_ws_or_404(job_id)
     if not rjob_manager.delete(job_id):
         raise HTTPException(404, "Job não encontrado")
     return {"ok": True}
@@ -3230,6 +3264,7 @@ def api_delete_remote_job(job_id: str, user=Depends(auth.require_user)):
 @app.post("/api/remote-jobs/{job_id}/requeue")
 def api_requeue_remote_job(job_id: str, user=Depends(auth.require_user)):
     """Forca 1 job de volta pra fila (limpa scheduled_for + worker_id)."""
+    _check_job_ws_or_404(job_id)
     if not rjob_manager.requeue(job_id):
         raise HTTPException(404, "Job não encontrado")
     return {"ok": True}
@@ -3237,15 +3272,19 @@ def api_requeue_remote_job(job_id: str, user=Depends(auth.require_user)):
 
 @app.post("/api/remote-jobs/requeue-stuck")
 def api_requeue_stuck(user=Depends(auth.require_user)):
-    """Re-enfileira TODOS os jobs presos (stagger futuro, claimed zumbi, pending velho)."""
-    count = rjob_manager.requeue_stuck()
+    """Re-enfileira TODOS os jobs presos (stagger futuro, claimed zumbi, pending velho).
+    Scoped no ws ativo — não afeta outros workspaces."""
+    from core import paths as _paths
+    count = rjob_manager.requeue_stuck(workspace_slug=_paths.get_workspace())
     return {"ok": True, "requeued": count}
 
 
 @app.post("/api/remote-jobs/dedupe")
 def api_dedupe_pending(user=Depends(auth.require_user)):
-    """Remove jobs duplicados na fila: pra cada (conta, video), mantém apenas 1."""
-    count = rjob_manager.dedupe_pending()
+    """Remove jobs duplicados na fila: pra cada (conta, video), mantém apenas 1.
+    Scoped no ws ativo — não afeta outros workspaces."""
+    from core import paths as _paths
+    count = rjob_manager.dedupe_pending(workspace_slug=_paths.get_workspace())
     return {"ok": True, "removed": count}
 
 
