@@ -1009,49 +1009,55 @@ def _open_chrome_for_account(
     if not chrome:
         return False, "Chrome não encontrado nesse PC"
 
-    # NOVA ESTRATÉGIA (anti-singleton-conflict):
-    # Cada launch usa profile dir ÚNICO com timestamp. Evita Chrome detectar
-    # "outro Chrome rodando com mesma dir" e atachar a ele. Resultado: cada
-    # launch sempre tem --remote-debugging-port ativo = Save Sessão funciona.
-    #
-    # Trade-off: cada launch = login fresh (sem persistência cookies).
-    # Solução: cookies são salvos via Save Sessão pro session.json do worker.
-    # Após Save Sessão, profile dir temporária não importa mais — pode ser
-    # limpa por background cleanup (TTL 1h).
+    # ESTRATÉGIA: profile dir PERSISTENTE por conta (sem timestamp).
+    # Vantagem: cookies do Chrome ficam entre launches → Smartphone abre
+    # JÁ LOGADO depois da 1ª vez. Requer kill robusto de Chromes anteriores
+    # antes de relançar pra evitar conflito singleton.
     profile_base = Path.home() / "InstaposterProfiles"
     profile_base.mkdir(parents=True, exist_ok=True)
 
-    # Limpa profiles antigos (>1h) pra não acumular GB de disco
+    # Migration cleanup: remove profiles timestamped antigos (legado do experimento
+    # com timestamp). Move cookies relevantes pro persistente se for o caso.
     try:
-        import time as _t_cleanup
-        cutoff = _t_cleanup.time() - 3600
+        import shutil as _sh_migrate
         for old in profile_base.glob(f"{safe}_*"):
             try:
-                if old.is_dir() and old.stat().st_mtime < cutoff:
-                    import shutil as _sh_cleanup
-                    _sh_cleanup.rmtree(old, ignore_errors=True)
+                if old.is_dir() and old.name != safe:
+                    _sh_migrate.rmtree(old, ignore_errors=True)
             except Exception:
                 pass
     except Exception:
         pass
 
-    # Mata QUALQUER Chrome rodando com profile dessa @ (qualquer timestamp)
+    # Mata QUALQUER Chrome rodando com profile dessa @ (com ou sem timestamp).
+    # Sem isso, novo launch vira IPC client da instância antiga (sem debug port).
     _kill_chrome_for_profile_any(safe)
 
+    # Profile dir PERSISTENTE: <username> (sem timestamp)
+    profile_dir = profile_base / safe
+
     if reset:
-        # Reset apaga TODOS os profiles antigos dessa @
+        # Reset apaga TUDO da conta
         try:
             import shutil
+            if profile_dir.exists():
+                shutil.rmtree(profile_dir, ignore_errors=True)
             for old in profile_base.glob(f"{safe}*"):
                 shutil.rmtree(old, ignore_errors=True)
-            print(f"[local-api] 🧹 todos profiles de @{safe} resetados")
+            print(f"[local-api] 🧹 profile de @{safe} resetado")
         except Exception as e:
-            print(f"[local-api] ⚠️ falha resetando profiles: {e}")
+            print(f"[local-api] ⚠️ falha resetando profile: {e}")
 
-    # Profile dir único por launch: <username>_<timestamp>
-    import time as _t_new
-    profile_dir = profile_base / f"{safe}_{int(_t_new.time())}"
     profile_dir.mkdir(parents=True, exist_ok=True)
+
+    # Remove SingletonLock (sobra quando Chrome morre sem cleanup, impede novo launch)
+    for lock_name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        try:
+            lf = profile_dir / lock_name
+            if lf.exists() or lf.is_symlink():
+                lf.unlink()
+        except Exception:
+            pass
 
     # === MODO LOGIN MANUAL (clean_mobile=True) ===
     # Originalmente era mobile UA estilo Dolphin Anty, MAS Instagram mobile web
