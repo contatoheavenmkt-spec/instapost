@@ -797,6 +797,43 @@ def _inject_cookies_via_cdp(debug_port: int, cookies: list[dict], target_url: st
             pass
 
 
+def _kill_chrome_for_profile_any(username_safe: str) -> None:
+    """Mata QUALQUER Chrome rodando com profile dessa @ (qualquer timestamp).
+    Usado pela nova estratégia de profile dirs únicos por launch — antes de
+    abrir Chrome novo, mata todos os Chromes de launches anteriores dessa @."""
+    if platform.system() != "Windows":
+        return
+    try:
+        for attempt in range(3):
+            # Match: chrome.exe com InstaposterProfiles\<username>(_timestamp ou sem) no cmdline
+            ps_get = (
+                f"Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
+                f"Where-Object {{ $_.CommandLine -like '*InstaposterProfiles*{username_safe}*' }} | "
+                f"Select-Object -ExpandProperty ProcessId"
+            )
+            result = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-Command", ps_get],
+                capture_output=True, text=True, timeout=5,
+            )
+            pids = [p.strip() for p in (result.stdout or "").splitlines() if p.strip().isdigit()]
+            if not pids:
+                break
+            if attempt == 0:
+                print(f"[local-api] matando {len(pids)} Chrome(s) anterior(es) de @{username_safe}")
+            for pid in pids:
+                try:
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", pid],
+                        capture_output=True, timeout=3,
+                    )
+                except Exception:
+                    pass
+            time.sleep(1.0)
+        time.sleep(0.3)
+    except Exception as e:
+        print(f"[local-api] kill Chrome anterior falhou (ignorando): {e}")
+
+
 def _kill_chrome_for_profile(profile_dir: Path) -> None:
     """Mata chrome.exe que está usando esse profile dir + remove lock files.
 
@@ -972,20 +1009,48 @@ def _open_chrome_for_account(
     if not chrome:
         return False, "Chrome não encontrado nesse PC"
 
-    profile_dir = Path.home() / "InstaposterProfiles" / safe
+    # NOVA ESTRATÉGIA (anti-singleton-conflict):
+    # Cada launch usa profile dir ÚNICO com timestamp. Evita Chrome detectar
+    # "outro Chrome rodando com mesma dir" e atachar a ele. Resultado: cada
+    # launch sempre tem --remote-debugging-port ativo = Save Sessão funciona.
+    #
+    # Trade-off: cada launch = login fresh (sem persistência cookies).
+    # Solução: cookies são salvos via Save Sessão pro session.json do worker.
+    # Após Save Sessão, profile dir temporária não importa mais — pode ser
+    # limpa por background cleanup (TTL 1h).
+    profile_base = Path.home() / "InstaposterProfiles"
+    profile_base.mkdir(parents=True, exist_ok=True)
 
-    # Mata Chrome anterior PRIMEIRO (senão não conseguimos deletar profile dir bloqueado)
-    _kill_chrome_for_profile(profile_dir)
+    # Limpa profiles antigos (>1h) pra não acumular GB de disco
+    try:
+        import time as _t_cleanup
+        cutoff = _t_cleanup.time() - 3600
+        for old in profile_base.glob(f"{safe}_*"):
+            try:
+                if old.is_dir() and old.stat().st_mtime < cutoff:
+                    import shutil as _sh_cleanup
+                    _sh_cleanup.rmtree(old, ignore_errors=True)
+            except Exception:
+                pass
+    except Exception:
+        pass
 
-    # Reset: apaga tudo e abre limpo
-    if reset and profile_dir.exists():
+    # Mata QUALQUER Chrome rodando com profile dessa @ (qualquer timestamp)
+    _kill_chrome_for_profile_any(safe)
+
+    if reset:
+        # Reset apaga TODOS os profiles antigos dessa @
         try:
             import shutil
-            shutil.rmtree(profile_dir)
-            print(f"[local-api] 🧹 profile resetado: {profile_dir}")
+            for old in profile_base.glob(f"{safe}*"):
+                shutil.rmtree(old, ignore_errors=True)
+            print(f"[local-api] 🧹 todos profiles de @{safe} resetados")
         except Exception as e:
-            print(f"[local-api] ⚠️ falha apagando profile: {e}")
+            print(f"[local-api] ⚠️ falha resetando profiles: {e}")
 
+    # Profile dir único por launch: <username>_<timestamp>
+    import time as _t_new
+    profile_dir = profile_base / f"{safe}_{int(_t_new.time())}"
     profile_dir.mkdir(parents=True, exist_ok=True)
 
     # === MODO LOGIN MANUAL (clean_mobile=True) ===
@@ -1145,16 +1210,31 @@ def _save_session_from_chrome(username: str) -> tuple[bool, str]:
     if not safe:
         return False, "username inválido"
 
-    profile_dir = Path.home() / "InstaposterProfiles" / safe
-    if not profile_dir.exists():
-        return False, "Profile não existe. Clica Smartphone primeiro, loga, depois Salvar Sessão."
+    # Estratégia nova: profiles têm timestamp suffix (<user>_<ts>).
+    # Procura o profile MAIS RECENTE dessa @ que tem DevToolsActivePort ativo
+    # (= Chrome rodando com debug port).
+    profile_base = Path.home() / "InstaposterProfiles"
+    candidates: list[Path] = []
+    # Inclui formato novo (<user>_<ts>) E formato antigo (<user>) pra retrocompat
+    if (profile_base / safe).exists():
+        candidates.append(profile_base / safe)
+    if profile_base.exists():
+        candidates.extend(sorted(
+            profile_base.glob(f"{safe}_*"),
+            key=lambda p: p.stat().st_mtime if p.exists() else 0,
+            reverse=True,
+        ))
 
-    # Lê DevToolsActivePort que o Chrome escreve com a porta debug ativa.
-    # Chrome deleta esse arquivo quando fecha — se sumiu = Chrome morreu/fechou.
-    port_file = profile_dir / "DevToolsActivePort"
-    if not port_file.exists():
+    profile_dir = None
+    for cand in candidates:
+        port_file = cand / "DevToolsActivePort"
+        if port_file.exists():
+            profile_dir = cand
+            break
+
+    if profile_dir is None:
         # Diagnóstico detalhado
-        profile_exists = profile_dir.exists()
+        candidates_exist = any(c.exists() for c in candidates)
         chrome_running = False
         running_profiles: list[str] = []
         if platform.system() == "Windows":
@@ -1170,11 +1250,13 @@ def _save_session_from_chrome(username: str) -> tuple[bool, str]:
                 )
                 lines = (result.stdout or "").strip().splitlines()
                 for line in lines:
-                    # Extrai o nome da profile (após InstaposterProfiles\)
+                    # Extrai o nome da profile (após InstaposterProfiles\), com ou sem _timestamp
                     import re as _re
-                    m = _re.search(r"InstaposterProfiles[\\/]([^\\\"\s/]+)", line)
+                    m = _re.search(r"InstaposterProfiles[\\/](\w[\w.-]*)", line)
                     if m:
-                        running_profiles.append(m.group(1))
+                        # Remove timestamp suffix (_NNN) se houver
+                        name = _re.sub(r"_\d+$", "", m.group(1))
+                        running_profiles.append(name)
                 chrome_running = bool(running_profiles)
             except Exception:
                 pass
@@ -1194,7 +1276,7 @@ def _save_session_from_chrome(username: str) -> tuple[bool, str]:
         else:
             msg = (
                 f"Nenhum Chrome aberto pra essa conta. "
-                f"Profile dir esperado: {profile_dir} (existe: {profile_exists}). "
+                f"Profiles candidatos: {[str(c.name) for c in candidates] or 'nenhum'} (existe: {candidates_exist}). "
                 f"Clica Smartphone na @{safe} primeiro, loga, mantem Chrome aberto e DAÍ clica Salvar Sessão."
             )
         return False, msg
