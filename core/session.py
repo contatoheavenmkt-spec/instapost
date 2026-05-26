@@ -181,6 +181,17 @@ def get_client(
     # Tentativa 1: usar sessão salva (SEM refazer login)
     # File lock garante atomicidade: 2 jobs paralelos pra mesma conta esperam.
     from core.file_lock import file_lock as _file_lock
+    # Detecta se a sessão foi salva manual via Chrome (Save Sessão verde).
+    # Se sim, CONFIA nela e NÃO faz teste (que pode falhar por rate-limit
+    # temporário e disparar fresh login = challenge desnecessário).
+    session_is_manual = False
+    if session_file.exists():
+        try:
+            import json as _json2
+            _peek = _json2.loads(session_file.read_text(encoding="utf-8"))
+            session_is_manual = bool(_peek.get("manually_saved") or _peek.get("from_chrome"))
+        except Exception:
+            pass
     if session_file.exists():
         try:
             with _file_lock(session_file, timeout=15):
@@ -188,14 +199,35 @@ def get_client(
                 # Set creds pra que, em LoginRequired, o instagrapi possa relogar sozinho
                 cl.username = username
                 cl.password = password
-            # Teste leve da sessão. Se válida, segue sem TOTP. (FORA do lock pra
-            # não segurar 5s+ enquanto a HTTP request roda)
+            if session_is_manual:
+                # Sessão veio de login manual no Chrome — CONFIA, pula teste.
+                # Evita: rate limit no get_timeline_feed → assume "expired" →
+                # força login API → IG dá challenge → conta morre.
+                print(f"[{username}] Sessão MANUAL (Chrome) — usando direto sem teste")
+                return cl
+            # Teste leve da sessão. Se válida, segue sem TOTP.
             cl.get_timeline_feed()
             print(f"[{username}] Sessão restaurada ✓ (sem relogin)")
             return cl
         except LoginRequired:
+            if session_is_manual:
+                # Sessão manual rejeitada com 401 = cookies realmente inválidos.
+                # NÃO faz fresh login API (causaria challenge). Levanta erro pro
+                # user re-fazer Save Sessão manual.
+                print(f"[{username}] ⚠️ Sessão manual EXPIROU — refaça login no Chrome + Salvar Sessão")
+                raise RuntimeError(
+                    f"Sessão manual de @{username} expirou. Abra Chrome via Smartphone, "
+                    f"loga manual, clica Salvar Sessão de novo. NÃO vou tentar login API "
+                    f"pra não disparar challenge."
+                )
             print(f"[{username}] Sessão expirou, fazendo login novo...")
         except Exception as e:
+            if session_is_manual:
+                # Erro não-401 (rate limit, network, etc) em sessão manual = não
+                # descarta. Usa assim mesmo. Se realmente quebrada, próximas calls
+                # do worker vão dar erro e aí marca como blocked/needs_verification.
+                print(f"[{username}] Sessão manual com erro temporário ({e}) — usando mesmo assim")
+                return cl
             print(f"[{username}] Sessão inválida ({e}), refazendo...")
 
     # Tentativa 2: login do zero

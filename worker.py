@@ -824,13 +824,14 @@ def _kill_chrome_for_profile(profile_dir: Path) -> None:
 
 
 # ===== Throttle de abertura do launcher (anti-batch-detection) =====
-# Instagram flagra "10 contas logando do mesmo IP em 5min" como bot farm.
-# Limites: 1 abertura/3min por @ + 1/60s global (evita rajada).
+# Antes: 5min/@ + 60s global — agressivo demais agora que cada conta usa
+# proxy sticky DIFERENTE (sem batch pattern detectável pelo IG).
+# Agora: 30s/@ (anti double-click acidental) + 5s global (anti flood).
 _last_open_per_user: dict[str, float] = {}
 _last_open_global: float = 0.0
 _throttle_lock = threading.Lock()
-THROTTLE_PER_USER_SECONDS = 5 * 60
-THROTTLE_GLOBAL_SECONDS = 60
+THROTTLE_PER_USER_SECONDS = 30
+THROTTLE_GLOBAL_SECONDS = 5
 
 
 def _check_throttle(username: str) -> Optional[str]:
@@ -1221,6 +1222,14 @@ def _save_session_from_chrome(username: str) -> tuple[bool, str]:
             "country_code": 55,
             "locale": "pt_BR",
             "timezone_offset": -10800,
+            # Marker: sessão salva manualmente via Chrome.
+            # session.py respeita esse flag e PULA o teste leve (get_timeline_feed)
+            # que poderia falhar por rate limit temporário e disparar fresh login
+            # API = challenge = conta morre. Sessão manual é tratada como
+            # confiável até dar 401 real.
+            "manually_saved": True,
+            "from_chrome": True,
+            "saved_at": int(time.time()),
         }
 
         # Acha sessions dir do workspace (mesmo lookup que _find_session_file faz, mas inverso)
