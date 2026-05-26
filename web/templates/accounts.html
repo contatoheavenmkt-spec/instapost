@@ -14,6 +14,9 @@
     <button class="btn btn-ghost" onclick="openBulkImport()" title="Cola lista do vendedor — sistema importa em massa">
       <i data-lucide="upload-cloud" class="icon"></i> Importar lista
     </button>
+    <button class="btn btn-ghost" onclick="openBulkProxy()" title="Aplica um proxy em massa (todas as contas ou só as que casam o filtro)">
+      <i data-lucide="globe-2" class="icon"></i> Migrar proxy
+    </button>
     <button class="btn btn-accent" onclick="toggleAddForm(true)">
       <i data-lucide="plus" class="icon"></i> Nova conta
     </button>
@@ -392,6 +395,43 @@ elMSoYMQakO</pre>
       <button class="btn btn-ghost" onclick="closeBulkImport()">Cancelar</button>
       <button class="btn btn-accent" onclick="submitBulkImport()" id="bulk-import-btn">
         <i data-lucide="check" class="icon"></i> Importar contas
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: Migrar proxy em massa -->
+<div id="bulk-proxy-modal" class="modal-bg hidden" onclick="if(event.target===this) closeBulkProxy()">
+  <div class="modal-card" style="max-width: 640px; width: 100%">
+    <div class="flex items-center justify-between mb-3">
+      <div class="text-[16px] font-semibold">Migrar proxy em massa</div>
+      <button class="btn btn-ghost btn-sm" onclick="closeBulkProxy()"><i data-lucide="x" class="icon"></i></button>
+    </div>
+
+    <div class="text-[12.5px] text-soft mb-3">
+      Aplica um proxy em várias contas de uma vez. Você pode aplicar a TODAS,
+      ou só nas que ainda usam um provedor específico (ex: substituir todas as
+      contas no DataImpulse).
+    </div>
+
+    <label class="label">Proxy novo</label>
+    <input id="bulk-proxy-url" class="input mono" placeholder="http://user:senha@host:porta  (ou user:senha:host:porta)" />
+    <div class="text-[11.5px] text-soft mt-1">Aceita: <span class="mono">http://user:pass@host:porta</span>, <span class="mono">socks5://...</span>, ou <span class="mono">host:porta:user:pass</span>.</div>
+
+    <label class="label mt-3">Filtro (opcional)</label>
+    <input id="bulk-proxy-match" class="input mono" placeholder='Ex: "dataimpulse" ou "73eef5bb" — vazio = aplica em todas' />
+    <div class="text-[11.5px] text-soft mt-1">Substitui só contas cujo proxy ATUAL contém esse texto. Vazio = todas as contas.</div>
+
+    <!-- Preview do que vai mudar -->
+    <div id="bulk-proxy-preview" class="surface-2 p-3 rounded mt-3 text-[12px] text-soft hidden" style="min-height: 50px"></div>
+
+    <div class="flex justify-end gap-2 mt-4 pt-3 border-t border-line">
+      <button class="btn btn-ghost" onclick="closeBulkProxy()">Cancelar</button>
+      <button class="btn btn-ghost" onclick="bulkProxySubmit(true)" id="bulk-proxy-preview-btn">
+        <i data-lucide="eye" class="icon"></i> Preview
+      </button>
+      <button class="btn btn-accent" onclick="bulkProxySubmit(false)" id="bulk-proxy-apply-btn">
+        <i data-lucide="check" class="icon"></i> Aplicar
       </button>
     </div>
   </div>
@@ -1427,6 +1467,85 @@ elMSoYMQakO</pre>
   }
 
   load();
+
+  // ===== BULK PROXY MIGRATION =====
+  function openBulkProxy() {
+    document.getElementById('bulk-proxy-url').value = '';
+    document.getElementById('bulk-proxy-match').value = '';
+    const prev = document.getElementById('bulk-proxy-preview');
+    prev.classList.add('hidden');
+    prev.innerHTML = '';
+    document.getElementById('bulk-proxy-modal').classList.remove('hidden');
+    setTimeout(() => document.getElementById('bulk-proxy-url').focus(), 50);
+    if (window.lucide) lucide.createIcons();
+  }
+
+  function closeBulkProxy() {
+    document.getElementById('bulk-proxy-modal').classList.add('hidden');
+  }
+
+  async function bulkProxySubmit(dryRun) {
+    const proxy = document.getElementById('bulk-proxy-url').value.trim();
+    const match = document.getElementById('bulk-proxy-match').value.trim();
+    if (!proxy) {
+      alert('Cola o proxy primeiro.');
+      return;
+    }
+    if (!dryRun) {
+      const confirmMsg = match
+        ? `Vai aplicar o proxy novo em TODAS as contas cujo proxy atual contém "${match}". Confirma?`
+        : 'Vai aplicar o proxy novo em TODAS as contas. Confirma?';
+      if (!confirm(confirmMsg)) return;
+    }
+    const btn = document.getElementById(dryRun ? 'bulk-proxy-preview-btn' : 'bulk-proxy-apply-btn');
+    const orig = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i data-lucide="loader-2" class="icon spin"></i> ' + (dryRun ? 'Calculando…' : 'Aplicando…');
+    if (window.lucide) lucide.createIcons();
+    try {
+      const r = await api('/api/accounts/bulk-set-proxy', {
+        method: 'POST',
+        body: JSON.stringify({ proxy, match: match || null, dry_run: dryRun }),
+      });
+      const prev = document.getElementById('bulk-proxy-preview');
+      prev.classList.remove('hidden');
+      if (dryRun) {
+        const list = (r.preview || []).map(c =>
+          `<div class="mono text-[11.5px]">@${escapeHtml(c.username)}: <span class="text-soft">${escapeHtml(c.from || '(sem proxy)').slice(0, 45)}…</span> → ${escapeHtml(c.to).slice(0, 45)}…</div>`
+        ).join('');
+        prev.innerHTML = `
+          <div class="text-[13px] font-semibold mb-1.5" style="color:#fcd34d">PREVIEW (nada salvo ainda)</div>
+          <div class="text-[12px] mb-2">
+            • <strong>${r.would_change}</strong> contas vão MUDAR<br>
+            • <strong>${r.unchanged}</strong> já estão no proxy novo<br>
+            • <strong>${r.skipped_no_match}</strong> não casam o filtro
+          </div>
+          ${list}
+          ${r.total_preview_truncated ? '<div class="text-[11px] text-soft mt-1">(preview truncado em 20 contas)</div>' : ''}
+        `;
+      } else {
+        prev.innerHTML = `
+          <div class="text-[13px] font-semibold mb-1.5" style="color:#6ee7b7">✓ Aplicado!</div>
+          <div class="text-[12px]">
+            • <strong>${r.changed}</strong> contas atualizadas<br>
+            • <strong>${r.unchanged}</strong> já estavam OK<br>
+            • <strong>${r.skipped_no_match}</strong> puladas (filtro)
+          </div>
+          <div class="text-[11.5px] text-soft mt-2">Proxy ativo agora: <span class="mono">${escapeHtml(r.applied_proxy).slice(0, 60)}…</span></div>
+          <div class="text-[11.5px] text-soft mt-1">Recarregando lista de contas em 2s…</div>
+        `;
+        setTimeout(() => { closeBulkProxy(); loadAccounts(); }, 2000);
+      }
+    } catch (e) {
+      const prev = document.getElementById('bulk-proxy-preview');
+      prev.classList.remove('hidden');
+      prev.innerHTML = `<div style="color:#fca5a5" class="text-[12.5px]">Erro: ${escapeHtml(String(e.message || e))}</div>`;
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = orig;
+      if (window.lucide) lucide.createIcons();
+    }
+  }
 
   // ===== BULK IMPORT =====
   let _bulkPreviewTimer = null;

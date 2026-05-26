@@ -835,6 +835,99 @@ def api_update_proxy(username: str, payload: ProxyIn):
     raise HTTPException(404, "Conta não encontrada")
 
 
+class BulkProxyIn(BaseModel):
+    proxy: str
+    # Se setado, só substitui contas cujo proxy ATUAL contém essa string
+    # (ex: "dataimpulse" ou "73eef5bb" pra trocar só DataImpulse). Vazio = todas.
+    match: Optional[str] = None
+    # Se True, devolve só o que mudaria sem salvar nada.
+    dry_run: bool = False
+
+
+@app.post("/api/accounts/bulk-set-proxy")
+def api_bulk_set_proxy(payload: BulkProxyIn, user=Depends(auth.require_user)):
+    """Aplica um proxy a TODAS as contas (ou só as que batem o filtro `match`).
+
+    Use cases:
+      - Migrar todo mundo do DataImpulse pro novo provedor: match="dataimpulse"
+        (ou parte do user-prefix antigo, ex: "73eef5bb")
+      - Aplicar mesmo proxy em todas as contas novas: match=null
+    """
+    raw = (payload.proxy or "").strip()
+    if not raw:
+        raise HTTPException(400, "proxy obrigatório")
+    new_proxy = _normalize_proxy(raw)
+    if not new_proxy or not re.match(r"^(socks5h?|socks4|http|https)://", new_proxy):
+        raise HTTPException(400, f"Formato de proxy inválido. Recebi: '{raw}'")
+    # Validação final (porta presente)
+    if "@" in new_proxy:
+        after_at = new_proxy.rsplit("@", 1)[1]
+        if ":" not in after_at:
+            raise HTTPException(400, "Faltou :porta no final do proxy")
+    else:
+        host_part = new_proxy.split("://", 1)[1]
+        if ":" not in host_part:
+            raise HTTPException(400, "Faltou :porta no final do proxy")
+
+    match_filter = (payload.match or "").strip().lower() or None
+    changes = []
+    unchanged = 0
+    skipped_no_match = 0
+
+    if payload.dry_run:
+        # Simulação: lê sem transação
+        for a in load_accounts():
+            current = (a.get("proxy") or "").strip()
+            if match_filter and match_filter not in current.lower():
+                skipped_no_match += 1
+                continue
+            if current == new_proxy:
+                unchanged += 1
+                continue
+            changes.append({
+                "username": a["username"],
+                "from": current or None,
+                "to": new_proxy,
+            })
+        return {
+            "ok": True,
+            "dry_run": True,
+            "would_change": len(changes),
+            "unchanged": unchanged,
+            "skipped_no_match": skipped_no_match,
+            "preview": changes[:20],
+            "total_preview_truncated": len(changes) > 20,
+        }
+
+    # Aplicação real
+    with accounts_transaction() as accounts:
+        for a in accounts:
+            current = (a.get("proxy") or "").strip()
+            if match_filter and match_filter not in current.lower():
+                skipped_no_match += 1
+                continue
+            if current == new_proxy:
+                unchanged += 1
+                continue
+            a["proxy"] = new_proxy
+            changes.append({
+                "username": a["username"],
+                "from": current or None,
+                "to": new_proxy,
+            })
+
+    print(f"[bulk-proxy] aplicado em {len(changes)} contas (match={match_filter!r}) por {user.get('email','?')}")
+    return {
+        "ok": True,
+        "dry_run": False,
+        "changed": len(changes),
+        "unchanged": unchanged,
+        "skipped_no_match": skipped_no_match,
+        "applied_proxy": new_proxy,
+        "details": changes,
+    }
+
+
 @app.post("/api/accounts/normalize-proxies")
 def api_normalize_all_proxies():
     """Bulk fix: normaliza TODOS os proxies já salvos pra formato URL.

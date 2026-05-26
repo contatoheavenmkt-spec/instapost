@@ -67,6 +67,16 @@ def _normalize_proxy(raw: Optional[str]) -> Optional[str]:
     return raw
 
 
+class ManualReconnectNeeded(RuntimeError):
+    """Sessão não existe / expirou E o caller proibiu fresh login API.
+    Usado por auto-loops (post, like, follow-back, sync, health) pra evitar
+    disparar login API que vira challenge no Insta. User precisa fazer Save
+    Sessão manual via Chrome (botão Smartphone) ou clicar Conectar.
+
+    A mensagem é distinta dos CHALLENGE_PATTERNS/BLOCK_PATTERNS do main.py —
+    ou seja, conta NÃO é marcada como needs_verification/blocked por isso."""
+
+
 def get_client(
     username: str,
     password: str,
@@ -74,6 +84,7 @@ def get_client(
     totp_secret: Optional[str] = None,
     challenge_handler=None,
     totp_fallback_handler=None,
+    allow_fresh_login: bool = True,
 ) -> Client:
     """
     Retorna cliente logado. Tenta usar sessão salva primeiro.
@@ -84,6 +95,11 @@ def get_client(
             challenges de email/SMS do Instagram. Se None, o instagrapi usa input().
         totp_fallback_handler: callback() -> code pedido se a conta tem 2FA mas
             totp_secret não foi cadastrado. Se None, levanta exceção.
+        allow_fresh_login: se False, NUNCA dispara login fresh via API do Insta.
+            Auto-loops passam False — só usam sessão já existente. Se sessão não
+            existe ou expirou, levanta ManualReconnectNeeded sem tentar nada
+            (evita disparar challenge automático que marca conta como verificação).
+            Botão Conectar (test_login) passa True — login API só rola se user pediu.
     """
     cl = Client()
     cl.delay_range = [2, 5]
@@ -215,10 +231,10 @@ def get_client(
                 # NÃO faz fresh login API (causaria challenge). Levanta erro pro
                 # user re-fazer Save Sessão manual.
                 print(f"[{username}] ⚠️ Sessão manual EXPIROU — refaça login no Chrome + Salvar Sessão")
-                raise RuntimeError(
+                raise ManualReconnectNeeded(
                     f"Sessão manual de @{username} expirou. Abra Chrome via Smartphone, "
-                    f"loga manual, clica Salvar Sessão de novo. NÃO vou tentar login API "
-                    f"pra não disparar challenge."
+                    f"loga manual, clica Salvar Sessão de novo. Worker NÃO tentou login "
+                    f"API pra não disparar challenge automático."
                 )
             print(f"[{username}] Sessão expirou, fazendo login novo...")
         except Exception as e:
@@ -229,6 +245,17 @@ def get_client(
                 print(f"[{username}] Sessão manual com erro temporário ({e}) — usando mesmo assim")
                 return cl
             print(f"[{username}] Sessão inválida ({e}), refazendo...")
+
+    # GUARDA: bloqueia fresh login API se o caller não autorizou.
+    # Auto-loops (post, like, follow-back, sync, health) passam allow_fresh_login=False
+    # justamente pra evitar disparar login automático que vira challenge no Insta.
+    # Só Conectar manual (test_login) seta True.
+    if not allow_fresh_login:
+        raise ManualReconnectNeeded(
+            f"Conta @{username} sem sessão válida e fresh login API desativado. "
+            f"Abra Chrome via Smartphone, loga manual e clica Salvar Sessão. "
+            f"Worker NÃO tentou login automático pra não disparar challenge."
+        )
 
     # Tentativa 2: login do zero
     try:

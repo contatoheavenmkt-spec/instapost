@@ -78,8 +78,21 @@ TMP_DIR.mkdir(exist_ok=True)
 _stop_flag = threading.Event()
 _account_locks: dict[str, threading.Lock] = {}
 _account_locks_meta_lock = threading.Lock()
-_client_cache: dict[str, tuple[object, float]] = {}  # username -> (Client, last_used_ts)
+_client_cache: dict[str, tuple[object, float, Optional[str]]] = {}  # username -> (Client, last_used_ts, proxy_signature)
 _client_cache_lock = threading.Lock()
+
+
+def _proxy_signature(proxy: Optional[str]) -> Optional[str]:
+    """Normaliza proxy pra comparação de igualdade entre jobs.
+    Reusa _normalize_proxy do session.py pra que formatos diferentes do mesmo
+    proxy (com/sem http://, user:pass:host:port vs URL) batam como iguais."""
+    if not proxy:
+        return None
+    try:
+        from core.session import _normalize_proxy
+        return _normalize_proxy(proxy)
+    except Exception:
+        return proxy.strip()
 
 
 def get_account_lock(username: str) -> threading.Lock:
@@ -92,25 +105,33 @@ def get_account_lock(username: str) -> threading.Lock:
         return lock
 
 
-def get_cached_client(username: str):
-    """Devolve Client cacheado se ainda fresco, senão None."""
+def get_cached_client(username: str, expected_proxy: Optional[str] = None):
+    """Devolve Client cacheado se ainda fresco E proxy igual ao esperado.
+    Se proxy do job mudou (user trocou de provedor), invalida — senão o Client
+    velho sai pelo proxy antigo (esgotado/morto) mesmo com proxy novo configurado."""
     now = time.time()
     with _client_cache_lock:
         entry = _client_cache.get(username)
         if not entry:
             return None
-        cl, last_used = entry
+        cl, last_used, cached_proxy_sig = entry
         if now - last_used >= CLIENT_CACHE_TTL_SECONDS:
             _client_cache.pop(username, None)
             return None
+        # Proxy mismatch = invalida (user trocou proxy enquanto cache tava quente)
+        expected_sig = _proxy_signature(expected_proxy)
+        if expected_sig != cached_proxy_sig:
+            print(f"[cache] invalidando @{username}: proxy mudou (cached={cached_proxy_sig[:30] if cached_proxy_sig else None}... -> novo={expected_sig[:30] if expected_sig else None}...)")
+            _client_cache.pop(username, None)
+            return None
         # Bump last_used
-        _client_cache[username] = (cl, now)
+        _client_cache[username] = (cl, now, cached_proxy_sig)
         return cl
 
 
-def store_client(username: str, cl) -> None:
+def store_client(username: str, cl, proxy: Optional[str] = None) -> None:
     with _client_cache_lock:
-        _client_cache[username] = (cl, time.time())
+        _client_cache[username] = (cl, time.time(), _proxy_signature(proxy))
 
 
 def invalidate_client(username: str) -> None:
@@ -240,8 +261,12 @@ def execute_job(job: dict):
     # Helper: faz login do Instagram (compartilhado entre operations)
     # Reusa Client cacheado se a mesma conta foi usada nos últimos 10min — economiza
     # load_settings + get_timeline_feed (3-8s por job).
+    # IMPORTANTE: só test_login (Botão Conectar manual) pode disparar fresh login API.
+    # Demais operations (post, auto_like, sync, collect_insights, etc) usam SÓ a sessão
+    # salva — se expirou, falham suave sem disparar challenge automático no Insta.
     def do_login():
-        cached = get_cached_client(username)
+        job_proxy = job.get("account_proxy")
+        cached = get_cached_client(username, expected_proxy=job_proxy)
         if cached is not None:
             log(f"♻️ sessão Insta em cache (sem relogin)")
             return cached
@@ -249,10 +274,11 @@ def execute_job(job: dict):
         cl = get_client(
             username=username,
             password=job["account_password"],
-            proxy=job.get("account_proxy"),
+            proxy=job_proxy,
             totp_secret=job.get("account_totp_secret"),
+            allow_fresh_login=(operation == "test_login"),
         )
-        store_client(username, cl)
+        store_client(username, cl, proxy=job_proxy)
         return cl
 
     # =====================================================
@@ -506,7 +532,10 @@ def execute_job(job: dict):
         return
 
     # Login Instagram (usa cache se a mesma conta foi usada recentemente)
-    cached = get_cached_client(username)
+    # post NUNCA dispara fresh login API — só usa sessão salva. Se expirou,
+    # falha suave (sem virar challenge automático) e user precisa Save Sessão.
+    job_proxy = job.get("account_proxy")
+    cached = get_cached_client(username, expected_proxy=job_proxy)
     if cached is not None:
         cl = cached
         log(f"♻️ sessão Insta em cache (sem relogin)")
@@ -517,10 +546,11 @@ def execute_job(job: dict):
             cl = get_client(
                 username=username,
                 password=job["account_password"],
-                proxy=job.get("account_proxy"),
+                proxy=job_proxy,
                 totp_secret=job.get("account_totp_secret"),
+                allow_fresh_login=False,
             )
-            store_client(username, cl)
+            store_client(username, cl, proxy=job_proxy)
             log(f"✓ logado como @{username}")
         except Exception as e:
             invalidate_client(username)
