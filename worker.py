@@ -1177,9 +1177,46 @@ def _open_chrome_for_account(
         creationflags = 0
         if platform.system() == "Windows":
             creationflags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-        subprocess.Popen(args, close_fds=True, creationflags=creationflags)
+        # Debug: imprime args (ofusca paths/tokens longos)
+        debug_args = [a if len(a) < 100 else a[:80] + "..." for a in args]
+        print(f"[local-api] launching Chrome PID-novo args: {' '.join(debug_args)}")
+        proc_chrome = subprocess.Popen(args, close_fds=True, creationflags=creationflags)
+        print(f"[local-api] Chrome lançado PID={proc_chrome.pid}")
     except Exception as e:
         return False, f"Popen falhou: {e}"
+
+    # Aguarda Chrome escrever DevToolsActivePort (até 12s)
+    # Se não aparecer, Chrome possivelmente atachou a outro Chrome OU falhou.
+    port_file = profile_dir / "DevToolsActivePort"
+    import time as _t_wait
+    deadline = _t_wait.time() + 12
+    while _t_wait.time() < deadline:
+        if port_file.exists():
+            try:
+                lines = port_file.read_text(encoding="utf-8").strip().split("\n")
+                actual_port = int(lines[0])
+                print(f"[local-api] ✓ DevToolsActivePort criado: porta={actual_port} em {profile_dir.name}")
+                # Atualiza debug_port pra usar a porta REAL que Chrome bindou
+                debug_port = actual_port
+                break
+            except Exception:
+                pass
+        _t_wait.sleep(0.4)
+    else:
+        print(f"[local-api] ⚠️ DevToolsActivePort NÃO criado em 12s em {profile_dir}")
+        print(f"[local-api]    → Chrome atachou a outra instância OU falhou ao bindar porta")
+        # Lista processos chrome pra diagnóstico
+        try:
+            ps_get = (
+                f"Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
+                f"Where-Object {{ $_.CommandLine -like '*{safe}*' }} | "
+                f"Select-Object ProcessId,CommandLine | Format-List"
+            )
+            r = subprocess.run(["powershell.exe", "-NoProfile", "-Command", ps_get],
+                              capture_output=True, text=True, timeout=5)
+            print(f"[local-api]    Chromes com '{safe}' no cmdline:\n{r.stdout[:1500]}")
+        except Exception:
+            pass
 
     proxy_desc = " + proxy" if proxy else " (SEM proxy)"
     desc = f"Chrome desktop{proxy_desc}"
