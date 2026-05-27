@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+{% block title %}Configuração inicial · Insta Poster{% endblock %}
+{% block content %}
+
+<div class="flex items-end justify-between mb-7">
+  <div>
+    <h1 class="h-page">Configuração inicial</h1>
+    <p class="text-sm text-soft mt-1">Checklist passo-a-passo pra deixar tudo funcionando 100% na VPS</p>
+  </div>
+  <button class="btn btn-ghost" onclick="refreshStatus()" title="Recalcular checklist">
+    <i data-lucide="refresh-cw" class="icon"></i> Atualizar
+  </button>
+</div>
+
+<!-- Progresso geral -->
+<div class="surface mb-5 p-5">
+  <div class="flex items-center justify-between mb-3">
+    <div>
+      <div class="text-[14px] font-semibold">Seu progresso</div>
+      <div class="text-[12px] text-soft mt-0.5"><span id="done-count">{{ onboarding.done_count }}</span> de <span id="total">{{ onboarding.total }}</span> passos concluídos</div>
+    </div>
+    <div class="text-right">
+      <div class="text-[28px] font-bold" id="percent-num" style="background: var(--accent-grad); -webkit-background-clip: text; -webkit-text-fill-color: transparent">{{ onboarding.percent }}%</div>
+      {% if onboarding.completed %}
+      <div class="text-[12px]" style="color: var(--success)">✓ Tudo pronto!</div>
+      {% endif %}
+    </div>
+  </div>
+  <div class="w-full" style="background: var(--surface-2); height: 8px; border-radius: 999px; overflow: hidden">
+    <div id="progress-bar" style="background: var(--accent-grad); height: 100%; width: {{ onboarding.percent }}%; transition: width .4s cubic-bezier(.4,0,.2,1)"></div>
+  </div>
+</div>
+
+<!-- Steps -->
+<div id="steps-list" class="space-y-3">
+  {% for step in onboarding.steps %}
+  <div class="surface p-4 step-card" data-key="{{ step.key }}">
+    <div class="flex items-start gap-3">
+      <div class="flex-shrink-0 mt-0.5">
+        {% if step.done %}
+        <div class="w-7 h-7 rounded-full flex items-center justify-center" style="background: var(--success); color: white">
+          <i data-lucide="check" style="width:14px;height:14px"></i>
+        </div>
+        {% else %}
+        <div class="w-7 h-7 rounded-full flex items-center justify-center font-bold text-[12.5px]" style="background: var(--accent-soft); color: var(--accent); border: 2px solid var(--accent)">{{ loop.index }}</div>
+        {% endif %}
+      </div>
+      <div class="flex-1 min-w-0">
+        <div class="flex items-center justify-between gap-3">
+          <div class="font-semibold text-[14px] {% if step.done %}line-through opacity-60{% endif %}">{{ step.title }}</div>
+          {% if not step.done %}
+          <a href="{{ step.link }}" class="btn btn-accent btn-sm">
+            <i data-lucide="arrow-right" class="icon"></i> Fazer agora
+          </a>
+          {% endif %}
+        </div>
+        <div class="text-[12.5px] text-soft mt-1">{{ step.hint }}</div>
+        {% if step.key == "worker" and not step.done %}
+        <div class="surface-2 p-3 rounded-lg mt-2.5 text-[12px] text-soft leading-relaxed">
+          <div class="font-semibold mb-1">Pra subir o worker na VPS:</div>
+          <ol class="list-decimal list-inside space-y-0.5 ml-1">
+            <li>Vá em <a href="/workers" class="text-[var(--accent)] underline">Meu PC</a> e crie um worker chamado "VPS" — copia o token que aparece</li>
+            <li>SSH: <span class="mono surface px-1 rounded">cd /opt/instapost && echo 'VPS_WORKER_TOKEN=&lt;token&gt;' &gt;&gt; .env</span></li>
+            <li>Restart docker: <span class="mono surface px-1 rounded">docker compose -f docker-compose.nginx.yml up -d --build</span></li>
+            <li>Volta aqui e clica "Atualizar"</li>
+          </ol>
+        </div>
+        {% elif step.key == "ext_token" and not step.done %}
+        <div class="surface-2 p-3 rounded-lg mt-2.5 text-[12px] text-soft">
+          Vá em <a href="/accounts" class="text-[var(--accent)] underline">Contas → botão Extensão</a> → <strong>Gerar token</strong>. Esse token é o que conecta sua extensão Chrome com o painel.
+        </div>
+        {% elif step.key == "save_session" and not step.done %}
+        <div class="surface-2 p-3 rounded-lg mt-2.5 text-[12px] text-soft leading-relaxed">
+          <div class="font-semibold mb-1">Duas opções:</div>
+          <div class="mb-1.5">
+            <span class="font-semibold">A) Extensão Chrome (recomendado):</span> instala em qualquer Chrome, loga no Insta, clica o ícone → escolhe conta → Salvar cookies. Funciona de qualquer máquina.
+          </div>
+          <div>
+            <span class="font-semibold">B) Botão Smartphone:</span> precisa do worker local rodando — abre Chrome com proxy, vc loga, clica Save Sessão.
+          </div>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+<!-- Final hint quando tudo OK -->
+{% if onboarding.completed %}
+<div class="surface mt-5 p-6 text-center" style="border-color: var(--success); background: var(--success-soft)">
+  <i data-lucide="party-popper" style="width:32px;height:32px;color:var(--success);margin:0 auto 12px;display:block"></i>
+  <div class="text-[16px] font-bold mb-1">Sistema 100% configurado</div>
+  <div class="text-[13px] text-soft mb-4">Você pode fechar o painel — VPS continua postando 24/7. Volte só pra subir mídia nova ou monitorar.</div>
+  <a href="/" class="btn btn-accent">Ir pra Dashboard</a>
+</div>
+{% endif %}
+
+{% endblock %}
+{% block scripts %}
+<script>
+  async function refreshStatus() {
+    try {
+      const s = await api('/api/onboarding/status');
+      document.getElementById('done-count').textContent = s.done_count;
+      document.getElementById('total').textContent = s.total;
+      document.getElementById('percent-num').textContent = s.percent + '%';
+      document.getElementById('progress-bar').style.width = s.percent + '%';
+
+      // Re-renderiza cada step inline (sem recarregar)
+      const stepsList = document.getElementById('steps-list');
+      stepsList.innerHTML = s.steps.map((step, idx) => `
+        <div class="surface p-4 step-card fade-in-up" data-key="${step.key}">
+          <div class="flex items-start gap-3">
+            <div class="flex-shrink-0 mt-0.5">
+              ${step.done
+                ? '<div class="w-7 h-7 rounded-full flex items-center justify-center" style="background: var(--success); color: white"><i data-lucide="check" style="width:14px;height:14px"></i></div>'
+                : `<div class="w-7 h-7 rounded-full flex items-center justify-center font-bold text-[12.5px]" style="background: var(--accent-soft); color: var(--accent); border: 2px solid var(--accent)">${idx + 1}</div>`}
+            </div>
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center justify-between gap-3">
+                <div class="font-semibold text-[14px] ${step.done ? 'line-through opacity-60' : ''}">${step.title}</div>
+                ${step.done ? '' : `<a href="${step.link}" class="btn btn-accent btn-sm"><i data-lucide="arrow-right" class="icon"></i> Fazer agora</a>`}
+              </div>
+              <div class="text-[12.5px] text-soft mt-1">${step.hint}</div>
+            </div>
+          </div>
+        </div>
+      `).join('');
+
+      if (window.lucide) lucide.createIcons();
+      if (s.completed) {
+        toast('Tudo configurado! 🎉', 'success');
+        setTimeout(() => location.reload(), 800);
+      } else {
+        toast('Status atualizado', 'info');
+      }
+    } catch (e) {
+      toast('Erro: ' + e.message, 'error');
+    }
+  }
+
+  // Auto-refresh a cada 30s (pega mudanças sem precisar clicar)
+  setInterval(refreshStatus, 30000);
+</script>
+{% endblock %}

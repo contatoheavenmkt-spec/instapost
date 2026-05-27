@@ -386,6 +386,125 @@ def local_ip() -> str:
         s.close()
 
 
+# ---------- onboarding ----------
+
+def _compute_onboarding_status(request: Request, user: dict) -> dict:
+    """Detecta progresso do onboarding lendo estado do sistema.
+    Cada step retorna {done: bool, hint: str, value: int|str opcional}.
+    """
+    from core import paths as _paths
+    from web.workers import manager as worker_manager
+    from web.remote_jobs import manager as rjob_manager
+
+    # Step 1: pelo menos 1 conta cadastrada
+    accounts = load_accounts()
+    active = [a for a in accounts if a.get("active", True)]
+
+    # Step 2: worker VPS online (qualquer worker online conta)
+    workers = worker_manager.list(hide_token=True)
+    online_workers = [w for w in workers if w.get("online")]
+
+    # Step 3: token de extensão gerado
+    u = auth.find_user(user["email"]) if user else None
+    has_ext_token = bool(u and u.get("extension_token"))
+
+    # Step 4: pelo menos 1 conta com session manual salva (cookies)
+    sessions_with_cookies = 0
+    ws_slug = _paths.get_workspace()
+    sessions_path = _paths.sessions_dir(ws_slug)
+    for a in active:
+        sf = sessions_path / f"{a['username']}.json"
+        if sf.exists():
+            try:
+                jd = json.loads(sf.read_text(encoding="utf-8"))
+                if jd.get("manually_saved") or jd.get("from_chrome") or jd.get("from_extension"):
+                    sessions_with_cookies += 1
+            except Exception:
+                pass
+
+    # Step 5: pelo menos 1 mídia na biblioteca
+    pending_count = 0
+    if PENDING_DIR.exists():
+        for p in PENDING_DIR.iterdir():
+            if p.is_file() and p.suffix.lower() in MEDIA_EXTS and not p.name.endswith(".meta.json"):
+                pending_count += 1
+
+    # Step 6: pelo menos 1 post bem-sucedido
+    has_posted = any(
+        j.operation == "post" and j.status == "done" and j.workspace_slug == ws_slug
+        for j in rjob_manager.snapshot_values()
+    )
+
+    steps = [
+        {
+            "key": "account",
+            "title": "Cadastre sua primeira conta Insta",
+            "done": len(active) > 0,
+            "hint": f"{len(active)} conta(s) ativa(s)" if active else "Vá em Contas → Nova conta",
+            "link": "/accounts",
+        },
+        {
+            "key": "worker",
+            "title": "Conecte o worker (VPS ou local)",
+            "done": len(online_workers) > 0,
+            "hint": f"{len(online_workers)} worker(s) online" if online_workers else "Cadastre em Meu PC e suba o worker",
+            "link": "/workers",
+        },
+        {
+            "key": "ext_token",
+            "title": "Gere o token de extensão",
+            "done": has_ext_token,
+            "hint": "Token gerado" if has_ext_token else "Vá em Contas → Extensão → Gerar token",
+            "link": "/accounts",
+        },
+        {
+            "key": "save_session",
+            "title": "Salve cookies de pelo menos 1 conta",
+            "done": sessions_with_cookies > 0,
+            "hint": f"{sessions_with_cookies} conta(s) com cookies" if sessions_with_cookies else "Use extensão Chrome OU botão Smartphone no painel",
+            "link": "/accounts",
+        },
+        {
+            "key": "library",
+            "title": "Suba sua primeira mídia",
+            "done": pending_count > 0,
+            "hint": f"{pending_count} mídia(s) na biblioteca" if pending_count else "Vá em Biblioteca → Subir mídia",
+            "link": "/videos",
+        },
+        {
+            "key": "first_post",
+            "title": "Faça seu primeiro post",
+            "done": has_posted,
+            "hint": "Pelo menos 1 post bem-sucedido" if has_posted else "Use Disparos → Disparar manual OU agende",
+            "link": "/jobs",
+        },
+    ]
+
+    done_count = sum(1 for s in steps if s["done"])
+    return {
+        "steps": steps,
+        "done_count": done_count,
+        "total": len(steps),
+        "percent": int(done_count * 100 / max(1, len(steps))),
+        "completed": done_count == len(steps),
+    }
+
+
+@app.get("/api/onboarding/status")
+def api_onboarding_status(request: Request, user=Depends(auth.require_user)):
+    return _compute_onboarding_status(request, user)
+
+
+@app.get("/onboarding", response_class=HTMLResponse)
+def page_onboarding(request: Request, user=Depends(auth.require_user)):
+    status = _compute_onboarding_status(request, user)
+    return templates.TemplateResponse(
+        request,
+        "onboarding.html",
+        _ctx(request, active="onboarding", onboarding=status),
+    )
+
+
 # ---------- pages ----------
 
 @app.get("/", response_class=HTMLResponse)
@@ -409,6 +528,10 @@ def page_dashboard(request: Request):
     upcoming_schedules = [s for s in all_schedules if s["status"] == "pending"][:5]
     upcoming_count = sum(1 for s in all_schedules if s["status"] == "pending")
 
+    # Onboarding status (mostra banner no topo se < 100%)
+    user_obj = auth.current_user(request)
+    onboarding_status = _compute_onboarding_status(request, user_obj) if user_obj else None
+
     return templates.TemplateResponse(
         request,
         "dashboard.html",
@@ -424,6 +547,7 @@ def page_dashboard(request: Request):
             upcoming_schedules=upcoming_schedules,
             upcoming_count=upcoming_count,
             host_ip=local_ip(),
+            onboarding=onboarding_status,
         ),
     )
 
@@ -1072,9 +1196,13 @@ def api_sessions_upload(payload: ExtensionSessionIn, request: Request):
 
 
 @app.get("/api/sessions/extension-bundle")
-def api_extension_bundle():
+def api_extension_bundle(request: Request):
     """Zipa a pasta /extension e devolve como download. Permite usuário baixar
-    sem precisar acessar SSH. Sempre pega versão mais nova do disco."""
+    sem precisar acessar SSH. Sempre pega versão mais nova do disco.
+
+    Auth: exige login OU extension token. Mesmo que o ZIP não tenha segredos,
+    evita scraping aleatório do endpoint."""
+    auth.require_user_or_extension(request)
     import io as _io
     import zipfile as _zf
     from pathlib import Path as _P

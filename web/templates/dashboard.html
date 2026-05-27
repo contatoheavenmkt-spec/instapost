@@ -13,6 +13,27 @@
   </div>
 </div>
 
+{% if onboarding and not onboarding.completed %}
+<a href="/onboarding" class="surface block mb-5 p-4 hover:border-[var(--accent)]" style="border-left: 3px solid var(--accent)">
+  <div class="flex items-center gap-4">
+    <div class="w-10 h-10 rounded-lg flex items-center justify-center logo-glow flex-shrink-0">
+      <i data-lucide="rocket" style="width:18px;height:18px;color:white"></i>
+    </div>
+    <div class="flex-1 min-w-0">
+      <div class="font-semibold text-[14px]">Configuração inicial — {{ onboarding.done_count }}/{{ onboarding.total }} passos</div>
+      <div class="text-[12px] text-soft mt-0.5">Termina os passos pra deixar a VPS postando 100% sozinha</div>
+      <div class="mt-2 w-full" style="background: var(--surface-2); height: 5px; border-radius: 999px; overflow: hidden">
+        <div style="background: var(--accent-grad); height: 100%; width: {{ onboarding.percent }}%"></div>
+      </div>
+    </div>
+    <div class="text-right flex-shrink-0">
+      <div class="text-[20px] font-bold" style="background: var(--accent-grad); -webkit-background-clip: text; -webkit-text-fill-color: transparent">{{ onboarding.percent }}%</div>
+      <div class="text-[11px] text-soft">continuar →</div>
+    </div>
+  </div>
+</a>
+{% endif %}
+
 <!-- Status cards -->
 <div class="grid grid-cols-4 gap-4 mb-6">
   <a href="/accounts" class="stat-card block group">

@@ -483,6 +483,7 @@ class ScheduleManager:
                         label=f"agendado · @{acc['username']}",
                         account=acc["username"],
                         created_by="scheduler",
+                        workspace_slug=s.workspace_slug or "default",
                     )
                     this_link = f"{base}/r/{short.slug}"
                 except Exception as e:
@@ -831,6 +832,7 @@ class ScheduleManager:
                         label=f"sync · @{acc['username']}",
                         account=acc["username"],
                         created_by="sync",
+                        workspace_slug=slug,
                     )
                     link_url = f"{base}/r/{short.slug}"
                 except Exception as e:
@@ -1232,6 +1234,7 @@ class ScheduleManager:
                         label=f"diversify-auto · @{acc['username']}",
                         account=acc["username"],
                         created_by=f"diversify-auto:{slug}",
+                        workspace_slug=slug,
                     )
                     link_url = f"{base}/r/{short.slug}"
                 except Exception as e:
