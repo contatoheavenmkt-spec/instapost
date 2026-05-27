@@ -154,6 +154,9 @@
     <button class="btn btn-ghost btn-sm status-filter" data-status="verification" onclick="setStatusFilter('verification')" title="Contas que precisam de verificação manual no app Instagram (challenge/checkpoint)">
       <i data-lucide="alert-triangle" style="width:11px;height:11px;display:inline;vertical-align:-1px;color:#fbbf24"></i> Verificação <span id="sf-count-verification" class="text-muted ml-1">0</span>
     </button>
+    <button class="btn btn-ghost btn-sm status-filter" data-status="session_renewal" onclick="setStatusFilter('session_renewal')" title="Contas com cookies expirados — refaça Save Sessão via extensão Chrome ou botão Smartphone">
+      <i data-lucide="refresh-cw" style="width:11px;height:11px;display:inline;vertical-align:-1px;color:#fb923c"></i> Refazer Sessão <span id="sf-count-session-renewal" class="text-muted ml-1">0</span>
+    </button>
     <button class="btn btn-ghost btn-sm status-filter" data-status="paused" onclick="setStatusFilter('paused')">
       <span class="dot dot-muted" style="margin-right:4px"></span>Pausadas <span id="sf-count-paused" class="text-muted ml-1">0</span>
     </button>
@@ -578,7 +581,8 @@ elMSoYMQakO</pre>
     if (filter === 'paused') return !a.active;
     if (filter === 'blocked') return a.blocked || a.shadowban_suspected;
     if (filter === 'verification') return a.needs_verification && !a.blocked;
-    if (filter === 'connected') return a.active && (a.session === 'saved' || a.connected_via_worker_id) && !a.blocked && !a.needs_verification;
+    if (filter === 'session_renewal') return a.needs_session_renewal && !a.blocked && !a.needs_verification;
+    if (filter === 'connected') return a.active && (a.session === 'saved' || a.connected_via_worker_id) && !a.blocked && !a.needs_verification && !a.needs_session_renewal;
     if (filter === 'disconnected') return a.active && a.session !== 'saved' && !a.connected_via_worker_id && !a.blocked;
     if (filter === 'warming') return a.active && a.is_warming_up;
     return true;
@@ -603,6 +607,7 @@ elMSoYMQakO</pre>
     document.getElementById('sf-count-disconnected').textContent = accounts.filter(a => _matchStatus(a, 'disconnected')).length;
     document.getElementById('sf-count-blocked').textContent = accounts.filter(a => _matchStatus(a, 'blocked')).length;
     document.getElementById('sf-count-verification').textContent = accounts.filter(a => _matchStatus(a, 'verification')).length;
+    document.getElementById('sf-count-session-renewal').textContent = accounts.filter(a => _matchStatus(a, 'session_renewal')).length;
     document.getElementById('sf-count-paused').textContent = accounts.filter(a => _matchStatus(a, 'paused')).length;
     document.getElementById('sf-count-warming').textContent = accounts.filter(a => _matchStatus(a, 'warming')).length;
   }
@@ -637,12 +642,16 @@ elMSoYMQakO</pre>
     tbody.innerHTML = filtered.map(a => {
       const blockedRow = a.blocked ? 'style="background: rgba(239,68,68,0.06); border-left: 3px solid var(--danger)"' : '';
       const verifyRow = (!a.blocked && a.needs_verification) ? 'style="background: rgba(251,191,36,0.08); border-left: 3px solid #fbbf24"' : '';
-      const shadowRow = (!a.blocked && !a.needs_verification && a.shadowban_suspected) ? 'style="background: rgba(245,158,11,0.06); border-left: 3px solid var(--warning)"' : '';
+      const renewalRow = (!a.blocked && !a.needs_verification && a.needs_session_renewal) ? 'style="background: rgba(251,146,60,0.07); border-left: 3px solid #fb923c"' : '';
+      const shadowRow = (!a.blocked && !a.needs_verification && !a.needs_session_renewal && a.shadowban_suspected) ? 'style="background: rgba(245,158,11,0.06); border-left: 3px solid var(--warning)"' : '';
       const blockedBadge = a.blocked
         ? `<span class="badge badge-danger" title="Bloqueada em ${(a.blocked_at||'').slice(0,16).replace('T',' ')} - ${(a.blocked_reason||'').slice(0,140)}"><i data-lucide="alert-triangle" style="width:11px;height:11px"></i> BLOQUEADA</span>`
         : '';
       const verifyBadge = (a.needs_verification && !a.blocked)
         ? `<span class="badge" style="background:rgba(251,191,36,0.18);color:#fbbf24;border:1px solid rgba(251,191,36,0.4);font-weight:600" title="Instagram pediu verificação manual em ${(a.verification_at||'').slice(0,16).replace('T',' ')} — ${(a.verification_reason||'').slice(0,180)}"><i data-lucide="alert-triangle" style="width:11px;height:11px"></i> PRECISA VERIFICAR</span>`
+        : '';
+      const renewalBadge = (a.needs_session_renewal && !a.blocked && !a.needs_verification)
+        ? `<span class="badge" style="background:rgba(251,146,60,0.18);color:#fb923c;border:1px solid rgba(251,146,60,0.4);font-weight:600" title="Cookies expiraram em ${(a.session_renewal_at||'').slice(0,16).replace('T',' ')} — refaça Save Sessão via extensão ou botão Smartphone. ${(a.session_renewal_reason||'').slice(0,140)}"><i data-lucide="refresh-cw" style="width:11px;height:11px"></i> REFAZER SESSÃO</span>`
         : '';
       // Badge PAUSADA: worker_paused_until > agora (user mexendo no browser)
       let pauseBadge = '';
@@ -677,19 +686,24 @@ elMSoYMQakO</pre>
           ? `<button class="btn btn-subtle btn-sm" onclick="onClearVerification('${a.username}')" title="Após logar manualmente no app Instagram e passar pelo challenge, clica aqui pra desmarcar" style="color: #fbbf24">
               <i data-lucide="check-circle-2" class="icon"></i> Verifiquei
             </button>`
-          : (a.shadowban_suspected
-            ? `<button class="btn btn-subtle btn-sm" onclick="onClearShadowban('${a.username}')" title="Falso positivo? Marca como resolvido" style="color: #fcd34d">
-                <i data-lucide="check-circle-2" class="icon"></i> Falso alarme
+          : (a.needs_session_renewal
+            ? `<button class="btn btn-subtle btn-sm" onclick="onClearSessionRenewal('${a.username}')" title="Após refazer Save Sessão (via extensão ou botão Smartphone), clica aqui pra desmarcar" style="color: #fb923c">
+                <i data-lucide="check-circle-2" class="icon"></i> Renovei
               </button>`
-            : ''));
+            : (a.shadowban_suspected
+              ? `<button class="btn btn-subtle btn-sm" onclick="onClearShadowban('${a.username}')" title="Falso positivo? Marca como resolvido" style="color: #fcd34d">
+                  <i data-lucide="check-circle-2" class="icon"></i> Falso alarme
+                </button>`
+              : '')));
       return `
-      <tr data-username="${a.username}" ${blockedRow}${verifyRow}${shadowRow}>
+      <tr data-username="${a.username}" ${blockedRow}${verifyRow}${renewalRow}${shadowRow}>
         <td><input type="checkbox" class="check row-check" value="${a.username}" ${selection.has(a.username) ? 'checked' : ''} onchange="onSelect(this)" /></td>
         <td>
           <div class="flex items-center gap-2 flex-wrap">
             <div class="font-medium mono text-[13px]">@${a.username}</div>
             ${blockedBadge}
             ${verifyBadge}
+            ${renewalBadge}
             ${pauseBadge}
             ${shadowBadge}
             ${healthBadge}
@@ -891,6 +905,22 @@ elMSoYMQakO</pre>
     try {
       await api(`/api/accounts/${username}/clear-verification`, { method: 'POST' });
       toast(`@${username} desmarcada — pode conectar de novo`, 'success');
+      await load();
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  }
+
+  async function onClearSessionRenewal(username) {
+    const ok = await confirmModal({
+      title: `Save Sessão de @${username} refeito?`,
+      message: 'Confirme APENAS DEPOIS de refazer Save Sessão (via extensão Chrome OU botão Smartphone do painel). Os cookies novos vão substituir os expirados e o worker volta a postar normalmente.',
+      confirmText: 'Sim, renovei os cookies',
+    });
+    if (!ok) return;
+    try {
+      await api(`/api/accounts/${username}/clear-session-renewal`, { method: 'POST' });
+      toast(`@${username} desmarcada — pode postar de novo`, 'success');
       await load();
     } catch (e) {
       toast(e.message, 'error');

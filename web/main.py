@@ -747,6 +747,10 @@ def _account_view(a: dict) -> dict:
         "needs_verification": bool(a.get("needs_verification", False)),
         "verification_at": a.get("verification_at"),
         "verification_reason": a.get("verification_reason"),
+        # Cookies expiraram — só refazer Save Sessão via extensão/Smartphone
+        "needs_session_renewal": bool(a.get("needs_session_renewal", False)),
+        "session_renewal_at": a.get("session_renewal_at"),
+        "session_renewal_reason": a.get("session_renewal_reason"),
         # Pausa do worker (quando user tá usando a conta manualmente no browser)
         "worker_paused_until": a.get("worker_paused_until"),
         # Health / shadow ban detector
@@ -788,6 +792,18 @@ BLOCK_PATTERNS = (
     "instagram bloqueou",  # nossa string custom em core/profile.py
 )
 
+# Erros que indicam "cookies expiraram, refaça Save Sessão" — NÃO é ban, NÃO é
+# challenge. Conta volta a funcionar instantâneo quando user atualiza os cookies
+# via extensão Chrome OU botão Smartphone. Estado mais leve dos 3.
+SESSION_RENEWAL_PATTERNS = (
+    "manualreconnectneeded",                  # nome da exception class
+    "sem sessão válida",                      # msg do raise em session.py
+    "sessão manual de @",                     # msg do raise em session.py (sessão manual expirou)
+    "fresh login api desativado",             # msg explicativa
+    "salvar sessão",                          # genérico — captura instruções de Save Sessão
+    "refaça login no chrome",                 # variante da mesma msg
+)
+
 
 def _is_challenge_error(error_msg: Optional[str]) -> Optional[str]:
     """Retorna o padrão casado se for erro de challenge/verificação, senão None.
@@ -807,6 +823,18 @@ def _is_block_error(error_msg: Optional[str]) -> Optional[str]:
         return None
     low = error_msg.lower()
     for pat in BLOCK_PATTERNS:
+        if pat in low:
+            return pat
+    return None
+
+
+def _is_session_renewal_error(error_msg: Optional[str]) -> Optional[str]:
+    """Retorna padrão casado se for erro de cookies expirados / Save Sessão necessário.
+    Mais leve que block/challenge — só precisa renovar cookies, conta tá OK."""
+    if not error_msg:
+        return None
+    low = error_msg.lower()
+    for pat in SESSION_RENEWAL_PATTERNS:
         if pat in low:
             return pat
     return None
@@ -2325,6 +2353,20 @@ def api_clear_verification(username: str, user=Depends(auth.require_user)):
     raise HTTPException(404, "Conta não encontrada")
 
 
+@app.post("/api/accounts/{username}/clear-session-renewal")
+def api_clear_session_renewal(username: str, user=Depends(auth.require_user)):
+    """Desmarca needs_session_renewal — use depois de refazer Save Sessão
+    via extensão Chrome OU botão Smartphone."""
+    with accounts_transaction() as accounts:
+        for a in accounts:
+            if a["username"] == username:
+                a["needs_session_renewal"] = False
+                a["session_renewal_at"] = None
+                a["session_renewal_reason"] = None
+                return {"ok": True, "account": _account_view(a)}
+    raise HTTPException(404, "Conta não encontrada")
+
+
 # ---------- API: videos ----------
 
 @app.get("/api/videos")
@@ -2995,14 +3037,16 @@ def api_worker_job_result(job_id: str, payload: WorkerResultIn, request: Request
         raise HTTPException(404, "Job não encontrado ou não atribuído a esse worker")
 
     # Side-effects pós-resultado:
-    # Failure: classifica o erro em 2 níveis:
-    #   - challenge/verificação (resolúvel manual) → needs_verification=True
-    #   - bloqueio sério (rate/disabled) → blocked=True
-    # Challenge tem prioridade: muitas vezes o IG retorna challenge antes de blocar.
+    # Failure: classifica o erro em 3 níveis (prioridade: challenge > block > session_renewal):
+    #   - challenge/verificação (IG pediu code) → needs_verification=True (amarelo "VERIFICAR")
+    #   - bloqueio serio (rate/disabled/banned) → blocked=True (vermelho "BLOQUEADA")
+    #   - cookies expiraram (refaz Save Sessão) → needs_session_renewal=True (laranja "REFAZER SESSÃO")
+    # Os 3 sao mutuamente exclusivos — UI mostra so o estado mais grave.
     if (not payload.success) and job and payload.error_msg:
         chal_pattern = _is_challenge_error(payload.error_msg)
         block_pattern = None if chal_pattern else _is_block_error(payload.error_msg)
-        if chal_pattern or block_pattern:
+        renewal_pattern = None if (chal_pattern or block_pattern) else _is_session_renewal_error(payload.error_msg)
+        if chal_pattern or block_pattern or renewal_pattern:
             try:
                 with accounts_transaction() as accounts:
                     for a in accounts:
@@ -3013,14 +3057,19 @@ def api_worker_job_result(job_id: str, payload: WorkerResultIn, request: Request
                                 a["verification_at"] = now_iso
                                 a["verification_reason"] = f"{chal_pattern} — {payload.error_msg[:200]}"
                                 print(f"[verify] @{a['username']} precisa verificação ({chal_pattern})")
-                            else:
+                            elif block_pattern:
                                 a["blocked"] = True
                                 a["blocked_at"] = now_iso
                                 a["blocked_reason"] = f"{block_pattern} — {payload.error_msg[:200]}"
                                 print(f"[block] @{a['username']} marcada como bloqueada ({block_pattern})")
+                            else:  # renewal_pattern
+                                a["needs_session_renewal"] = True
+                                a["session_renewal_at"] = now_iso
+                                a["session_renewal_reason"] = f"{renewal_pattern} — {payload.error_msg[:160]}"
+                                print(f"[session] @{a['username']} precisa refazer Save Sessão ({renewal_pattern})")
                             break
             except Exception as e:
-                print(f"[worker_result] erro marcando bloqueio/verificação: {e}")
+                print(f"[worker_result] erro marcando estado: {e}")
 
     # 1) Sucesso em qualquer op = marca conta como "conectada via worker"
     # 2) auto_follow_back: atualiza cache seen_followers no accounts.json
@@ -3045,6 +3094,12 @@ def api_worker_job_result(job_id: str, payload: WorkerResultIn, request: Request
                         a["verification_at"] = None
                         a["verification_reason"] = None
                         print(f"[verify] @{a['username']} verificação desmarcada (login OK)")
+                    # Idem pra needs_session_renewal — job sucesso = cookies funcionando
+                    if a.get("needs_session_renewal"):
+                        a["needs_session_renewal"] = False
+                        a["session_renewal_at"] = None
+                        a["session_renewal_reason"] = None
+                        print(f"[session] @{a['username']} renovação desmarcada (cookies OK)")
                     if job.operation == "auto_follow_back" and payload.result_data:
                         new_seen = payload.result_data.get("seen_followers")
                         if isinstance(new_seen, list) and new_seen:

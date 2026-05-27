@@ -472,26 +472,49 @@
   // Expõe pra outras telas poderem chamar
   window.refreshWorkerStatus = refreshWorkerStatus;
 
-  // Badge persistente de contas bloqueadas
-  let _lastBlockedKnown = -1;  // pra disparar toast só quando AUMENTA
+  // Badge persistente de contas com problema (bloqueada/verificação/refazer sessão)
+  // Toast só dispara quando aumenta (notifica nova ocorrência sem spammar)
+  let _lastBlockedKnown = -1;
+  let _lastVerifyKnown = -1;
+  let _lastRenewalKnown = -1;
   async function refreshBlockedBadge() {
     try {
       const accs = await fetch('/api/accounts').then(r => r.ok ? r.json() : []);
       const blocked = accs.filter(a => a.blocked);
+      const verify = accs.filter(a => a.needs_verification && !a.blocked);
+      const renewal = accs.filter(a => a.needs_session_renewal && !a.blocked && !a.needs_verification);
+      const total = blocked.length + verify.length + renewal.length;
       const badge = document.getElementById('nav-blocked-badge');
       if (!badge) return;
-      if (blocked.length) {
-        badge.textContent = blocked.length;
+      if (total > 0) {
+        badge.textContent = total;
         badge.classList.remove('hidden');
+        // Tooltip detalhado
+        const parts = [];
+        if (blocked.length) parts.push(`${blocked.length} bloqueada(s)`);
+        if (verify.length) parts.push(`${verify.length} precisa verificação`);
+        if (renewal.length) parts.push(`${renewal.length} precisa Save Sessão`);
+        badge.title = parts.join(' · ');
       } else {
         badge.classList.add('hidden');
+        badge.title = '';
       }
-      // Toast só se subiu (nova detecção)
+      // Toasts apenas quando AUMENTA cada categoria (não spam ao recarregar)
       if (_lastBlockedKnown >= 0 && blocked.length > _lastBlockedKnown) {
         const novas = blocked.length - _lastBlockedKnown;
-        toast(`⚠ ${novas} conta(s) bloqueada(s) detectada(s) — veja em Contas`, 'error');
+        toast(`⚠ ${novas} conta(s) BLOQUEADA(s) detectada(s) — veja em Contas`, 'error');
+      }
+      if (_lastVerifyKnown >= 0 && verify.length > _lastVerifyKnown) {
+        const novas = verify.length - _lastVerifyKnown;
+        toast(`⚠ ${novas} conta(s) precisa(m) VERIFICAÇÃO no app Insta`, 'error');
+      }
+      if (_lastRenewalKnown >= 0 && renewal.length > _lastRenewalKnown) {
+        const novas = renewal.length - _lastRenewalKnown;
+        toast(`🔄 ${novas} conta(s) com cookies expirados — refaça Save Sessão`, 'info');
       }
       _lastBlockedKnown = blocked.length;
+      _lastVerifyKnown = verify.length;
+      _lastRenewalKnown = renewal.length;
     } catch {}
   }
   refreshBlockedBadge();

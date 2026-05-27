@@ -1301,9 +1301,13 @@ class ScheduleManager:
     # ===================== HEALTH TRACKER (SHADOW BAN DETECTOR) =====================
 
     def _health_loop(self):
-        """1x/dia (qualquer hora) dispara collect_insights pra cada conta conectada
-        em cada workspace. Resultados sao salvos via api_worker_job_result
-        side-effect (em main.py)."""
+        """Periodicamente dispara collect_insights pra cada conta conectada.
+        Dupla funcao: 1) detector de shadow ban (snapshot de views/likes), e
+        2) ping de saude — se cookies expirarem ou IG banir, o job falha e
+        api_worker_job_result marca a conta como needs_session_renewal/blocked.
+
+        Tick a cada 30min. Cada conta e checada se ultima coleta foi > 4h atras
+        (mais frequente que 22h pra detectar quedas rapido)."""
         import time as _t
         _t.sleep(180)  # 3min apos startup
         while not self._stop_event.is_set():
@@ -1311,12 +1315,12 @@ class ScheduleManager:
                 self._health_tick()
             except Exception as e:
                 print(f"[health] tick falhou: {e}")
-            # 1 hora entre verificacoes (so dispara collect 1x/dia por conta)
-            self._stop_event.wait(60 * 60)
+            # 30min entre verificacoes (tick mais frequente — antes era 60min)
+            self._stop_event.wait(30 * 60)
 
     def _health_tick(self):
         """Pra cada workspace, pra cada conta conectada, cria 1 job collect_insights
-        se nao houve coleta nas ultimas 22h."""
+        se nao houve coleta nas ultimas 4h. Mais frequente = detecta queda rapido."""
         from datetime import datetime as _dt, timezone as _tz, timedelta as _td
         from core import paths as _paths
         from web import health as _health
@@ -1324,6 +1328,7 @@ class ScheduleManager:
         import json as _json
 
         now = _dt.now(_tz.utc)
+        HEALTH_CHECK_INTERVAL_HOURS = 4  # antes era 22
 
         for slug in _paths.list_workspace_slugs():
             _paths.set_workspace(slug)
@@ -1342,12 +1347,15 @@ class ScheduleManager:
                     continue
                 if is_worker_paused(acc):
                     continue  # user tá mexendo no browser
-                # Ultima coleta foi a menos de 22h? Pula.
+                # Conta ja marcada como problema? Skip o ping (evita job redundante)
+                if acc.get("blocked") or acc.get("needs_verification") or acc.get("needs_session_renewal"):
+                    continue
+                # Ultima coleta foi a menos de 4h? Pula.
                 history = _health.load_history(acc["username"], slug)
                 if history:
                     try:
                         last = _dt.fromisoformat(history[-1]["collected_at"])
-                        if (now - last).total_seconds() < 22 * 3600:
+                        if (now - last).total_seconds() < HEALTH_CHECK_INTERVAL_HOURS * 3600:
                             continue
                     except Exception:
                         pass
