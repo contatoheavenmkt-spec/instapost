@@ -1259,7 +1259,12 @@ def api_extension_bundle(request: Request):
 @app.get("/api/sessions/extension-info")
 def api_extension_info(request: Request):
     """Endpoint pra extensão validar token + obter contexto inicial (lista de
-    workspaces e contas disponíveis). Auth via Bearer extension_token."""
+    workspaces e contas disponíveis, incluindo proxy de cada conta).
+    Auth via Bearer extension_token.
+
+    O proxy é devolvido decomposto (host, port, user, pass) pra extensão
+    conseguir configurar via chrome.proxy.settings sem ter que parsear URL.
+    """
     user = auth.require_user_or_extension(request)
     from web.workspaces import manager as ws_manager
     workspaces = ws_manager.list()
@@ -1273,10 +1278,29 @@ def api_extension_info(request: Request):
             accs = json.loads(accs_file.read_text(encoding="utf-8"))
             for a in accs:
                 if a.get("active", True):
+                    # Decompoe proxy URL pra extensão usar via chrome.proxy API
+                    raw_proxy = (a.get("proxy") or "").strip()
+                    proxy_info = None
+                    if raw_proxy:
+                        normalized = _normalize_proxy(raw_proxy)
+                        if normalized:
+                            try:
+                                from urllib.parse import urlparse as _urlparse
+                                p = _urlparse(normalized)
+                                proxy_info = {
+                                    "scheme": p.scheme or "http",
+                                    "host": p.hostname or "",
+                                    "port": p.port or 80,
+                                    "username": p.username or "",
+                                    "password": p.password or "",
+                                }
+                            except Exception:
+                                proxy_info = None
                     out_accounts.append({
                         "username": a.get("username"),
                         "workspace_slug": ws["slug"],
                         "workspace_name": ws.get("name") or ws["slug"],
+                        "proxy": proxy_info,
                     })
         except Exception:
             pass
