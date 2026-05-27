@@ -729,7 +729,7 @@ elMSoYMQakO</pre>
             <button class="btn btn-subtle btn-sm" onclick="onConnectViaWorker('${a.username}')" title="Conectar conta">
               <i data-lucide="log-in" class="icon"></i> Conectar
             </button>
-            <button class="btn btn-ghost btn-sm" onclick="onOpenBrowser('${a.username}', {clean_mobile: true})" title="📲 SIMULADOR MOBILE (Dolphin-Anty style): abre Chrome com User-Agent Android + janela mobile 412x870, SEM proxy, SEM cookies injetados. Você navega LIVRE (Google, Insta, qualquer site), loga manual no Insta. Depois clica 'Salvar Sessão' (botão disco verde) pra capturar os cookies. RESOLVE 'Chrome em branco' e 'IP queimado'.">
+            <button class="btn btn-ghost btn-sm" onclick="onOpenBrowser('${a.username}', {clean_mobile: true})" title="📲 SIMULADOR MOBILE (precisa worker.py rodando NESTE PC): abre Chrome local com UA Android + proxy da conta. Vc loga manual no Insta. Depois clica 'Salvar Sessão' (botão disco verde). 💡 Se vc acessa o painel de outro PC, use a Extensão Chrome (botão Extensão no topo) — funciona de qualquer lugar.">
               <i data-lucide="smartphone" class="icon"></i>
             </button>
             <button class="btn btn-ghost btn-sm" onclick="onOpenBrowser('${a.username}', {reset: true})" title="RESETAR profile e abrir Chrome limpo (use quando aparece ERR_TOO_MANY_REDIRECTS ou perfil esquisito sem header)" style="opacity:.6">
@@ -882,8 +882,15 @@ elMSoYMQakO</pre>
         toast(`Falha: ${err}`, 'error');
       }
     } catch (e) {
-      alert(`Erro de conexão com o worker local:\n${e.message}\n\nVerifica se o worker tá rodando (porta 17777).`);
-      toast(e.message, 'error');
+      // Worker local não respondeu — sugere a extensão Chrome
+      const useExt = await confirmModal({
+        title: `Worker local não disponível`,
+        message: `O botão Save Sessão precisa do worker.py rodando neste PC com Chrome aberto.<br><br>
+          <strong>Alternativa moderna</strong>: use a <strong>Extensão Chrome</strong> que captura cookies de qualquer browser, sem precisar de worker local.<br><br>
+          Quer abrir a configuração da extensão agora?`,
+        confirmText: 'Abrir extensão',
+      });
+      if (useExt) openExtensionModal();
     }
   }
 
@@ -1490,7 +1497,20 @@ elMSoYMQakO</pre>
         return;
       }
     } catch (_) {
-      // Worker offline / CORS / DNS — cai pro fallback de download
+      // Worker offline / CORS / DNS — mostra dialog explicando alternativas
+    }
+    // Worker local não respondeu — mostra modal de ajuda em vez de baixar .bat silenciosamente
+    const choice = await confirmModal({
+      title: `Worker local não está rodando neste computador`,
+      message: `O botão Smartphone precisa do worker.py rodando NESTE PC pra abrir o Chrome local.<br><br>
+        <strong>Alternativa recomendada</strong>: use a <strong>Extensão Chrome</strong> — funciona de qualquer computador, sem precisar de worker local.<br><br>
+        Quer abrir a configuração da extensão agora? (Se preferir, clique Cancelar e baixe o launcher .bat — vc roda manual no PC onde tem o worker.py)`,
+      confirmText: 'Abrir configuração da extensão',
+    });
+    if (choice) {
+      // Abre o modal da extensão
+      openExtensionModal();
+      return;
     }
     // Fallback: baixa o .bat/.sh — usuário executa manualmente
     const isWindows = navigator.userAgent.includes('Windows');
@@ -1502,7 +1522,7 @@ elMSoYMQakO</pre>
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    toast(`📱 Worker offline — launcher .${ext} baixado. Execute o arquivo pra abrir o Chrome.`, 'info');
+    toast(`📱 Launcher .${ext} baixado — execute o arquivo no PC onde tem o worker.py`, 'info');
   }
 
   async function onShowTotp(username) {
