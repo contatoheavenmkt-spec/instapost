@@ -8,6 +8,7 @@
       --bg: #fafbff;
       --surface: #ffffff;
       --border: #e6e8ef;
+      --border-2: #d5d8e2;
       --text: #0a0a14;
       --text-2: #4b4e5c;
       --text-3: #8a8f9e;
@@ -20,20 +21,20 @@
     }
     * { box-sizing: border-box; -webkit-font-smoothing: antialiased; }
     body {
-      width: 380px; margin: 0; padding: 16px;
+      width: 380px; margin: 0; padding: 14px;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
       background: var(--bg); color: var(--text); font-size: 13px;
     }
-    .header { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
+    .header { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
     .logo { width: 28px; height: 28px; border-radius: 8px; background: var(--accent-grad);
-            display: flex; align-items: center; justify-content: center; color: white; font-weight: 700; }
+            display: flex; align-items: center; justify-content: center; color: white; font-weight: 700; font-size: 11px; }
     .title { font-weight: 700; font-size: 14px; line-height: 1.1; }
-    .subtitle { font-size: 10.5px; color: var(--text-3); margin-top: 2px; }
+    .subtitle { font-size: 10.5px; color: var(--text-3); margin-top: 2px; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
     .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin-bottom: 10px; }
     .field { margin-bottom: 10px; }
     .field:last-child { margin-bottom: 0; }
-    .label { font-size: 11px; color: var(--text-2); font-weight: 600; display: block; margin-bottom: 4px; text-transform: uppercase; letter-spacing: .04em; }
+    .label { font-size: 10.5px; color: var(--text-2); font-weight: 600; display: block; margin-bottom: 4px; text-transform: uppercase; letter-spacing: .04em; }
     .input, select { width: 100%; padding: 7px 10px; border: 1px solid var(--border); border-radius: 7px; font-size: 12.5px; font-family: inherit; background: var(--surface); color: var(--text); }
     .input:focus, select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 
@@ -45,9 +46,8 @@
     .btn-ghost { background: transparent; color: var(--text-2); border-color: var(--border); }
     .btn-ghost:hover:not(:disabled) { background: #f4f5f9; }
     .btn-success { background: var(--success); color: white; }
-    .btn-success:hover:not(:disabled) { background: #047857; }
-    .btn-warning { background: #f59e0b; color: white; }
-    .btn-warning:hover:not(:disabled) { background: #d97706; }
+    .btn-success:hover:not(:disabled) { background: #047857; transform: translateY(-1px); }
+    .btn-sm { padding: 5px 9px; font-size: 11.5px; }
 
     .msg { font-size: 11.5px; padding: 8px 10px; border-radius: 7px; margin-bottom: 10px; line-height: 1.4; }
     .msg-info { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; }
@@ -65,124 +65,140 @@
     .footer a { color: var(--text-2); text-decoration: none; cursor: pointer; }
     .footer a:hover { color: var(--accent); }
 
-    .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin .8s linear infinite; }
+    .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -2px; }
     @keyframes spin { to { transform: rotate(360deg); } }
 
-    .proxy-banner { background: linear-gradient(135deg, rgba(139,92,246,.10), rgba(219,39,119,.10)); border: 1px solid rgba(139,92,246,.25); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; font-size: 11.5px; }
-    .proxy-banner b { color: #6d28d9; }
-    .proxy-banner code { font-family: 'JetBrains Mono', monospace; font-size: 10.5px; background: rgba(0,0,0,.05); padding: 1px 5px; border-radius: 3px; }
+    /* Proxy active banner — destacado */
+    .proxy-banner { background: linear-gradient(135deg, rgba(139,92,246,.12), rgba(219,39,119,.12)); border: 1px solid rgba(139,92,246,.30); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
+    .proxy-banner-title { font-size: 11.5px; font-weight: 700; color: #6d28d9; display: flex; align-items: center; gap: 5px; }
+    .proxy-banner-info { font-size: 10.5px; color: var(--text-2); margin-top: 3px; font-family: monospace; }
+    .proxy-banner-actions { display: flex; gap: 6px; margin-top: 8px; }
+
+    /* Account search */
+    .search-bar { position: relative; margin-bottom: 8px; }
+    .search-input { padding-left: 28px; }
+    .search-icon { position: absolute; left: 9px; top: 50%; transform: translateY(-50%); color: var(--text-3); pointer-events: none; }
+
+    /* Account list */
+    .account-list { max-height: 280px; overflow-y: auto; margin: 0 -2px; }
+    .account-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 8px; cursor: pointer; transition: all .12s; border: 1px solid transparent; margin-bottom: 3px; background: var(--surface); }
+    .account-row:hover { background: var(--accent-soft); border-color: rgba(219,39,119,.2); transform: translateX(2px); }
+    .account-row:active { transform: scale(.98); }
+    .account-row.has-cookies { border-left: 3px solid var(--success); }
+    .account-avatar { width: 30px; height: 30px; border-radius: 50%; background: var(--accent-grad); display: flex; align-items: center; justify-content: center; color: white; font-weight: 700; font-size: 12px; flex-shrink: 0; }
+    .account-info { flex: 1; min-width: 0; }
+    .account-name { font-weight: 600; font-size: 12.5px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .account-meta { font-size: 10.5px; color: var(--text-3); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .account-action { font-size: 10.5px; color: var(--accent); font-weight: 600; flex-shrink: 0; opacity: .6; }
+    .account-row:hover .account-action { opacity: 1; }
+    .account-action-loading { color: var(--text-3); }
+
+    .account-list-empty { padding: 20px; text-align: center; font-size: 12px; color: var(--text-3); }
+
+    /* Workspace badge */
+    .ws-tag { display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px; border-radius: 4px; background: var(--accent-soft); color: var(--accent); font-size: 10px; font-weight: 600; }
 
     .step { display: flex; align-items: flex-start; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border); }
     .step:last-child { border-bottom: 0; }
     .step-num { flex-shrink: 0; width: 22px; height: 22px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; }
     .step-num.done { background: var(--success); color: white; }
     .step-text { font-size: 12px; line-height: 1.4; }
+
+    /* Save button — proeminente quando ativo */
+    .save-cta { background: var(--success); color: white; padding: 10px 12px; border-radius: 8px; font-weight: 600; font-size: 13px; display: flex; align-items: center; justify-content: center; gap: 6px; cursor: pointer; border: none; width: 100%; transition: all .15s; box-shadow: 0 4px 12px rgba(5,150,105,.25); }
+    .save-cta:hover:not(:disabled) { background: #047857; transform: translateY(-1px); box-shadow: 0 6px 16px rgba(5,150,105,.35); }
+    .save-cta:active:not(:disabled) { transform: scale(.98); }
+    .save-cta:disabled { background: var(--border-2); color: var(--text-3); cursor: not-allowed; box-shadow: none; }
   </style>
 </head>
 <body>
   <div class="header">
     <div class="logo">IP</div>
-    <div>
+    <div style="flex: 1; min-width: 0">
       <div class="title">Insta Poster</div>
-      <div class="subtitle" id="header-sub">Save Sessão com proxy automático</div>
+      <div class="subtitle" id="header-sub">conectando…</div>
     </div>
+    <button class="btn btn-ghost btn-sm" id="btn-settings" title="Configurações" style="width: auto; padding: 5px 8px">⚙</button>
   </div>
 
   <div id="msg" class="msg hidden"></div>
 
-  <!-- Setup view (1ª vez ou config) -->
+  <!-- Setup view (1ª vez) -->
   <div id="view-setup" class="hidden">
     <div class="card">
       <div class="field">
         <label class="label">URL do painel</label>
         <input id="cfg-panel-url" class="input" placeholder="https://instapost.shop" value="https://instapost.shop" />
-        <div class="small">Endereço do seu painel (sem barra no final)</div>
       </div>
       <div class="field">
         <label class="label">Token de acesso</label>
-        <input id="cfg-token" class="input" type="password" placeholder="Cole o token gerado no painel" />
+        <input id="cfg-token" class="input" type="password" placeholder="Cole o token do painel" />
         <div class="small">Gere em <strong>Contas → Extensão → Gerar token</strong></div>
       </div>
       <button class="btn btn-primary" id="btn-save-config">Conectar ao painel</button>
     </div>
   </div>
 
-  <!-- Main view (capturar cookies) -->
+  <!-- Main view -->
   <div id="view-main" class="hidden">
     <!-- Banner de proxy ativo -->
     <div id="proxy-active-banner" class="proxy-banner hidden">
-      <b>🔒 Proxy ativo:</b> <span id="proxy-active-info"></span><br>
-      <span class="small" style="color: var(--text-2)">Todo tráfego do Chrome tá indo pelo proxy. Limpe ao terminar.</span>
-    </div>
-
-    <div class="card">
-      <div class="field">
-        <label class="label">Workspace</label>
-        <select id="sel-workspace" class="input"></select>
+      <div class="proxy-banner-title">
+        <span>🔒</span>
+        <span>Proxy ativo: @<span id="active-account-name">—</span></span>
       </div>
-      <div class="field">
-        <label class="label">Conta Instagram</label>
-        <select id="sel-account" class="input"></select>
-        <div class="small" id="account-proxy-hint">—</div>
-      </div>
-
-      <!-- Passo 1: aplicar proxy -->
-      <div class="row">
-        <button class="btn btn-warning" id="btn-apply-proxy" title="Configura o proxy da conta no Chrome e abre instagram.com numa nova aba">
-          <span id="btn-apply-proxy-label">1) Aplicar proxy + abrir Insta</span>
+      <div class="proxy-banner-info" id="proxy-active-info">—</div>
+      <div class="proxy-banner-actions">
+        <button class="save-cta" id="btn-capture" style="flex: 2">
+          <span id="btn-capture-label">💾 Salvar cookies dessa conta</span>
         </button>
-      </div>
-      <div class="small" style="margin-top: 6px; text-align: center">
-        Depois de logar, volte aqui e clique abaixo
-      </div>
-
-      <!-- Passo 2: salvar cookies -->
-      <div class="row" style="margin-top: 8px">
-        <button class="btn btn-success" id="btn-capture" disabled>
-          <span id="btn-capture-label">2) Salvar cookies</span>
-        </button>
-      </div>
-      <div class="small" style="margin-top: 6px; text-align: center" id="capture-hint">
-        Aplique o proxy primeiro, depois loga no Insta
+        <button class="btn btn-ghost btn-sm" id="btn-clear-proxy" style="flex: 1">Cancelar</button>
       </div>
     </div>
 
-    <div class="row">
-      <button class="btn btn-ghost" id="btn-clear-proxy" disabled>Limpar proxy</button>
-      <button class="btn btn-ghost" id="btn-refresh">Recarregar</button>
+    <!-- Workspace (auto-hidden if só 1) -->
+    <div id="ws-selector-wrap" class="field hidden">
+      <label class="label">Workspace</label>
+      <select id="sel-workspace" class="input"></select>
     </div>
-    <div class="row" style="margin-top: 6px">
-      <button class="btn btn-ghost" id="btn-settings" style="font-size: 11px; padding: 6px">Configurações</button>
+
+    <!-- Search -->
+    <div class="search-bar">
+      <span class="search-icon">🔍</span>
+      <input id="search-account" class="input search-input" placeholder="Buscar conta…" />
+    </div>
+
+    <!-- Account list -->
+    <div id="account-list" class="account-list"></div>
+
+    <div class="row" style="margin-top: 8px">
+      <button class="btn btn-ghost btn-sm" id="btn-refresh">↻ Recarregar lista</button>
     </div>
   </div>
 
   <div class="footer">
-    <a id="link-help">Como usar (3 passos)</a>
+    <a id="link-help">Como funciona</a>
   </div>
 
-  <!-- Help modal inline -->
+  <!-- Help -->
   <div id="view-help" class="hidden">
     <div class="card">
       <div style="font-weight: 600; font-size: 13px; margin-bottom: 8px">Como conectar uma conta</div>
       <div class="step">
         <div class="step-num">1</div>
-        <div class="step-text">Selecione <strong>workspace</strong> e <strong>conta</strong> que vc quer conectar. A extensão pega o proxy dela do painel automaticamente.</div>
+        <div class="step-text"><strong>Clica na conta</strong> que quer conectar. A extensão configura o proxy dela no Chrome e abre instagram.com numa aba nova.</div>
       </div>
       <div class="step">
         <div class="step-num">2</div>
-        <div class="step-text">Clica <strong>"Aplicar proxy + abrir Insta"</strong>. Chrome inteiro passa a usar o proxy dessa conta. Uma aba nova abre em instagram.com/login.</div>
+        <div class="step-text">Loga normalmente (email + senha + 2FA). IG vê o IP do proxy.</div>
       </div>
       <div class="step">
         <div class="step-num">3</div>
-        <div class="step-text">Loga normalmente (email + senha + 2FA se tiver). Tudo passa pelo proxy — IG vê o IP certo.</div>
-      </div>
-      <div class="step">
-        <div class="step-num">4</div>
-        <div class="step-text">Volta na extensão, clica <strong>"Salvar cookies"</strong>. Cookies vão pra VPS e o proxy é limpo automaticamente.</div>
+        <div class="step-text">Volta na extensão, clica <strong>"Salvar cookies"</strong>. Cookies vão pra VPS, proxy é limpo automático.</div>
       </div>
       <div class="step" style="border-top: 1px solid var(--border); padding-top: 10px">
         <div class="step-num done">✓</div>
-        <div class="step-text">Pronto! VPS já posta nessa conta. Próxima renovação (60-90d): repete os 4 passos.</div>
+        <div class="step-text">Pronto! VPS já posta nessa conta de qualquer lugar.</div>
       </div>
     </div>
     <button class="btn btn-ghost" id="btn-close-help">Voltar</button>
