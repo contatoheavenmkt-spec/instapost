@@ -2139,15 +2139,9 @@ def api_bulk_delete(payload: BulkUsernames):
 
 @app.post("/api/admin/cleanup-orphans")
 def api_cleanup_orphans(user=Depends(auth.require_owner)):
-    """Sweep manual: encontra e remove dados órfãos — jobs/schedules cuja conta
-    foi deletada (ou nunca existiu), arquivos de sessão sem conta correspondente,
-    health snapshots órfãos, links de contas inexistentes. Owner only.
-
-    Útil pra limpar lixo acumulado de contas deletadas ANTES do helper de purge
-    ser introduzido (deletes antigos não limpavam nada além de session.json)."""
-    from core import paths as _paths
-    from web.shortener import manager as _link_manager
-    from web.workspaces import manager as _ws_manager
+    """Sweep manual: encontra e remove dados órfãos. Cada bloco é independente —
+    se 1 falhar, os outros continuam (defensivo)."""
+    import traceback as _tb
 
     summary = {
         "workspaces_scanned": 0,
@@ -2157,92 +2151,116 @@ def api_cleanup_orphans(user=Depends(auth.require_owner)):
         "sticky_files_removed": 0,
         "health_files_removed": 0,
         "links_removed": 0,
-        "details": [],
+        "errors": [],
     }
 
-    # Constrói mapa { ws_slug: set(usernames ativos) } pra cada workspace
+    # ===== Constrói mapa de contas válidas =====
     valid_accounts_by_ws: dict = {}
-    for ws in _ws_manager.list():
-        slug = ws["slug"]
-        accs_file = _paths.accounts_file(slug)
-        if not accs_file.exists():
-            valid_accounts_by_ws[slug] = set()
-            continue
-        try:
-            accs = json.loads(accs_file.read_text(encoding="utf-8"))
-            valid_accounts_by_ws[slug] = {a.get("username", "").lower() for a in accs if a.get("username")}
-        except Exception:
-            valid_accounts_by_ws[slug] = set()
-        summary["workspaces_scanned"] += 1
-
-    # 1) Jobs órfãos
-    summary["jobs_removed"] = rjob_manager.purge_orphans(valid_accounts_by_ws)
-
-    # 2) Schedules órfãos
-    summary["schedules_removed"] = schedule_manager.purge_orphans(valid_accounts_by_ws)
-
-    # 3) Arquivos de sessão / sticky / health / pics órfãos
-    for slug, valid_users in valid_accounts_by_ws.items():
-        sessions_dir_p = _paths.sessions_dir(slug)
-        if sessions_dir_p.exists():
-            for f in sessions_dir_p.iterdir():
-                if not f.is_file():
-                    continue
-                # f.stem = "<user>" pra .json ou "<user>_sticky" pra .txt
-                base = f.stem
-                if base.endswith("_sticky"):
-                    user = base[:-len("_sticky")]
-                    if user.lower() not in valid_users:
-                        try:
-                            f.unlink()
-                            summary["sticky_files_removed"] += 1
-                            summary["details"].append(f"sticky órfão: ws={slug} user={user}")
-                        except Exception:
-                            pass
-                elif f.suffix == ".json":
-                    user = base
-                    if user.lower() not in valid_users:
-                        try:
-                            f.unlink()
-                            summary["session_files_removed"] += 1
-                            summary["details"].append(f"sessão órfã: ws={slug} user={user}")
-                        except Exception:
-                            pass
-        # Health
-        health_dir = _paths.workspace_root(slug) / "health"
-        if health_dir.exists():
-            for f in health_dir.iterdir():
-                if not f.is_file() or f.suffix != ".json":
-                    continue
-                user = f.stem
-                if user.lower() not in valid_users:
-                    try:
-                        f.unlink()
-                        summary["health_files_removed"] += 1
-                        summary["details"].append(f"health órfão: ws={slug} user={user}")
-                    except Exception:
-                        pass
-
-    # 4) Links órfãos (account não existe em nenhum workspace)
-    all_users = set()
-    for users in valid_accounts_by_ws.values():
-        all_users.update(users)
     try:
-        with _link_manager._lock:
-            slugs_to_delete = [
-                slug for slug, link in _link_manager._items.items()
-                if link.account and link.account.lower() not in all_users
-            ]
-            for slug in slugs_to_delete:
-                del _link_manager._items[slug]
-            if slugs_to_delete:
-                _link_manager._save()
-            summary["links_removed"] = len(slugs_to_delete)
+        from core import paths as _paths
+        from web.workspaces import manager as _ws_manager
+        ws_list = _ws_manager.list()
+        for ws in ws_list:
+            slug = ws.get("slug") if isinstance(ws, dict) else getattr(ws, "slug", None)
+            if not slug:
+                continue
+            try:
+                accs_file = _paths.accounts_file(slug)
+                if not accs_file.exists():
+                    valid_accounts_by_ws[slug] = set()
+                    continue
+                accs = json.loads(accs_file.read_text(encoding="utf-8"))
+                valid_accounts_by_ws[slug] = {
+                    (a.get("username") or "").lower()
+                    for a in accs if a.get("username")
+                }
+                summary["workspaces_scanned"] += 1
+            except Exception as e:
+                summary["errors"].append(f"ws {slug}: {e}")
+                valid_accounts_by_ws[slug] = set()
     except Exception as e:
-        print(f"[cleanup-orphans] erro limpando links: {e}")
+        summary["errors"].append(f"map de workspaces: {e}")
+        print(f"[cleanup-orphans] FATAL map: {_tb.format_exc()}")
+        return {"ok": False, "error": str(e), "summary": summary}
 
-    summary["details"] = summary["details"][:50]  # cap pra UI não estourar
-    print(f"[cleanup-orphans] feito por {user['email']}: {summary}")
+    # ===== 1) Jobs órfãos =====
+    try:
+        summary["jobs_removed"] = rjob_manager.purge_orphans(valid_accounts_by_ws)
+    except Exception as e:
+        summary["errors"].append(f"jobs: {e}")
+        print(f"[cleanup-orphans] purge_orphans jobs: {_tb.format_exc()}")
+
+    # ===== 2) Schedules órfãos =====
+    try:
+        summary["schedules_removed"] = schedule_manager.purge_orphans(valid_accounts_by_ws)
+    except Exception as e:
+        summary["errors"].append(f"schedules: {e}")
+        print(f"[cleanup-orphans] purge_orphans schedules: {_tb.format_exc()}")
+
+    # ===== 3) Arquivos órfãos por workspace =====
+    try:
+        from core import paths as _paths
+        for slug, valid_users in valid_accounts_by_ws.items():
+            try:
+                sessions_dir_p = _paths.sessions_dir(slug)
+                if sessions_dir_p.exists():
+                    for f in sessions_dir_p.iterdir():
+                        if not f.is_file():
+                            continue
+                        base = f.stem
+                        if base.endswith("_sticky"):
+                            user = base[:-len("_sticky")]
+                            if user.lower() not in valid_users:
+                                try: f.unlink(); summary["sticky_files_removed"] += 1
+                                except Exception: pass
+                        elif f.suffix == ".json":
+                            user = base
+                            if user.lower() not in valid_users:
+                                try: f.unlink(); summary["session_files_removed"] += 1
+                                except Exception: pass
+                health_dir = _paths.workspace_root(slug) / "health"
+                if health_dir.exists():
+                    for f in health_dir.iterdir():
+                        if f.is_file() and f.suffix == ".json":
+                            user = f.stem
+                            if user.lower() not in valid_users:
+                                try: f.unlink(); summary["health_files_removed"] += 1
+                                except Exception: pass
+            except Exception as e:
+                summary["errors"].append(f"files ws={slug}: {e}")
+    except Exception as e:
+        summary["errors"].append(f"files (geral): {e}")
+        print(f"[cleanup-orphans] files: {_tb.format_exc()}")
+
+    # ===== 4) Links órfãos =====
+    try:
+        from web.shortener import manager as _link_manager
+        all_users = set()
+        for users in valid_accounts_by_ws.values():
+            all_users.update(users)
+        # Usa lock + items diretamente — sem método público pra remover por filtro
+        # Encapsulamos pra ser robusto se algum atributo mudar
+        if hasattr(_link_manager, "_lock") and hasattr(_link_manager, "_items"):
+            with _link_manager._lock:
+                slugs_to_delete = []
+                for slug, link in list(_link_manager._items.items()):
+                    acc = getattr(link, "account", None)
+                    if acc and acc.lower() not in all_users:
+                        slugs_to_delete.append(slug)
+                for slug in slugs_to_delete:
+                    _link_manager._items.pop(slug, None)
+                if slugs_to_delete:
+                    try:
+                        _link_manager._save()
+                    except Exception as e:
+                        summary["errors"].append(f"links save: {e}")
+                summary["links_removed"] = len(slugs_to_delete)
+    except Exception as e:
+        summary["errors"].append(f"links: {e}")
+        print(f"[cleanup-orphans] links: {_tb.format_exc()}")
+
+    summary["errors"] = summary["errors"][:20]
+    print(f"[cleanup-orphans] feito por {user.get('email', '?')}: {summary}")
     return {"ok": True, "summary": summary}
 
 
