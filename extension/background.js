@@ -167,6 +167,65 @@ chrome.storage.local.get("active_proxy_full", (data) => {
 // MESSAGE ROUTER
 // =====================================================
 
+// =====================================================
+// COOKIE INJECTION (download cookies da VPS e injeta no Chrome)
+// =====================================================
+
+async function clearInstaCookies() {
+  return new Promise((resolve) => {
+    chrome.cookies.getAll({ domain: "instagram.com" }, async (cookies) => {
+      if (!cookies || !cookies.length) { resolve(0); return; }
+      await Promise.all(cookies.map(c => new Promise(r => {
+        const url = `https://${(c.domain || "").replace(/^\./, "")}${c.path || "/"}`;
+        chrome.cookies.remove({ url, name: c.name, storeId: c.storeId }, () => r());
+      })));
+      resolve(cookies.length);
+    });
+  });
+}
+
+async function injectCookies(cookieList) {
+  // Limpa cookies antigos do IG antes pra evitar conflito
+  const removed = await clearInstaCookies();
+  const results = { ok: 0, failed: 0, errors: [], cleared: removed };
+  for (const c of cookieList) {
+    if (!c.name || !c.value) continue;
+    try {
+      await new Promise((resolve, reject) => {
+        const cookieDef = {
+          url: "https://www.instagram.com",
+          name: c.name,
+          value: String(c.value),
+          domain: c.domain || ".instagram.com",
+          path: c.path || "/",
+          secure: c.secure !== false,
+          httpOnly: c.httpOnly === true,
+          sameSite: (c.sameSite || "lax").toLowerCase(),
+        };
+        if (c.expirationDate) cookieDef.expirationDate = c.expirationDate;
+        chrome.cookies.set(cookieDef, (cookie) => {
+          if (chrome.runtime.lastError) {
+            reject(new Error(`${c.name}: ${chrome.runtime.lastError.message}`));
+          } else if (!cookie) {
+            reject(new Error(`${c.name}: set returned null`));
+          } else {
+            resolve(cookie);
+          }
+        });
+      });
+      results.ok += 1;
+    } catch (e) {
+      results.failed += 1;
+      results.errors.push(e.message);
+    }
+  }
+  return results;
+}
+
+// =====================================================
+// MESSAGE ROUTER
+// =====================================================
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   (async () => {
     try {
@@ -178,10 +237,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       }
       if (request.action === "applyProxy") {
         await setProxy(request.proxy, request.account_username);
-        // Persiste tb pra sobreviver restart do service worker
-        chrome.storage.local.set({
-          active_proxy_full: { ..._activeProxy },
-        });
+        chrome.storage.local.set({ active_proxy_full: { ..._activeProxy } });
         sendResponse({ ok: true });
         return;
       }
@@ -196,10 +252,20 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         sendResponse({ ok: true, ...status });
         return;
       }
+      if (request.action === "injectCookies") {
+        const r = await injectCookies(request.cookies || []);
+        sendResponse({ ok: true, ...r });
+        return;
+      }
+      if (request.action === "clearInstaCookies") {
+        const n = await clearInstaCookies();
+        sendResponse({ ok: true, cleared: n });
+        return;
+      }
       sendResponse({ ok: false, error: "unknown action" });
     } catch (e) {
       sendResponse({ ok: false, error: e.message });
     }
   })();
-  return true; // async
+  return true;
 });

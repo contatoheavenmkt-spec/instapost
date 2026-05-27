@@ -1258,22 +1258,20 @@ def api_extension_bundle(request: Request):
 
 @app.get("/api/sessions/extension-info")
 def api_extension_info(request: Request):
-    """Endpoint pra extensão validar token + obter contexto inicial (lista de
-    workspaces e contas disponíveis, incluindo proxy de cada conta).
-    Auth via Bearer extension_token.
-
-    O proxy é devolvido decomposto (host, port, user, pass) pra extensão
-    conseguir configurar via chrome.proxy.settings sem ter que parsear URL.
+    """Endpoint pra extensão validar token + obter contexto inicial.
+    Devolve workspaces, contas + proxy (decomposto) + has_session (se tem
+    cookies salvos na VPS). Auth via Bearer extension_token.
     """
     user = auth.require_user_or_extension(request)
     from web.workspaces import manager as ws_manager
+    from core import paths as _paths
     workspaces = ws_manager.list()
     out_accounts = []
     for ws in workspaces:
-        from core import paths as _paths
         accs_file = _paths.accounts_file(ws["slug"])
         if not accs_file.exists():
             continue
+        sessions_path = _paths.sessions_dir(ws["slug"])
         try:
             accs = json.loads(accs_file.read_text(encoding="utf-8"))
             for a in accs:
@@ -1296,11 +1294,27 @@ def api_extension_info(request: Request):
                                 }
                             except Exception:
                                 proxy_info = None
+                    # Flag: tem cookies na VPS pra essa conta?
+                    safe_user = "".join(c for c in (a.get("username") or "").lower() if c.isalnum() or c in "._-")
+                    session_file = sessions_path / f"{safe_user}.json"
+                    has_session = False
+                    session_saved_at = None
+                    if session_file.exists():
+                        try:
+                            sd = json.loads(session_file.read_text(encoding="utf-8"))
+                            sid = (sd.get("authorization_data") or {}).get("sessionid") or (sd.get("cookies") or {}).get("sessionid")
+                            if sid:
+                                has_session = True
+                                session_saved_at = sd.get("saved_at")
+                        except Exception:
+                            pass
                     out_accounts.append({
                         "username": a.get("username"),
                         "workspace_slug": ws["slug"],
                         "workspace_name": ws.get("name") or ws["slug"],
                         "proxy": proxy_info,
+                        "has_session": has_session,
+                        "session_saved_at": session_saved_at,
                     })
         except Exception:
             pass
@@ -1309,6 +1323,80 @@ def api_extension_info(request: Request):
         "user_email": user.get("email"),
         "workspaces": [{"slug": ws["slug"], "name": ws.get("name") or ws["slug"]} for ws in workspaces],
         "accounts": out_accounts,
+    }
+
+
+@app.get("/api/sessions/cookies")
+def api_get_session_cookies(
+    request: Request,
+    username: str,
+    workspace_slug: Optional[str] = None,
+):
+    """Baixa cookies salvos da conta pra extensão injetar no Chrome local.
+    Permite "abrir já logado" em qualquer browser com a extensão.
+
+    Auth: Bearer extension_token. Workspace-scoped.
+    Retorna lista no formato chrome.cookies.set (name/value/domain/path/
+    secure/httpOnly/sameSite/expirationDate).
+    """
+    auth.require_user_or_extension(request)
+
+    safe_user = "".join(c for c in (username or "").lower() if c.isalnum() or c in "._-")
+    if not safe_user:
+        raise HTTPException(400, "username inválido")
+
+    from core import paths as _paths
+    ws = (workspace_slug or "").strip() or _paths.get_workspace() or "default"
+    if not all(c.isalnum() or c in "-_" for c in ws):
+        raise HTTPException(400, "workspace_slug inválido")
+
+    session_file = _paths.sessions_dir(ws) / f"{safe_user}.json"
+    if not session_file.exists():
+        raise HTTPException(404, "Sessão ainda não foi salva pra essa conta — faça Save Sessão primeiro")
+
+    try:
+        data = json.loads(session_file.read_text(encoding="utf-8"))
+    except Exception:
+        raise HTTPException(500, "session.json corrompido — refaça Save Sessão")
+
+    # Coleta cookies do dict + authorization_data (worker às vezes guarda em ambos)
+    cookies_dict = dict(data.get("cookies") or {})
+    auth_data = data.get("authorization_data") or {}
+    for k in ("sessionid", "ds_user_id"):
+        if auth_data.get(k) and not cookies_dict.get(k):
+            cookies_dict[k] = auth_data[k]
+
+    if not cookies_dict.get("sessionid"):
+        raise HTTPException(400, "Sessão sem sessionid — cookies corrompidos, refaça Save Sessão")
+
+    # Mapeia pra formato chrome.cookies.set
+    # HttpOnly só pros cookies que o IG marca como httponly (descobertos via inspect)
+    HTTP_ONLY_COOKIES = {"sessionid"}  # único certo HttpOnly
+    import time as _t
+    expires = int(_t.time()) + 90 * 24 * 3600  # 90 dias
+    cookies_out = []
+    for name, value in cookies_dict.items():
+        if not value:
+            continue
+        cookies_out.append({
+            "name": name,
+            "value": str(value),
+            "domain": ".instagram.com",
+            "path": "/",
+            "secure": True,
+            "httpOnly": name in HTTP_ONLY_COOKIES,
+            "sameSite": "lax",
+            "expirationDate": expires,
+        })
+
+    return {
+        "ok": True,
+        "username": safe_user,
+        "workspace_slug": ws,
+        "cookies": cookies_out,
+        "count": len(cookies_out),
+        "saved_at": data.get("saved_at"),
+        "from_extension": bool(data.get("from_extension")),
     }
 
 

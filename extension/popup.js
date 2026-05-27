@@ -109,14 +109,20 @@ function renderAccountList() {
     const proxyText = a.proxy
       ? `via ${a.proxy.host}:${a.proxy.port}`
       : `<span style="color: var(--warning)">sem proxy</span>`;
+    // Badge de "tem sessão salva na VPS"
+    const sessionBadge = a.has_session
+      ? '<span class="session-badge" title="Tem cookies salvos na VPS — abre já logado">🔓</span>'
+      : '<span class="session-badge" style="opacity:.3" title="Sem cookies na VPS — vai precisar logar manual primeiro">🔒</span>';
+    const actionText = a.has_session ? "Abrir LOGADO →" : "Login + Save →";
+    const rowClass = a.has_session ? "account-row has-cookies" : "account-row";
     return `
-      <div class="account-row" data-username="${escapeHtml(a.username)}">
+      <div class="${rowClass}" data-username="${escapeHtml(a.username)}" data-has-session="${a.has_session ? '1' : '0'}">
         <div class="account-avatar">${escapeHtml(initial)}</div>
         <div class="account-info">
-          <div class="account-name">@${escapeHtml(a.username)}</div>
+          <div class="account-name">${sessionBadge} @${escapeHtml(a.username)}</div>
           <div class="account-meta">${proxyText}</div>
         </div>
-        <div class="account-action">Abrir →</div>
+        <div class="account-action">${actionText}</div>
       </div>
     `;
   }).join("");
@@ -132,54 +138,84 @@ async function onAccountClick(username) {
   const acc = _data.accounts.find(a => a.workspace_slug === ws && a.username === username);
   if (!acc) return;
 
-  // Se já tem proxy ativo pra OUTRA conta, pergunta se quer trocar
+  // Trocar conta com proxy ativo
   if (_activeAccount && _activeAccount !== username) {
-    const ok = confirm(`Proxy de @${_activeAccount} ainda tá ativo. Trocar pra @${username}?\n(Vai limpar o atual e aplicar o novo)`);
+    const ok = confirm(`Proxy de @${_activeAccount} ainda tá ativo. Trocar pra @${username}?\n(Vai limpar cookies + proxy atual e aplicar o novo)`);
     if (!ok) return;
     try { await chrome.runtime.sendMessage({ action: "clearProxy" }); } catch {}
+    try { await chrome.runtime.sendMessage({ action: "clearInstaCookies" }); } catch {}
     _activeAccount = null;
   }
 
-  // Marca o card como "carregando"
   const row = document.querySelector(`.account-row[data-username="${CSS.escape(username)}"]`);
-  if (row) {
-    const action = row.querySelector(".account-action");
-    if (action) action.innerHTML = '<span class="spinner"></span>';
-  }
+  const action = row?.querySelector(".account-action");
+  const origAction = action?.textContent || "Abrir →";
+  if (action) action.innerHTML = '<span class="spinner"></span>';
 
   clearMsg();
   try {
+    // PASSO 1: aplica proxy (se tem)
     if (acc.proxy) {
+      if (action) action.innerHTML = '<span class="spinner"></span> proxy';
       const r = await chrome.runtime.sendMessage({
         action: "applyProxy",
         proxy: acc.proxy,
         account_username: acc.username,
       });
       if (!r || !r.ok) throw new Error(r?.error || "Falha aplicando proxy");
+    } else if (acc.has_session) {
+      // Sem proxy mas tem sessão — não bloqueia, mas avisa
+      console.warn(`@${username} sem proxy — IP do seu PC vai ser usado`);
     } else {
-      // Sem proxy — avisa e segue
+      // Sem proxy E sem sessão — confirma com user
       const ok = confirm(`@${username} não tem proxy configurado no painel.\n\nIG vai ver seu IP direto, pode dar mismatch quando VPS for postar.\n\nContinuar mesmo assim?`);
       if (!ok) {
-        if (row) row.querySelector(".account-action").textContent = "Abrir →";
+        if (action) action.textContent = origAction;
         return;
       }
     }
-
     _activeAccount = username;
     await setConfig({ last_workspace: ws });
 
-    // Abre Instagram numa aba nova
-    chrome.tabs.create({ url: "https://www.instagram.com/accounts/login/" });
+    // PASSO 2: tem cookies na VPS? Baixa + injeta.
+    if (acc.has_session) {
+      if (action) action.innerHTML = '<span class="spinner"></span> baixando cookies';
+      try {
+        const cookieResp = await apiCall(
+          `/api/sessions/cookies?username=${encodeURIComponent(acc.username)}&workspace_slug=${encodeURIComponent(ws)}`
+        );
+        if (cookieResp?.cookies?.length) {
+          if (action) action.innerHTML = '<span class="spinner"></span> injetando';
+          const inj = await chrome.runtime.sendMessage({
+            action: "injectCookies",
+            cookies: cookieResp.cookies,
+          });
+          if (!inj?.ok) throw new Error(inj?.error || "Falha injetando cookies");
+          // Sucesso — abre IG já logado direto no perfil
+          chrome.tabs.create({ url: "https://www.instagram.com/" });
+          await refreshProxyBanner();
+          const savedAt = cookieResp.saved_at
+            ? ` (salvo ${new Date(cookieResp.saved_at * 1000).toLocaleDateString('pt-BR')})`
+            : "";
+          msg(`✅ @${username} ABERTA LOGADA${savedAt}. Se IG redirecionar pra login, cookies expiraram — loga + Salvar cookies pra renovar.`, "success");
+          return;
+        }
+      } catch (err) {
+        // 404 = sessão não existe (race contra refresh do extension-info)
+        // 400 = sessão corrompida
+        // Cai pro fluxo de login manual abaixo
+        console.warn("Cookies download falhou:", err.message);
+      }
+    }
 
+    // PASSO 3 (fallback): abre página de login pra usuário logar manual
+    chrome.tabs.create({ url: "https://www.instagram.com/accounts/login/" });
     await refreshProxyBanner();
-    msg(`✓ Proxy de @${username} ativo — loga no Insta na aba que abriu`, "success");
+    msg(`Proxy de @${username} ativo — loga no Insta + clica "Salvar cookies"`, "info");
   } catch (e) {
     msg("Erro: " + e.message, "error");
   } finally {
-    if (row) {
-      const action = row.querySelector(".account-action");
-      if (action) action.textContent = "Abrir →";
-    }
+    if (action) action.textContent = origAction;
   }
 }
 
