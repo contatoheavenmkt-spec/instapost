@@ -17,6 +17,9 @@
     <button class="btn btn-ghost" onclick="openBulkProxy()" title="Aplica um proxy em massa (todas as contas ou só as que casam o filtro)">
       <i data-lucide="globe-2" class="icon"></i> Migrar proxy
     </button>
+    <button class="btn btn-ghost" onclick="openExtensionModal()" title="Conecte de qualquer computador via extensão Chrome — sem worker local">
+      <i data-lucide="chrome" class="icon"></i> Extensão
+    </button>
     <button class="btn btn-accent" onclick="toggleAddForm(true)">
       <i data-lucide="plus" class="icon"></i> Nova conta
     </button>
@@ -396,6 +399,87 @@ elMSoYMQakO</pre>
       <button class="btn btn-accent" onclick="submitBulkImport()" id="bulk-import-btn">
         <i data-lucide="check" class="icon"></i> Importar contas
       </button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: Configurar extensão Chrome -->
+<div id="extension-modal" class="modal-bg hidden" onclick="if(event.target===this) closeExtensionModal()">
+  <div class="modal-card" style="max-width: 680px; width: 100%">
+    <div class="flex items-center justify-between mb-3">
+      <div class="text-[16px] font-semibold flex items-center gap-2">
+        <i data-lucide="chrome" style="width:18px;height:18px;color:var(--accent)"></i>
+        Conectar via extensão Chrome
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="closeExtensionModal()"><i data-lucide="x" class="icon"></i></button>
+    </div>
+
+    <div class="text-[12.5px] text-soft mb-3 leading-relaxed">
+      Com a extensão instalada, você loga no Instagram em <strong>qualquer Chrome</strong> e
+      salva os cookies direto no painel — sem precisar do worker local. Funciona de qualquer
+      computador.
+    </div>
+
+    <!-- Passo 1: token -->
+    <div class="surface-2 p-3.5 rounded-lg mb-3">
+      <div class="text-[12.5px] font-semibold mb-2 flex items-center gap-1.5">
+        <span class="w-5 h-5 rounded-full flex items-center justify-center text-[11px] font-bold" style="background: var(--accent); color: white">1</span>
+        Gerar token de acesso
+      </div>
+      <div class="text-[11.5px] text-soft mb-2">
+        A extensão precisa de um token único pra falar com sua conta. Gere uma vez e cole na extensão.
+      </div>
+      <div id="ext-token-status" class="text-[12px] mb-2">—</div>
+      <div class="flex gap-2 items-center">
+        <button class="btn btn-accent btn-sm" onclick="rotateExtensionToken()">
+          <i data-lucide="key-round" class="icon"></i>
+          <span id="ext-token-btn-label">Gerar token</span>
+        </button>
+        <button class="btn btn-ghost btn-sm hidden" id="ext-revoke-btn" onclick="revokeExtensionToken()" title="Invalida o token atual (extensão para de funcionar)">
+          <i data-lucide="x-circle" class="icon"></i> Revogar
+        </button>
+      </div>
+      <div id="ext-token-display" class="hidden mt-3">
+        <div class="text-[11px] text-soft mb-1">Cola isto no campo "Token" da extensão:</div>
+        <div class="flex gap-1.5">
+          <input id="ext-token-value" class="input mono text-[11.5px]" readonly />
+          <button class="btn btn-subtle btn-sm" onclick="copyExtensionToken()" title="Copiar"><i data-lucide="copy" class="icon"></i></button>
+        </div>
+        <div class="text-[11px] text-amber-500 mt-1.5"><i data-lucide="alert-triangle" style="width:11px;height:11px;display:inline;vertical-align:-1px"></i> Esse token só aparece UMA VEZ. Salva agora. Pra recuperar, gere novo.</div>
+      </div>
+    </div>
+
+    <!-- Passo 2: instalar extensão -->
+    <div class="surface-2 p-3.5 rounded-lg mb-3">
+      <div class="text-[12.5px] font-semibold mb-2 flex items-center gap-1.5">
+        <span class="w-5 h-5 rounded-full flex items-center justify-center text-[11px] font-bold" style="background: var(--accent); color: white">2</span>
+        Instalar extensão
+      </div>
+      <div class="text-[11.5px] text-soft mb-2 leading-relaxed">
+        Baixa a extensão (ZIP) e carrega no Chrome:
+      </div>
+      <ol class="text-[11.5px] text-soft space-y-1 list-decimal list-inside ml-1">
+        <li>Baixa <a href="/api/sessions/extension-bundle" class="text-[var(--accent)] underline">insta-poster-extension.zip</a> e descompacta numa pasta</li>
+        <li>No Chrome: vai em <span class="mono surface px-1 rounded">chrome://extensions</span></li>
+        <li>Liga <strong>Modo do desenvolvedor</strong> (canto superior direito)</li>
+        <li>Clica <strong>Carregar sem compactação</strong> e escolhe a pasta descompactada</li>
+        <li>A extensão aparece com ícone rosa — fixa ela na barra (📌)</li>
+      </ol>
+    </div>
+
+    <!-- Passo 3: usar -->
+    <div class="surface-2 p-3.5 rounded-lg">
+      <div class="text-[12.5px] font-semibold mb-2 flex items-center gap-1.5">
+        <span class="w-5 h-5 rounded-full flex items-center justify-center text-[11px] font-bold" style="background: var(--accent); color: white">3</span>
+        Usar — capturar cookies
+      </div>
+      <ol class="text-[11.5px] text-soft space-y-1 list-decimal list-inside ml-1 leading-relaxed">
+        <li>Abre uma aba em <span class="mono">instagram.com</span> e loga na conta que vc quer conectar</li>
+        <li>Clica no ícone da extensão (canto superior direito do Chrome)</li>
+        <li>Na 1ª vez: cola o <strong>token</strong> + URL do painel (<span class="mono text-[10.5px]" id="ext-panel-url">—</span>)</li>
+        <li>Escolhe a conta + workspace e clica <strong>"Salvar cookies"</strong></li>
+        <li>Pronto. O painel já pode postar nessa conta de qualquer máquina.</li>
+      </ol>
     </div>
   </div>
 </div>
@@ -1467,6 +1551,65 @@ elMSoYMQakO</pre>
   }
 
   load();
+
+  // ===== EXTENSÃO CHROME =====
+  async function openExtensionModal() {
+    document.getElementById('ext-panel-url').textContent = location.origin;
+    document.getElementById('ext-token-display').classList.add('hidden');
+    document.getElementById('extension-modal').classList.remove('hidden');
+    if (window.lucide) lucide.createIcons();
+    // Carrega status atual do token
+    try {
+      const r = await api('/api/me/extension-token');
+      const status = document.getElementById('ext-token-status');
+      const label = document.getElementById('ext-token-btn-label');
+      const revoke = document.getElementById('ext-revoke-btn');
+      if (r.has_token) {
+        const when = r.token_at ? r.token_at.substring(0, 16).replace('T', ' às ') : '';
+        status.innerHTML = `<span style="color: var(--success)">✓ Token configurado</span><span class="text-muted ml-1">(gerado em ${when})</span>`;
+        label.textContent = 'Rotacionar (gerar novo)';
+        revoke.classList.remove('hidden');
+      } else {
+        status.innerHTML = '<span class="text-soft">Nenhum token gerado ainda</span>';
+        label.textContent = 'Gerar token';
+        revoke.classList.add('hidden');
+      }
+    } catch (e) {
+      document.getElementById('ext-token-status').textContent = 'Erro carregando status';
+    }
+  }
+  function closeExtensionModal() {
+    document.getElementById('extension-modal').classList.add('hidden');
+  }
+  async function rotateExtensionToken() {
+    try {
+      const r = await api('/api/me/extension-token/rotate', { method: 'POST' });
+      document.getElementById('ext-token-value').value = r.extension_token;
+      document.getElementById('ext-token-display').classList.remove('hidden');
+      toast('Token gerado — copia agora!', 'success');
+      // Atualiza status
+      document.getElementById('ext-token-status').innerHTML = '<span style="color: var(--success)">✓ Token novo gerado</span>';
+      document.getElementById('ext-token-btn-label').textContent = 'Rotacionar (gerar novo)';
+      document.getElementById('ext-revoke-btn').classList.remove('hidden');
+    } catch (e) { toast(e.message, 'error'); }
+  }
+  async function revokeExtensionToken() {
+    if (!confirm('Vai revogar o token. A extensão para de funcionar até gerar novo. Continuar?')) return;
+    try {
+      await api('/api/me/extension-token/revoke', { method: 'POST' });
+      toast('Token revogado', 'success');
+      document.getElementById('ext-token-status').innerHTML = '<span class="text-soft">Nenhum token configurado</span>';
+      document.getElementById('ext-token-btn-label').textContent = 'Gerar token';
+      document.getElementById('ext-revoke-btn').classList.add('hidden');
+      document.getElementById('ext-token-display').classList.add('hidden');
+    } catch (e) { toast(e.message, 'error'); }
+  }
+  function copyExtensionToken() {
+    const inp = document.getElementById('ext-token-value');
+    inp.select();
+    document.execCommand('copy');
+    toast('Token copiado!', 'success');
+  }
 
   // ===== BULK PROXY MIGRATION =====
   function openBulkProxy() {

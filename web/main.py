@@ -59,7 +59,8 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 # Rotas que dispensam login do PAINEL (login, signup, estáticos, health, redirect curto, API do worker)
 # API do worker tem auth própria via header X-Worker-Token (em vez de cookie de sessão)
-PUBLIC_PATH_PREFIXES = ("/login", "/signup/", "/static/", "/api/health", "/r/", "/api/worker/")
+# API da extensão tem auth via Authorization: Bearer <extension_token>
+PUBLIC_PATH_PREFIXES = ("/login", "/signup/", "/static/", "/api/health", "/r/", "/api/worker/", "/api/sessions/")
 
 
 class RequireLoginMiddleware(BaseHTTPMiddleware):
@@ -93,6 +94,17 @@ app.add_middleware(
     same_site="lax",
     # HTTPS-only só em prod (atrás de reverse proxy com TLS)
     https_only=os.environ.get("HTTPS_ONLY", "").lower() in ("1", "true", "yes"),
+)
+
+# CORS pra extensão Chrome: aceita qualquer origem chrome-extension://*
+# (extensão é instalada com ID aleatório, não dá pra whitelistar pré-fixo)
+from fastapi.middleware.cors import CORSMiddleware as _CORS
+app.add_middleware(
+    _CORS,
+    allow_origin_regex=r"^chrome-extension://.+$",
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
+    allow_credentials=False,  # extensão usa Bearer token, não cookies
 )
 auth.ensure_owner_seed()
 
@@ -926,6 +938,225 @@ def api_bulk_set_proxy(payload: BulkProxyIn, user=Depends(auth.require_user)):
         "skipped_no_match": skipped_no_match,
         "applied_proxy": new_proxy,
         "details": changes,
+    }
+
+
+# ============================================================================
+# SESSIONS UPLOAD (extensão Chrome) — endpoint pra extensão enviar cookies
+# ============================================================================
+
+class ExtensionSessionIn(BaseModel):
+    workspace_slug: Optional[str] = None  # se não enviar, usa ws ativo do user
+    username: str                          # username IG
+    cookies: dict                          # dict de cookies do instagram.com
+    user_agent: Optional[str] = None       # do browser que capturou (debug)
+
+
+@app.options("/api/sessions/upload")
+def api_sessions_upload_preflight():
+    """CORS preflight pra extensão — middleware CORS já trata, mas explícito é mais seguro."""
+    return {"ok": True}
+
+
+@app.post("/api/sessions/upload")
+def api_sessions_upload(payload: ExtensionSessionIn, request: Request):
+    """Recebe cookies da extensão Chrome e salva como session.json no workspace.
+
+    Auth: Authorization: Bearer <extension_token> OU sessão de painel.
+    Replica EXATAMENTE o formato que o worker.py produz em _save_session_from_chrome,
+    pra session.py carregar como sessão MANUAL (manually_saved=True).
+    """
+    user = auth.require_user_or_extension(request)
+
+    safe_username = "".join(c for c in (payload.username or "").lower() if c.isalnum() or c in "._-")
+    if not safe_username:
+        raise HTTPException(400, "username inválido")
+
+    cookies = payload.cookies or {}
+    sessionid = cookies.get("sessionid")
+    ds_user_id = cookies.get("ds_user_id")
+    if not sessionid or not ds_user_id:
+        raise HTTPException(400, "Cookies obrigatórios faltando (sessionid + ds_user_id). Vc tá logado no instagram.com nesse browser?")
+
+    # Resolve workspace: payload > sessão > default
+    from core import paths as _paths
+    ws_slug = (payload.workspace_slug or "").strip() or _paths.get_workspace() or "default"
+    # Sanitize ws slug
+    if not all(c.isalnum() or c in "-_" for c in ws_slug):
+        raise HTTPException(400, "workspace_slug inválido")
+
+    # Verifica que o workspace existe (cria se não — defensivo)
+    sessions_dir_path = _paths.sessions_dir(ws_slug)
+
+    # Garante que a conta exista no workspace
+    accounts_file = _paths.accounts_file(ws_slug)
+    if accounts_file.exists():
+        try:
+            accs = json.loads(accounts_file.read_text(encoding="utf-8"))
+            if not any(a.get("username", "").lower() == safe_username for a in accs):
+                raise HTTPException(404, f"Conta @{safe_username} não existe no workspace '{ws_slug}'. Cadastra ela no painel primeiro.")
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+
+    import time as _time
+    import uuid as _uuid
+
+    # session.json no formato esperado pelo instagrapi + flags manually_saved
+    session_data = {
+        "uuids": {
+            "phone_id": str(_uuid.uuid4()),
+            "uuid": str(_uuid.uuid4()),
+            "client_session_id": str(_uuid.uuid4()),
+            "advertising_id": str(_uuid.uuid4()),
+            "android_device_id": str(_uuid.uuid4()),
+            "request_id": str(_uuid.uuid4()),
+            "tray_session_id": str(_uuid.uuid4()),
+        },
+        "mid": cookies.get("mid", ""),
+        "ig_u_rur": cookies.get("rur"),
+        "ig_www_claim": "",
+        "authorization_data": {
+            "ds_user_id": ds_user_id,
+            "sessionid": sessionid,
+        },
+        "cookies": cookies,
+        "last_login": _time.time(),
+        # Device padrão pra montar headers do instagrapi (mesmo do worker.py)
+        "device_settings": {
+            "app_version": "428.0.0.47.67",
+            "android_version": 34,
+            "android_release": "14",
+            "dpi": "480dpi",
+            "resolution": "1344x2992",
+            "manufacturer": "Google/google",
+            "device": "husky",
+            "model": "Pixel 8 Pro",
+            "cpu": "husky",
+            "version_code": "961145276",
+        },
+        "user_agent": "Instagram 428.0.0.47.67 Android (34/14; 480dpi; 1344x2992; Google/google; Pixel 8 Pro; husky; husky; pt_BR; 961145276)",
+        "country": "BR",
+        "country_code": 55,
+        "locale": "pt_BR",
+        "timezone_offset": -10800,
+        "manually_saved": True,
+        "from_chrome": True,
+        "from_extension": True,
+        "captured_user_agent": (payload.user_agent or "")[:240],
+        "uploaded_by": user.get("email"),
+        "saved_at": int(_time.time()),
+    }
+
+    # Path final no workspace
+    session_file = sessions_dir_path / f"{safe_username}.json"
+    # Backup do anterior se existir
+    if session_file.exists():
+        try:
+            backup = session_file.with_suffix(".json.bak")
+            backup.write_bytes(session_file.read_bytes())
+        except Exception:
+            pass
+
+    session_file.write_text(json.dumps(session_data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    print(f"[sessions] upload OK: @{safe_username} ws={ws_slug} by={user.get('email')} ({len(cookies)} cookies, sid=...{sessionid[-8:]})")
+    return {
+        "ok": True,
+        "username": safe_username,
+        "workspace_slug": ws_slug,
+        "cookies_count": len(cookies),
+        "sessionid_preview": "..." + sessionid[-12:],
+    }
+
+
+@app.get("/api/sessions/extension-bundle")
+def api_extension_bundle():
+    """Zipa a pasta /extension e devolve como download. Permite usuário baixar
+    sem precisar acessar SSH. Sempre pega versão mais nova do disco."""
+    import io as _io
+    import zipfile as _zf
+    from pathlib import Path as _P
+    code_root = _P(__file__).resolve().parent.parent
+    ext_dir = code_root / "extension"
+    if not ext_dir.exists():
+        raise HTTPException(404, "extension/ não encontrado no servidor")
+    buf = _io.BytesIO()
+    with _zf.ZipFile(buf, "w", _zf.ZIP_DEFLATED) as zf:
+        for f in ext_dir.rglob("*"):
+            if f.is_file() and not f.name.endswith(".pyc"):
+                # Pula make_icons.py — só dev precisa
+                if f.name == "make_icons.py":
+                    continue
+                arcname = f.relative_to(ext_dir).as_posix()
+                zf.write(f, arcname)
+    buf.seek(0)
+    from fastapi.responses import Response
+    return Response(
+        content=buf.read(),
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="insta-poster-extension.zip"'},
+    )
+
+
+@app.get("/api/sessions/extension-info")
+def api_extension_info(request: Request):
+    """Endpoint pra extensão validar token + obter contexto inicial (lista de
+    workspaces e contas disponíveis). Auth via Bearer extension_token."""
+    user = auth.require_user_or_extension(request)
+    from web.workspaces import manager as ws_manager
+    workspaces = ws_manager.list()
+    out_accounts = []
+    for ws in workspaces:
+        from core import paths as _paths
+        accs_file = _paths.accounts_file(ws["slug"])
+        if not accs_file.exists():
+            continue
+        try:
+            accs = json.loads(accs_file.read_text(encoding="utf-8"))
+            for a in accs:
+                if a.get("active", True):
+                    out_accounts.append({
+                        "username": a.get("username"),
+                        "workspace_slug": ws["slug"],
+                        "workspace_name": ws.get("name") or ws["slug"],
+                    })
+        except Exception:
+            pass
+    return {
+        "ok": True,
+        "user_email": user.get("email"),
+        "workspaces": [{"slug": ws["slug"], "name": ws.get("name") or ws["slug"]} for ws in workspaces],
+        "accounts": out_accounts,
+    }
+
+
+@app.post("/api/me/extension-token/rotate")
+def api_rotate_extension_token(user=Depends(auth.require_user)):
+    """Gera novo token pra extensão (sobrescreve antigo se existir).
+    Token só aparece nesta resposta — guarda em local seguro."""
+    token = auth.rotate_extension_token(user["email"])
+    return {"ok": True, "extension_token": token}
+
+
+@app.post("/api/me/extension-token/revoke")
+def api_revoke_extension_token(user=Depends(auth.require_user)):
+    """Remove token (extensão para de funcionar até nova rotação)."""
+    revoked = auth.revoke_extension_token(user["email"])
+    return {"ok": True, "revoked": revoked}
+
+
+@app.get("/api/me/extension-token")
+def api_get_extension_token_status(user=Depends(auth.require_user)):
+    """Devolve só se tem token configurado (NÃO devolve o token em si por segurança).
+    UI usa pra mostrar 'Gerar token' vs 'Rotacionar/Revogar'."""
+    u = auth.find_user(user["email"])
+    has_token = bool(u and u.get("extension_token"))
+    return {
+        "ok": True,
+        "has_token": has_token,
+        "token_at": u.get("extension_token_at") if u else None,
     }
 
 

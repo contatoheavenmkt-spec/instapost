@@ -247,3 +247,66 @@ def require_owner(request: Request) -> dict:
     if u.get("role") != "owner":
         raise HTTPException(403, "Apenas o owner pode fazer isso")
     return u
+
+
+# ----- extension tokens (auth alternativa pra extensão Chrome) -----
+
+def find_user_by_extension_token(token: str) -> Optional[dict]:
+    """Acha user pelo extension_token. Constant-time check pra evitar timing attack."""
+    if not token:
+        return None
+    for u in load_users():
+        ut = u.get("extension_token")
+        if ut and secrets.compare_digest(ut, token):
+            return u
+    return None
+
+
+def rotate_extension_token(email: str) -> str:
+    """Gera novo token pro user, sobrescrevendo qualquer antigo. Retorna o token novo."""
+    users = load_users()
+    new_token = secrets.token_urlsafe(32)
+    found = False
+    for u in users:
+        if u["email"].lower() == email.lower():
+            u["extension_token"] = new_token
+            u["extension_token_at"] = now_iso()
+            found = True
+            break
+    if not found:
+        raise HTTPException(404, "Usuário não encontrado")
+    save_users(users)
+    return new_token
+
+
+def revoke_extension_token(email: str) -> bool:
+    """Remove o token (logs out extensão). Retorna True se algo mudou."""
+    users = load_users()
+    changed = False
+    for u in users:
+        if u["email"].lower() == email.lower():
+            if u.get("extension_token"):
+                u.pop("extension_token", None)
+                u.pop("extension_token_at", None)
+                changed = True
+            break
+    if changed:
+        save_users(users)
+    return changed
+
+
+def require_user_or_extension(request: Request) -> dict:
+    """Aceita sessão (cookie) OU Authorization: Bearer <extension_token>.
+    Usado em endpoints que a extensão consome — extensão não tem cookie de sessão."""
+    # Tenta sessão primeiro (caso usuário esteja no painel mesmo)
+    u = current_user(request)
+    if u:
+        return u
+    # Tenta Bearer token
+    auth_header = request.headers.get("authorization") or request.headers.get("Authorization") or ""
+    if auth_header.lower().startswith("bearer "):
+        token = auth_header[7:].strip()
+        u = find_user_by_extension_token(token)
+        if u:
+            return u
+    raise HTTPException(401, "Login ou extension token necessário")
