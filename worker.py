@@ -1141,8 +1141,8 @@ def _open_chrome_for_account(
 
     profile_dir.mkdir(parents=True, exist_ok=True)
 
-    # Remove SingletonLock (sobra quando Chrome morre sem cleanup, impede novo launch)
-    for lock_name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+    # Remove SingletonLock e DevToolsActivePort antigo (sobra quando Chrome morre sem cleanup)
+    for lock_name in ("SingletonLock", "SingletonCookie", "SingletonSocket", "DevToolsActivePort"):
         try:
             lf = profile_dir / lock_name
             if lf.exists() or lf.is_symlink():
@@ -1301,19 +1301,26 @@ def _open_chrome_for_account(
         _t_wait.sleep(0.4)
     else:
         print(f"[local-api] ⚠️ DevToolsActivePort NÃO criado em 12s em {profile_dir}", flush=True)
-        print(f"[local-api]    → Chrome atachou a outra instância OU falhou ao bindar porta", flush=True)
-        # Lista processos chrome pra diagnóstico
+        # Chrome 148+ pode não criar o arquivo. Verifica se a porta responde e cria manualmente.
         try:
-            ps_get = (
-                f"Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
-                f"Where-Object {{ $_.CommandLine -like '*{safe}*' }} | "
-                f"Select-Object ProcessId,CommandLine | Format-List"
-            )
-            r = subprocess.run(["powershell.exe", "-NoProfile", "-Command", ps_get],
-                              capture_output=True, text=True, timeout=5)
-            print(f"[local-api]    Chromes com '{safe}' no cmdline:\n{r.stdout[:1500]}")
+            import urllib.request as _urlr_check
+            _urlr_check.urlopen(f"http://127.0.0.1:{debug_port}/json/version", timeout=3).read()
+            port_file.write_text(f"{debug_port}\n", encoding="utf-8")
+            print(f"[local-api] ✓ DevToolsActivePort criado manualmente (Chrome 148+): porta={debug_port}", flush=True)
         except Exception:
-            pass
+            print(f"[local-api]    → Chrome atachou a outra instância OU falhou ao bindar porta", flush=True)
+            # Lista processos chrome pra diagnóstico
+            try:
+                ps_get = (
+                    f"Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
+                    f"Where-Object {{ $_.CommandLine -like '*{safe}*' }} | "
+                    f"Select-Object ProcessId,CommandLine | Format-List"
+                )
+                r = subprocess.run(["powershell.exe", "-NoProfile", "-Command", ps_get],
+                                  capture_output=True, text=True, timeout=5)
+                print(f"[local-api]    Chromes com '{safe}' no cmdline:\n{r.stdout[:1500]}")
+            except Exception:
+                pass
 
     proxy_desc = " + proxy" if proxy else " (SEM proxy)"
     desc = f"Chrome desktop{proxy_desc}"
@@ -1390,7 +1397,9 @@ def _save_session_from_chrome(username: str) -> tuple[bool, str]:
                                   capture_output=True, text=True, timeout=5)
             for line in (result.stdout or "").splitlines():
                 m_port = _re_cmd.search(r"remote-debugging-port=(\d+)", line)
-                m_dir = _re_cmd.search(r"--user-data-dir=([^\"\s]+)", line) or \
+                # Regex robusta: suporta paths com espaço (ex: "C:\Users\Edson Juan\...")
+                m_dir = _re_cmd.search(r'--user-data-dir="?([^"]+?)"?\s', line) or \
+                        _re_cmd.search(r"--user-data-dir=([^\"\s]+)", line) or \
                         _re_cmd.search(r"InstaposterProfiles[\\\\/](\w[\w.-]*)", line)
                 if m_port and m_dir:
                     port_candidate = int(m_port.group(1))
