@@ -63,11 +63,17 @@ function pickCookies(allCookies) {
 // PROXY
 // =====================================================
 
-// Listener de auth do proxy: quando Chrome solicita credenciais do proxy
-// (HTTP 407), responde com user/pass armazenados em _activeProxy.
+// Listener de auth do proxy: quando Chrome solicita credenciais (HTTP 407),
+// responde com user/pass. CRITICAL: service worker MV3 morre depois de ~30s
+// inativo, perdendo _activeProxy em memória. Fallback é ler do storage.
 chrome.webRequest.onAuthRequired.addListener(
   (details, callback) => {
-    if (details.isProxy && _activeProxy && _activeProxy.username) {
+    if (!details.isProxy) {
+      callback({});
+      return;
+    }
+    // Tenta cache em memória primeiro (rápido)
+    if (_activeProxy && _activeProxy.username) {
       callback({
         authCredentials: {
           username: _activeProxy.username,
@@ -76,8 +82,22 @@ chrome.webRequest.onAuthRequired.addListener(
       });
       return;
     }
-    // Não é proxy ou não temos credenciais — não responde nada
-    callback({});
+    // Service worker recém-acordou — busca em storage
+    chrome.storage.local.get("active_proxy_full", (data) => {
+      const creds = data && data.active_proxy_full;
+      if (creds && creds.username) {
+        _activeProxy = creds;  // restaura em memória
+        callback({
+          authCredentials: {
+            username: creds.username,
+            password: creds.password || "",
+          },
+        });
+      } else {
+        // Sem creds — deixa Chrome mostrar dialog (provavelmente erro)
+        callback({});
+      }
+    });
   },
   { urls: ["<all_urls>"] },
   ["asyncBlocking"]
@@ -92,21 +112,36 @@ async function setProxy(proxyInfo, accountUsername) {
     ...proxyInfo,
     account_username: accountUsername,
   };
+  // Persiste IMEDIATO em storage (service worker pode morrer a qualquer momento)
+  await new Promise(r => chrome.storage.local.set({ active_proxy_full: { ..._activeProxy } }, r));
+
   const scheme = (proxyInfo.scheme || "http").toLowerCase();
-  // chrome.proxy aceita: 'http', 'https', 'quic', 'socks4', 'socks5'
   const chromeScheme = scheme === "socks5h" ? "socks5" : scheme;
+  const port = parseInt(proxyInfo.port, 10);
+
+  // PAC script: SÓ tráfego pra instagram/cdninstagram/fbcdn passa pelo proxy.
+  // Tudo mais (painel instapost.shop, google, etc) vai DIRETO.
+  // Isso resolve: 1) requests ao painel não recebem 407 (que travava login),
+  // 2) tráfego de outras abas/sites continua normal enquanto proxy "ativo".
+  const pacScript = `
+    function FindProxyForURL(url, host) {
+      var h = host.toLowerCase();
+      if (h === "instagram.com" || h.indexOf(".instagram.com") !== -1 ||
+          h === "cdninstagram.com" || h.indexOf(".cdninstagram.com") !== -1 ||
+          h === "fbcdn.net" || h.indexOf(".fbcdn.net") !== -1) {
+        return "${chromeScheme.toUpperCase()} ${proxyInfo.host}:${port}";
+      }
+      return "DIRECT";
+    }
+  `;
+
   return new Promise((resolve, reject) => {
     chrome.proxy.settings.set({
       value: {
-        mode: "fixed_servers",
-        rules: {
-          singleProxy: {
-            scheme: chromeScheme,
-            host: proxyInfo.host,
-            port: parseInt(proxyInfo.port, 10),
-          },
-          // Bypass localhost — evita roubar nossa request ao painel
-          bypassList: ["localhost", "127.0.0.1", "<local>"],
+        mode: "pac_script",
+        pacScript: {
+          data: pacScript,
+          mandatory: false,
         },
       },
       scope: "regular",
