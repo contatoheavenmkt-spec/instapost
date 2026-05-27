@@ -29,6 +29,13 @@ services:
       # Bind só em 127.0.0.1 — fica invisível pra internet,
       # só o Nginx do host consegue acessar.
       - "127.0.0.1:8000:8000"
+    healthcheck:
+      # Worker depende disso ficar "healthy" antes de subir (anti race condition)
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/health',timeout=2).status==200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+      start_period: 15s
 
   worker:
     # Reusa a mesma imagem do app (já tem instagrapi, ffmpeg, requirements.txt)
@@ -36,7 +43,10 @@ services:
     container_name: insta-poster-worker
     restart: unless-stopped
     depends_on:
-      - app
+      app:
+        # Espera o app ficar HEALTHY (não só "started") — evita worker tentar
+        # heartbeat antes do uvicorn aceitar conexão.
+        condition: service_healthy
     command: ["python", "worker.py"]
     environment:
       # Fala com o app via rede interna do Docker (sem passar pelo nginx/HTTPS)

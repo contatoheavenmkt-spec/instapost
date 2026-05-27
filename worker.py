@@ -1781,10 +1781,27 @@ def main():
     print(f"=" * 60)
     print()
 
-    # Heartbeat inicial pra validar token
-    info = heartbeat()
+    # Heartbeat inicial com retry (até 60s) — cobre race condition em docker compose:
+    # worker pode iniciar antes do app terminar de subir (FastAPI demora ~5-10s).
+    # Sem retry, worker morre com exit(2) e Docker fica recriando container.
+    info = None
+    MAX_BOOTSTRAP_ATTEMPTS = 30  # 30 * 2s = 60s de tolerância
+    for attempt in range(MAX_BOOTSTRAP_ATTEMPTS):
+        info = heartbeat()
+        if info:
+            break
+        if attempt == 0:
+            print(f"Aguardando servidor responder... (até {MAX_BOOTSTRAP_ATTEMPTS * 2}s)")
+        elif (attempt + 1) % 5 == 0:
+            print(f"  ainda tentando ({attempt + 1}/{MAX_BOOTSTRAP_ATTEMPTS})...")
+        time.sleep(2)
+
     if not info:
-        print("Heartbeat inicial falhou. Verifica SERVER_URL e WORKER_TOKEN.")
+        print(f"Heartbeat inicial falhou após {MAX_BOOTSTRAP_ATTEMPTS * 2}s.")
+        print("Verifica:")
+        print(f"  - SERVER_URL acessível: {SERVER_URL}")
+        print(f"  - WORKER_TOKEN válido (gerado em /workers do painel)")
+        print(f"  - App docker container está rodando")
         sys.exit(2)
     print(f"✓ Conectado (worker_id: {info.get('worker_id')})")
     print(f"  Aguardando jobs… ({WORKER_CONCURRENCY} thread(s), poll {POLL_INTERVAL_SECONDS}s)")
