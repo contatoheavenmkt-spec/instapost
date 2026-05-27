@@ -3521,6 +3521,87 @@ def api_worker_job_result(job_id: str, payload: WorkerResultIn, request: Request
     return {"ok": True}
 
 
+# ---------- SESSION SYNC (worker <-> servidor central) ----------
+
+class WorkerSessionUploadIn(BaseModel):
+    username: str
+    session_data: dict
+
+
+@app.post("/api/worker/sessions/upload")
+def api_worker_session_upload(payload: WorkerSessionUploadIn, request: Request):
+    """Worker envia sessão salva localmente pro servidor central.
+    Permite que outros workers (em outros PCs) baixem essa sessão depois,
+    mantendo todas as máquinas sincronizadas."""
+    w = _require_worker(request)
+    safe_username = "".join(c for c in (payload.username or "").lower() if c.isalnum() or c in "._-")
+    if not safe_username:
+        raise HTTPException(400, "username inválido")
+
+    session_data = payload.session_data or {}
+    # Valida que tem o mínimo pra ser uma sessão útil
+    auth_data = session_data.get("authorization_data") or {}
+    if not auth_data.get("sessionid"):
+        raise HTTPException(400, "session_data sem sessionid — sessão inválida")
+
+    from core import paths as _paths
+    # Acha workspace que tem essa conta
+    ws_slug = None
+    for slug in _paths.list_workspace_slugs():
+        acc_file = _paths.accounts_file(slug)
+        if acc_file.exists():
+            try:
+                accs = json.loads(acc_file.read_text(encoding="utf-8"))
+                if any(a.get("username", "").lower() == safe_username for a in accs):
+                    ws_slug = slug
+                    break
+            except Exception:
+                pass
+    if not ws_slug:
+        ws_slug = "default"
+
+    sessions_path = _paths.sessions_dir(ws_slug)
+    session_file = sessions_path / f"{safe_username}.json"
+
+    # Backup do anterior se existir
+    if session_file.exists():
+        try:
+            backup = session_file.with_suffix(".json.bak")
+            backup.write_bytes(session_file.read_bytes())
+        except Exception:
+            pass
+
+    session_file.write_text(json.dumps(session_data, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[sync] sessão recebida do worker: @{safe_username} ws={ws_slug} worker={w.name}")
+    return {"ok": True, "username": safe_username, "workspace_slug": ws_slug}
+
+
+@app.get("/api/worker/sessions/download")
+def api_worker_session_download(request: Request, username: str):
+    """Worker baixa sessão do servidor central (salva por outro worker ou extensão).
+    Permite que um worker novo use sessão criada em outra máquina."""
+    _require_worker(request)
+    safe_user = "".join(c for c in (username or "").lower() if c.isalnum() or c in "._-")
+    if not safe_user:
+        raise HTTPException(400, "username inválido")
+
+    from core import paths as _paths
+    # Procura sessão em qualquer workspace
+    for slug in _paths.list_workspace_slugs():
+        session_file = _paths.sessions_dir(slug) / f"{safe_user}.json"
+        if session_file.exists():
+            try:
+                data = json.loads(session_file.read_text(encoding="utf-8"))
+                # Só retorna se tiver sessionid válido
+                auth_data = data.get("authorization_data") or {}
+                if auth_data.get("sessionid"):
+                    print(f"[sync] sessão enviada pro worker: @{safe_user} ws={slug}")
+                    return {"ok": True, "username": safe_user, "workspace_slug": slug, "session_data": data}
+            except Exception:
+                pass
+    raise HTTPException(404, "Sessão não encontrada no servidor")
+
+
 # ---------- REMOTE JOBS (criado pelo painel, executado por worker) ----------
 
 class RemoteJobIn(BaseModel):

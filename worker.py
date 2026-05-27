@@ -217,6 +217,51 @@ def report_step(job_id: str, step: str):
         pass
 
 
+# ----------- Session sync (worker <-> servidor central) -----------
+
+def _upload_session_to_server(username: str, session_data: dict):
+    """Best-effort: envia sessão pro servidor central pra sincronizar entre workers.
+    Se falhar, não impede nada — sessão local continua funcionando."""
+    try:
+        r = post("/api/worker/sessions/upload", {"username": username, "session_data": session_data})
+        if r.status_code == 200:
+            print(f"[sync] ✓ sessão de @{username} enviada pro servidor")
+        else:
+            print(f"[sync] ⚠️ upload falhou HTTP {r.status_code}: {r.text[:200]}")
+    except Exception as e:
+        print(f"[sync] ⚠️ upload falhou: {e}")
+
+
+def _download_session_from_server(username: str) -> bool:
+    """Tenta baixar sessão do servidor central se não existir localmente.
+    Permite que worker novo use sessão criada em outro PC.
+    Retorna True se baixou com sucesso."""
+    try:
+        r = get(f"/api/worker/sessions/download?username={username}")
+        if r.status_code != 200:
+            return False
+        data = r.json()
+        session_data = data.get("session_data")
+        if not session_data:
+            return False
+        # Salva localmente na estrutura de workspaces
+        project_root = Path(__file__).resolve().parent
+        data_dir = Path(os.environ.get("DATA_DIR", str(project_root)))
+        ws_slug = data.get("workspace_slug", "default")
+        target_dir = data_dir / "workspaces" / ws_slug / "sessions"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        session_file = target_dir / f"{username}.json"
+        session_file.write_text(
+            json.dumps(session_data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(f"[sync] ✓ sessão de @{username} baixada do servidor (ws={ws_slug})")
+        return True
+    except Exception as e:
+        print(f"[sync] download falhou ({e}) — seguindo sem sessão remota")
+        return False
+
+
 # ----------- Download media -----------
 
 def download_media(url: str, dest: Path):
@@ -270,6 +315,10 @@ def execute_job(job: dict):
         if cached is not None:
             log(f"♻️ sessão Insta em cache (sem relogin)")
             return cached
+        # Sync: se não tem sessão local, tenta baixar do servidor central
+        if not _find_session_file(username):
+            if _download_session_from_server(username):
+                log("📥 sessão sincronizada do servidor")
         report_step(job_id, "logging")
         cl = get_client(
             username=username,
@@ -290,6 +339,14 @@ def execute_job(job: dict):
             cl = do_login()
             info = cl.account_info()
             log(f"✅ conectado como @{info.username} ({info.full_name})")
+            # Sync: envia sessão pro servidor pra outros workers usarem
+            try:
+                _sess_path = _find_session_file(username)
+                if _sess_path:
+                    _sess_data = json.loads(_sess_path.read_text(encoding="utf-8"))
+                    _upload_session_to_server(username, _sess_data)
+            except Exception:
+                pass
             report_result(job_id, True, media_id="session_ok")
         except Exception as e:
             log(f"❌ falha conexão: {e}")
@@ -540,6 +597,10 @@ def execute_job(job: dict):
         cl = cached
         log(f"♻️ sessão Insta em cache (sem relogin)")
     else:
+        # Sync: se não tem sessão local, tenta baixar do servidor central
+        if not _find_session_file(username):
+            if _download_session_from_server(username):
+                log("📥 sessão sincronizada do servidor")
         report_step(job_id, "logging")
         try:
             log(f"fazendo login no Instagram (sessão local, se existir)")
@@ -1542,6 +1603,11 @@ def _save_session_from_chrome(username: str) -> tuple[bool, str]:
             except Exception:
                 pass
         session_file.write_text(json.dumps(session_data, ensure_ascii=False, indent=2), encoding="utf-8")
+        # Sync: envia sessão pro servidor central pra outros workers usarem
+        try:
+            _upload_session_to_server(safe, session_data)
+        except Exception as _sync_err:
+            print(f"[sync] ⚠️ upload pro servidor falhou ({_sync_err}) — sessão local OK")
         return True, f"Sessão salva em {session_file.name} ({len(ig_cookies)} cookies, sessionid: ...{sessionid[-12:]})"
     finally:
         try:
