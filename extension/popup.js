@@ -177,7 +177,17 @@ async function onAccountClick(username) {
     _activeAccount = username;
     await setConfig({ last_workspace: ws });
 
-    // PASSO 2: tem cookies na VPS? Baixa + injeta.
+    // PASSO 2: aplica fingerprint da conta (UA via DNR + content script)
+    const fp = acc.browser_fingerprint;
+    if (fp) {
+      try {
+        await chrome.runtime.sendMessage({ action: "setUARule", user_agent: fp.user_agent });
+      } catch (e) {
+        console.warn("setUARule falhou:", e.message);
+      }
+    }
+
+    // PASSO 3: tem cookies na VPS? Baixa + injeta.
     if (acc.has_session) {
       if (action) action.innerHTML = '<span class="spinner"></span> baixando cookies';
       try {
@@ -191,8 +201,12 @@ async function onAccountClick(username) {
             cookies: cookieResp.cookies,
           });
           if (!inj?.ok) throw new Error(inj?.error || "Falha injetando cookies");
-          // Sucesso — abre IG já logado direto no perfil
-          chrome.tabs.create({ url: "https://www.instagram.com/" });
+          // Sucesso — abre IG já logado direto no perfil COM fingerprint aplicado
+          await chrome.runtime.sendMessage({
+            action: "openInstaWithFingerprint",
+            url: "https://www.instagram.com/",
+            fingerprint: fp,
+          });
           await refreshProxyBanner();
           const savedAt = cookieResp.saved_at
             ? ` (salvo ${new Date(cookieResp.saved_at * 1000).toLocaleDateString('pt-BR')})`
@@ -201,15 +215,17 @@ async function onAccountClick(username) {
           return;
         }
       } catch (err) {
-        // 404 = sessão não existe (race contra refresh do extension-info)
-        // 400 = sessão corrompida
-        // Cai pro fluxo de login manual abaixo
         console.warn("Cookies download falhou:", err.message);
       }
     }
 
-    // PASSO 3 (fallback): abre página de login pra usuário logar manual
-    chrome.tabs.create({ url: "https://www.instagram.com/accounts/login/" });
+    // PASSO 4 (fallback): abre página de login pra usuário logar manual
+    // (também com fingerprint aplicado)
+    await chrome.runtime.sendMessage({
+      action: "openInstaWithFingerprint",
+      url: "https://www.instagram.com/accounts/login/",
+      fingerprint: fp,
+    });
     await refreshProxyBanner();
     msg(`Proxy de @${username} ativo — loga no Insta + clica "Salvar cookies"`, "info");
   } catch (e) {
@@ -260,13 +276,12 @@ async function captureCookies() {
 
     msg(`✅ Cookies de @${result.username} salvos na VPS (${result.cookies_count} cookies). VPS já pode postar.`, "success");
 
-    // Limpa proxy automaticamente
+    // Limpa proxy + UA rule automaticamente
     setTimeout(async () => {
-      try {
-        await chrome.runtime.sendMessage({ action: "clearProxy" });
-        _activeAccount = null;
-        await refreshProxyBanner();
-      } catch {}
+      try { await chrome.runtime.sendMessage({ action: "clearProxy" }); } catch {}
+      try { await chrome.runtime.sendMessage({ action: "clearUARule" }); } catch {}
+      _activeAccount = null;
+      await refreshProxyBanner();
     }, 1500);
   } catch (e) {
     msg("Erro: " + e.message, "error");
@@ -279,9 +294,10 @@ async function captureCookies() {
 async function manualClearProxy() {
   try {
     await chrome.runtime.sendMessage({ action: "clearProxy" });
+    await chrome.runtime.sendMessage({ action: "clearUARule" });
     _activeAccount = null;
     await refreshProxyBanner();
-    msg("Proxy removido", "info");
+    msg("Proxy + fingerprint removidos", "info");
   } catch (e) {
     msg("Erro: " + e.message, "error");
   }

@@ -258,6 +258,98 @@ async function injectCookies(cookieList) {
 }
 
 // =====================================================
+// FINGERPRINT SPOOFING (UA via declarativeNetRequest)
+// =====================================================
+//
+// Override Sec-CH-UA + User-Agent headers no nível HTTP via declarativeNetRequest.
+// Complementa o content_script.js que faz override no JS (navigator.userAgent etc).
+//
+// declarativeNetRequest tem ID estável que substituímos sempre — apenas 1 rule
+// ativa pra IG por vez. Quando proxy é limpo, rule também é removido.
+
+const DNR_RULE_ID = 17001;  // ID fixo pra essa rule
+
+async function setUARule(userAgent) {
+  if (!userAgent || !chrome.declarativeNetRequest) return;
+  try {
+    await chrome.declarativeNetRequest.updateDynamicRules({
+      removeRuleIds: [DNR_RULE_ID],
+      addRules: [{
+        id: DNR_RULE_ID,
+        priority: 1,
+        action: {
+          type: "modifyHeaders",
+          requestHeaders: [
+            { header: "User-Agent", operation: "set", value: userAgent },
+          ],
+        },
+        condition: {
+          urlFilter: "instagram.com",
+          resourceTypes: [
+            "main_frame", "sub_frame", "stylesheet", "script", "image",
+            "font", "object", "xmlhttprequest", "ping", "csp_report", "media",
+            "websocket", "other",
+          ],
+        },
+      }],
+    });
+  } catch (e) {
+    console.warn("[bg] setUARule falhou:", e.message);
+  }
+}
+
+async function clearUARule() {
+  if (!chrome.declarativeNetRequest) return;
+  try {
+    await chrome.declarativeNetRequest.updateDynamicRules({
+      removeRuleIds: [DNR_RULE_ID],
+    });
+  } catch (e) {
+    console.warn("[bg] clearUARule falhou:", e.message);
+  }
+}
+
+// =====================================================
+// FINGERPRINT TAB — abre IG com window.name = fingerprint
+// =====================================================
+
+async function openInstaWithFingerprint(url, fingerprint) {
+  // Cria a aba normal primeiro
+  const tab = await new Promise((resolve, reject) => {
+    chrome.tabs.create({ url, active: true }, (t) => {
+      if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+      else resolve(t);
+    });
+  });
+  // Injeta o fingerprint via chrome.scripting (roda ANTES dos scripts da página
+  // por causa do run_at: "document_start" no content_script.js do manifest).
+  // Aqui usamos uma estratégia complementar: injetar via window.postMessage
+  // assim que a aba estiver pronta.
+  if (fingerprint) {
+    try {
+      // Injecta um script que coloca window.name = "__IP_FP:<json>" ANTES da
+      // página carregar. content_script.js no MAIN world em document_start vai
+      // ler isso. Como tabs.create já navegou, a página pode ter começado a
+      // carregar — injetamos no MAIN world via scripting.executeScript no
+      // document_start estágio.
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id, allFrames: false },
+        world: "MAIN",
+        injectImmediately: true,
+        func: (fp) => {
+          window.__IP_FP_PAYLOAD = fp;
+          window.postMessage({ type: "__IP_FP_SET", payload: fp }, "*");
+        },
+        args: [fingerprint],
+      });
+    } catch (e) {
+      console.warn("[bg] inject fingerprint via executeScript falhou:", e.message);
+    }
+  }
+  return tab;
+}
+
+// =====================================================
 // MESSAGE ROUTER
 // =====================================================
 
@@ -295,6 +387,24 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       if (request.action === "clearInstaCookies") {
         const n = await clearInstaCookies();
         sendResponse({ ok: true, cleared: n });
+        return;
+      }
+      if (request.action === "setUARule") {
+        await setUARule(request.user_agent);
+        sendResponse({ ok: true });
+        return;
+      }
+      if (request.action === "clearUARule") {
+        await clearUARule();
+        sendResponse({ ok: true });
+        return;
+      }
+      if (request.action === "openInstaWithFingerprint") {
+        const tab = await openInstaWithFingerprint(
+          request.url || "https://www.instagram.com/",
+          request.fingerprint || null,
+        );
+        sendResponse({ ok: true, tab_id: tab.id });
         return;
       }
       sendResponse({ ok: false, error: "unknown action" });

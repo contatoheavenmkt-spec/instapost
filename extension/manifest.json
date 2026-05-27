@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "Insta Poster — Save Sessão",
-  "version": "1.4.0",
-  "description": "Captura cookies do instagram.com e envia pro painel Insta Poster. Configura proxy automático da conta antes de logar pra IP nascer consistente.",
-  "permissions": ["cookies", "storage", "activeTab", "proxy", "webRequest", "tabs"],
+  "version": "1.5.0",
+  "description": "Captura cookies do Instagram, proxy + fingerprint isolado por conta. Anti-clustering.",
+  "permissions": ["cookies", "storage", "activeTab", "proxy", "webRequest", "tabs", "scripting", "declarativeNetRequestWithHostAccess"],
   "host_permissions": [
     "https://*.instagram.com/*",
     "https://instagram.com/*",
@@ -11,6 +11,15 @@
     "http://localhost:8000/*",
     "http://127.0.0.1:8000/*",
     "<all_urls>"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://*.instagram.com/*", "https://instagram.com/*"],
+      "js": ["content_script.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN"
+    }
   ],
   "action": {
     "default_popup": "popup.html",

@@ -1155,6 +1155,13 @@ def api_sessions_upload(payload: ExtensionSessionIn, request: Request):
     import time as _time
     import uuid as _uuid
 
+    # Gera fingerprint determinístico pro browser (estável por conta)
+    try:
+        from core.browser_fingerprint import generate_fingerprint
+        browser_fp = generate_fingerprint(safe_username, ws_slug)
+    except Exception as _fp_err:
+        browser_fp = None
+
     # session.json no formato esperado pelo instagrapi + flags manually_saved
     session_data = {
         "uuids": {
@@ -1199,6 +1206,9 @@ def api_sessions_upload(payload: ExtensionSessionIn, request: Request):
         "captured_user_agent": (payload.user_agent or "")[:240],
         "uploaded_by": user.get("email"),
         "saved_at": int(_time.time()),
+        # Browser fingerprint determinístico — extensão usa pra spoofar UA/screen/etc
+        # na próxima vez que abrir Instagram nessa conta (anti-clustering)
+        "browser_fingerprint": browser_fp,
     }
 
     # Path final no workspace
@@ -1308,6 +1318,13 @@ def api_extension_info(request: Request):
                                 session_saved_at = sd.get("saved_at")
                         except Exception:
                             pass
+                    # Browser fingerprint determinístico — gera sempre (mesmo user = mesmo fp)
+                    # Extensão usa pra spoofar UA/screen/etc antes de abrir a aba do IG
+                    try:
+                        from core.browser_fingerprint import generate_fingerprint as _gen_fp
+                        browser_fp = _gen_fp(safe_user, ws["slug"])
+                    except Exception:
+                        browser_fp = None
                     out_accounts.append({
                         "username": a.get("username"),
                         "workspace_slug": ws["slug"],
@@ -1315,6 +1332,7 @@ def api_extension_info(request: Request):
                         "proxy": proxy_info,
                         "has_session": has_session,
                         "session_saved_at": session_saved_at,
+                        "browser_fingerprint": browser_fp,
                     })
         except Exception:
             pass
