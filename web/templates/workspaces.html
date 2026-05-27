@@ -7,9 +7,14 @@
     <h1 class="h-page">Workspaces</h1>
     <p class="text-sm text-soft mt-1">Cada workspace é uma pasta totalmente isolada. Contas, mídias e sessões NÃO se misturam entre workspaces.</p>
   </div>
-  <button class="btn btn-accent" onclick="openCreate()">
-    <i data-lucide="folder-plus" class="icon"></i> Novo workspace
-  </button>
+  <div class="flex items-center gap-2">
+    <button class="btn btn-ghost" onclick="onCleanupOrphans()" title="Sweep manual: remove jobs/schedules/links/health de contas que foram deletadas. Roda automático 1x/dia, esse botão força agora.">
+      <i data-lucide="trash-2" class="icon"></i> Limpar dados órfãos
+    </button>
+    <button class="btn btn-accent" onclick="openCreate()">
+      <i data-lucide="folder-plus" class="icon"></i> Novo workspace
+    </button>
+  </div>
 </div>
 
 <div class="surface overflow-hidden">
@@ -170,6 +175,36 @@
       toast('Workspace apagado', 'success');
       await load();
     } catch (e) { toast(e.message, 'error'); }
+  }
+
+  async function onCleanupOrphans() {
+    const ok = await confirmModal({
+      title: 'Limpar dados órfãos?',
+      message: 'Remove jobs, schedules, links, snapshots de saúde e arquivos de sessão de contas que <strong>não existem mais</strong> em nenhum workspace.<br><br>Isso é seguro — nada de contas ativas será tocado. Também roda automático 1x/dia.',
+      confirmText: 'Limpar agora',
+    });
+    if (!ok) return;
+    try {
+      const r = await api('/api/admin/cleanup-orphans', { method: 'POST' });
+      const s = r.summary || {};
+      const total = (s.jobs_removed || 0) + (s.schedules_removed || 0) +
+                    (s.session_files_removed || 0) + (s.sticky_files_removed || 0) +
+                    (s.health_files_removed || 0) + (s.links_removed || 0);
+      if (total === 0) {
+        toast('Tudo limpo já — nada órfão encontrado', 'info');
+      } else {
+        const parts = [];
+        if (s.jobs_removed) parts.push(`${s.jobs_removed} jobs`);
+        if (s.schedules_removed) parts.push(`${s.schedules_removed} schedules`);
+        if (s.session_files_removed) parts.push(`${s.session_files_removed} sessions`);
+        if (s.sticky_files_removed) parts.push(`${s.sticky_files_removed} sticky`);
+        if (s.health_files_removed) parts.push(`${s.health_files_removed} health`);
+        if (s.links_removed) parts.push(`${s.links_removed} links`);
+        toast(`✓ Removido: ${parts.join(', ')}`, 'success');
+      }
+    } catch (e) {
+      toast('Erro: ' + e.message, 'error');
+    }
   }
 
   load();

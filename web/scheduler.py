@@ -203,6 +203,41 @@ class ScheduleManager:
             self._save()
         return sched
 
+    def delete_by_account(self, username: str, workspace_slug: Optional[str] = None) -> int:
+        """Remove schedules de uma conta especifica. Util pra cleanup ao deletar conta."""
+        if not username:
+            return 0
+        with self._lock:
+            before = len(self._items)
+            self._items = [
+                s for s in self._items
+                if s.account != username
+                or (workspace_slug and s.workspace_slug != workspace_slug)
+            ]
+            removed = before - len(self._items)
+            if removed:
+                self._save()
+            return removed
+
+    def purge_orphans(self, valid_accounts_by_ws: dict) -> int:
+        """Remove schedules com account que nao existe mais no respectivo workspace.
+        Schedules com account=None (todas as contas) NAO sao tocados."""
+        with self._lock:
+            before = len(self._items)
+            kept = []
+            for s in self._items:
+                if not s.account:  # all-accounts schedule, keep
+                    kept.append(s)
+                    continue
+                valid_set = valid_accounts_by_ws.get(s.workspace_slug, set())
+                if s.account in valid_set:
+                    kept.append(s)
+            self._items = kept
+            removed = before - len(kept)
+            if removed:
+                self._save()
+            return removed
+
     def cancel(self, schedule_id: str) -> bool:
         with self._lock:
             for s in self._items:
@@ -256,7 +291,12 @@ class ScheduleManager:
             target=self._zombie_loop, daemon=True, name="zombie_cleanup"
         )
         self._zombie_thread.start()
-        print(f"[scheduler] started (tick {TICK_SECONDS}s) + automations + sync + diversify + health + zombie loops")
+        # Thread separada pra cleanup periodico de orfaos (1x/dia)
+        self._orphan_thread = threading.Thread(
+            target=self._orphan_cleanup_loop, daemon=True, name="orphan_cleanup"
+        )
+        self._orphan_thread.start()
+        print(f"[scheduler] started (tick {TICK_SECONDS}s) + automations + sync + diversify + health + zombie + orphan loops")
 
     def stop(self):
         self._stop_event.set()
@@ -1297,6 +1337,144 @@ class ScheduleManager:
                 print(f"[zombie] erro: {e}")
             # Tick a cada 2min
             self._stop_event.wait(2 * 60)
+
+    # ===================== ORPHAN CLEANUP (1x/dia) =====================
+
+    def _orphan_cleanup_loop(self):
+        """1x/dia: limpa jobs/schedules/health/sessions de contas que nao existem
+        mais. Cobre o caso de deletes antigos (antes de termos purge integrado)
+        + qualquer drift entre arquivos.
+
+        Tambem trunca posted_media de cada conta pra ultimos 365 dias.
+        """
+        import time as _t
+        _t.sleep(5 * 60)  # 5min apos startup pra nao briga com outras loops
+        while not self._stop_event.is_set():
+            try:
+                self._orphan_cleanup_tick()
+            except Exception as e:
+                print(f"[orphan-cleanup] erro: {e}")
+            # 1x a cada 24h
+            self._stop_event.wait(24 * 3600)
+
+    def _orphan_cleanup_tick(self):
+        """Roda 1 ciclo de cleanup completo."""
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        import json as _json
+        from core import paths as _paths
+        from web.workspaces import manager as _ws_manager
+        from web.remote_jobs import manager as _rjob_manager
+        from web.shortener import manager as _link_manager
+
+        # Mapa de contas validas por workspace
+        valid_accounts_by_ws: dict = {}
+        all_users = set()
+        for ws in _ws_manager.list():
+            slug = ws["slug"]
+            accs_file = _paths.accounts_file(slug)
+            if not accs_file.exists():
+                valid_accounts_by_ws[slug] = set()
+                continue
+            try:
+                accs = _json.loads(accs_file.read_text(encoding="utf-8"))
+                user_set = {a.get("username", "").lower() for a in accs if a.get("username")}
+                valid_accounts_by_ws[slug] = user_set
+                all_users.update(user_set)
+            except Exception:
+                valid_accounts_by_ws[slug] = set()
+
+        # 1) Jobs orfaos
+        jobs_removed = _rjob_manager.purge_orphans(valid_accounts_by_ws)
+
+        # 2) Schedules orfaos
+        scheds_removed = self.purge_orphans(valid_accounts_by_ws)
+
+        # 3) Arquivos orfaos (session/sticky/health)
+        files_removed = 0
+        for slug, valid_users in valid_accounts_by_ws.items():
+            sessions_dir_p = _paths.sessions_dir(slug)
+            if sessions_dir_p.exists():
+                for f in sessions_dir_p.iterdir():
+                    if not f.is_file():
+                        continue
+                    base = f.stem
+                    if base.endswith("_sticky"):
+                        user = base[:-len("_sticky")]
+                        if user.lower() not in valid_users:
+                            try: f.unlink(); files_removed += 1
+                            except Exception: pass
+                    elif f.suffix in (".json", ".bak"):
+                        # Pula extensoes .bak (sao backups)
+                        user = base.split(".")[0]
+                        if user.lower() not in valid_users:
+                            try: f.unlink(); files_removed += 1
+                            except Exception: pass
+            health_dir = _paths.workspace_root(slug) / "health"
+            if health_dir.exists():
+                for f in health_dir.iterdir():
+                    if f.is_file() and f.suffix == ".json":
+                        user = f.stem
+                        if user.lower() not in valid_users:
+                            try: f.unlink(); files_removed += 1
+                            except Exception: pass
+
+        # 4) Links orfaos
+        links_removed = 0
+        try:
+            with _link_manager._lock:
+                orphan_slugs = [
+                    slug for slug, link in _link_manager._items.items()
+                    if link.account and link.account.lower() not in all_users
+                ]
+                for s in orphan_slugs:
+                    del _link_manager._items[s]
+                if orphan_slugs:
+                    _link_manager._save()
+                links_removed = len(orphan_slugs)
+        except Exception as e:
+            print(f"[orphan-cleanup] erro limpando links: {e}")
+
+        # 5) Trim posted_media de cada conta (mantem ultimos 365 dias)
+        posted_trimmed_count = 0
+        cutoff = _dt.now(_tz.utc) - _td(days=365)
+        for ws_slug, _ in valid_accounts_by_ws.items():
+            accs_file = _paths.accounts_file(ws_slug)
+            if not accs_file.exists():
+                continue
+            try:
+                accs = _json.loads(accs_file.read_text(encoding="utf-8"))
+                changed = False
+                for a in accs:
+                    posted = a.get("posted_media") or []
+                    if len(posted) < 50:
+                        continue  # nem trim — economiza CPU
+                    kept = []
+                    for p in posted:
+                        ts = p.get("posted_at")
+                        if not ts:
+                            kept.append(p)
+                            continue
+                        try:
+                            dt = _dt.fromisoformat(ts)
+                            if dt.tzinfo is None:
+                                dt = dt.astimezone()
+                            if dt.astimezone(_tz.utc) >= cutoff:
+                                kept.append(p)
+                            else:
+                                posted_trimmed_count += 1
+                        except Exception:
+                            kept.append(p)
+                    if len(kept) != len(posted):
+                        a["posted_media"] = kept
+                        changed = True
+                if changed:
+                    accs_file.write_text(_json.dumps(accs, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception as e:
+                print(f"[orphan-cleanup] trim posted_media ws={ws_slug}: {e}")
+
+        total = jobs_removed + scheds_removed + files_removed + links_removed + posted_trimmed_count
+        if total > 0:
+            print(f"[orphan-cleanup] removeu: jobs={jobs_removed} scheds={scheds_removed} files={files_removed} links={links_removed} posted={posted_trimmed_count}")
 
     # ===================== HEALTH TRACKER (SHADOW BAN DETECTOR) =====================
 

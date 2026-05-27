@@ -445,6 +445,40 @@ class RemoteJobManager:
             self._save()
             return True
 
+    def delete_by_account(self, username: str, workspace_slug: Optional[str] = None) -> int:
+        """Remove TODOS os jobs (qualquer status) de uma conta específica.
+        Usado quando user deleta uma conta — limpa histórico órfão.
+        Se workspace_slug for fornecido, scoped nele. Retorna número removido."""
+        if not username:
+            return 0
+        with self._lock:
+            ids_to_delete = [
+                jid for jid, j in self._items.items()
+                if j.account_username == username
+                and (not workspace_slug or j.workspace_slug == workspace_slug)
+            ]
+            for jid in ids_to_delete:
+                self._items.pop(jid, None)
+            if ids_to_delete:
+                self._save()
+            return len(ids_to_delete)
+
+    def purge_orphans(self, valid_accounts_by_ws: dict[str, set[str]]) -> int:
+        """Remove jobs cujo (account_username, workspace_slug) não existe mais.
+        valid_accounts_by_ws: { workspace_slug: {set de usernames ativos} }.
+        Útil pra sweep periódico — pega jobs órfãos que vieram de delete sem cleanup."""
+        with self._lock:
+            ids_to_delete = []
+            for jid, j in self._items.items():
+                valid_set = valid_accounts_by_ws.get(j.workspace_slug, set())
+                if j.account_username not in valid_set:
+                    ids_to_delete.append(jid)
+            for jid in ids_to_delete:
+                self._items.pop(jid, None)
+            if ids_to_delete:
+                self._save()
+            return len(ids_to_delete)
+
     def dedupe_pending(self, workspace_slug: Optional[str] = None) -> int:
         """Remove jobs pending/claimed duplicados: pra cada par (account, video_name)
         mantém apenas 1 job ativo, deleta os outros.

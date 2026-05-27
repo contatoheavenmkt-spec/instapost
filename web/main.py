@@ -1638,17 +1638,121 @@ def api_toggle_warmup(username: str):
     raise HTTPException(404, "Conta não encontrada")
 
 
+def _purge_account_data(username: str, workspace_slug: Optional[str] = None) -> dict:
+    """Limpa TUDO que pertence a uma conta. Idempotente — pode chamar várias vezes.
+
+    Inclui:
+    - session.json + .bak
+    - <user>_sticky.txt (sticky session tracker)
+    - health/<user>.json (snapshots de shadow ban)
+    - profile_pics/<user>.* (avatares baixados)
+    - remote_jobs com essa account
+    - schedules com essa account
+    - links criados pra essa account
+    - ip_pool: release ownership
+
+    Retorna dict com contagens do que foi removido (debug + audit log).
+    """
+    from core import paths as _paths
+    from core import ip_pool as _ip_pool
+    from web.shortener import manager as _link_manager
+
+    ws = workspace_slug or _paths.get_workspace() or "default"
+    safe_user = "".join(c for c in (username or "").lower() if c.isalnum() or c in "._-")
+    if not safe_user:
+        return {"error": "username inválido"}
+
+    counts = {"session": 0, "sticky": 0, "health": 0, "pics": 0, "links": 0, "jobs": 0, "schedules": 0, "ip_pool": 0}
+
+    # session.json + .bak
+    sessions_path = _paths.sessions_dir(ws)
+    for fname in (f"{safe_user}.json", f"{safe_user}.json.bak"):
+        p = sessions_path / fname
+        if p.exists():
+            try:
+                p.unlink()
+                counts["session"] += 1
+            except Exception:
+                pass
+
+    # sticky session tracker
+    sticky = sessions_path / f"{safe_user}_sticky.txt"
+    if sticky.exists():
+        try:
+            sticky.unlink()
+            counts["sticky"] = 1
+        except Exception:
+            pass
+
+    # health snapshots
+    health_dir = _paths.workspace_root(ws) / "health"
+    if health_dir.exists():
+        health_file = health_dir / f"{safe_user}.json"
+        if health_file.exists():
+            try:
+                health_file.unlink()
+                counts["health"] = 1
+            except Exception:
+                pass
+
+    # profile pics — vários nomes possíveis (timestamped)
+    pics_dir = _paths.profile_pics_dir(ws)
+    if pics_dir.exists():
+        for p in pics_dir.glob(f"{safe_user}_*"):
+            try:
+                p.unlink()
+                counts["pics"] += 1
+            except Exception:
+                pass
+        for p in pics_dir.glob(f"{safe_user}.*"):
+            try:
+                p.unlink()
+                counts["pics"] += 1
+            except Exception:
+                pass
+
+    # links
+    try:
+        counts["links"] = _link_manager.delete_by_account(safe_user, workspace_slug=ws)
+    except Exception as e:
+        print(f"[purge] erro limpando links de @{safe_user}: {e}")
+
+    # remote jobs
+    try:
+        counts["jobs"] = rjob_manager.delete_by_account(safe_user, workspace_slug=ws)
+    except Exception as e:
+        print(f"[purge] erro limpando jobs de @{safe_user}: {e}")
+
+    # schedules
+    try:
+        counts["schedules"] = schedule_manager.delete_by_account(safe_user, workspace_slug=ws)
+    except Exception as e:
+        print(f"[purge] erro limpando schedules de @{safe_user}: {e}")
+
+    # ip_pool — release ownership (não deleta IPs, só remove username dos owners)
+    try:
+        _ip_pool.release_account(safe_user)
+        counts["ip_pool"] = 1
+    except Exception as e:
+        print(f"[purge] erro liberando ip_pool de @{safe_user}: {e}")
+
+    total = sum(v for k, v in counts.items() if isinstance(v, int))
+    print(f"[purge] @{safe_user} (ws={ws}) removido: {counts} (total={total})")
+    return counts
+
+
 @app.post("/api/accounts/{username}/delete")
 def api_delete_account(username: str):
+    """Deleta conta + purga TODO dado associado (session, jobs, schedules, links,
+    health, pics, ip_pool). Sem deixar órfãos pra trás."""
     accounts = load_accounts()
     new = [a for a in accounts if a["username"] != username]
     if len(new) == len(accounts):
         raise HTTPException(404, "Conta não encontrada")
     save_accounts(new)
-    session_file = SESSIONS_DIR / f"{username}.json"
-    if session_file.exists():
-        session_file.unlink()
-    return {"ok": True}
+    # Purga tudo associado
+    purged = _purge_account_data(username)
+    return {"ok": True, "purged": purged}
 
 
 # ---------- IMPORTAÇÃO EM MASSA ----------
@@ -2025,12 +2129,121 @@ def api_bulk_delete(payload: BulkUsernames):
     new = [a for a in accounts if a["username"] not in targets]
     save_accounts(new)
     removed = []
+    purge_summary = {}
     for u in targets:
-        f = SESSIONS_DIR / f"{u}.json"
-        if f.exists():
-            f.unlink()
+        purged = _purge_account_data(u)
         removed.append(u)
-    return {"ok": True, "removed": removed, "remaining": len(new)}
+        purge_summary[u] = purged
+    return {"ok": True, "removed": removed, "remaining": len(new), "purge_summary": purge_summary}
+
+
+@app.post("/api/admin/cleanup-orphans")
+def api_cleanup_orphans(user=Depends(auth.require_owner)):
+    """Sweep manual: encontra e remove dados órfãos — jobs/schedules cuja conta
+    foi deletada (ou nunca existiu), arquivos de sessão sem conta correspondente,
+    health snapshots órfãos, links de contas inexistentes. Owner only.
+
+    Útil pra limpar lixo acumulado de contas deletadas ANTES do helper de purge
+    ser introduzido (deletes antigos não limpavam nada além de session.json)."""
+    from core import paths as _paths
+    from web.shortener import manager as _link_manager
+    from web.workspaces import manager as _ws_manager
+
+    summary = {
+        "workspaces_scanned": 0,
+        "jobs_removed": 0,
+        "schedules_removed": 0,
+        "session_files_removed": 0,
+        "sticky_files_removed": 0,
+        "health_files_removed": 0,
+        "links_removed": 0,
+        "details": [],
+    }
+
+    # Constrói mapa { ws_slug: set(usernames ativos) } pra cada workspace
+    valid_accounts_by_ws: dict = {}
+    for ws in _ws_manager.list():
+        slug = ws["slug"]
+        accs_file = _paths.accounts_file(slug)
+        if not accs_file.exists():
+            valid_accounts_by_ws[slug] = set()
+            continue
+        try:
+            accs = json.loads(accs_file.read_text(encoding="utf-8"))
+            valid_accounts_by_ws[slug] = {a.get("username", "").lower() for a in accs if a.get("username")}
+        except Exception:
+            valid_accounts_by_ws[slug] = set()
+        summary["workspaces_scanned"] += 1
+
+    # 1) Jobs órfãos
+    summary["jobs_removed"] = rjob_manager.purge_orphans(valid_accounts_by_ws)
+
+    # 2) Schedules órfãos
+    summary["schedules_removed"] = schedule_manager.purge_orphans(valid_accounts_by_ws)
+
+    # 3) Arquivos de sessão / sticky / health / pics órfãos
+    for slug, valid_users in valid_accounts_by_ws.items():
+        sessions_dir_p = _paths.sessions_dir(slug)
+        if sessions_dir_p.exists():
+            for f in sessions_dir_p.iterdir():
+                if not f.is_file():
+                    continue
+                # f.stem = "<user>" pra .json ou "<user>_sticky" pra .txt
+                base = f.stem
+                if base.endswith("_sticky"):
+                    user = base[:-len("_sticky")]
+                    if user.lower() not in valid_users:
+                        try:
+                            f.unlink()
+                            summary["sticky_files_removed"] += 1
+                            summary["details"].append(f"sticky órfão: ws={slug} user={user}")
+                        except Exception:
+                            pass
+                elif f.suffix == ".json":
+                    user = base
+                    if user.lower() not in valid_users:
+                        try:
+                            f.unlink()
+                            summary["session_files_removed"] += 1
+                            summary["details"].append(f"sessão órfã: ws={slug} user={user}")
+                        except Exception:
+                            pass
+        # Health
+        health_dir = _paths.workspace_root(slug) / "health"
+        if health_dir.exists():
+            for f in health_dir.iterdir():
+                if not f.is_file() or f.suffix != ".json":
+                    continue
+                user = f.stem
+                if user.lower() not in valid_users:
+                    try:
+                        f.unlink()
+                        summary["health_files_removed"] += 1
+                        summary["details"].append(f"health órfão: ws={slug} user={user}")
+                    except Exception:
+                        pass
+
+    # 4) Links órfãos (account não existe em nenhum workspace)
+    all_users = set()
+    for users in valid_accounts_by_ws.values():
+        all_users.update(users)
+    try:
+        with _link_manager._lock:
+            slugs_to_delete = [
+                slug for slug, link in _link_manager._items.items()
+                if link.account and link.account.lower() not in all_users
+            ]
+            for slug in slugs_to_delete:
+                del _link_manager._items[slug]
+            if slugs_to_delete:
+                _link_manager._save()
+            summary["links_removed"] = len(slugs_to_delete)
+    except Exception as e:
+        print(f"[cleanup-orphans] erro limpando links: {e}")
+
+    summary["details"] = summary["details"][:50]  # cap pra UI não estourar
+    print(f"[cleanup-orphans] feito por {user['email']}: {summary}")
+    return {"ok": True, "summary": summary}
 
 
 @app.post("/api/accounts/{username}/test-login")

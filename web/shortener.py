@@ -275,6 +275,22 @@ class LinkManager:
             out.append(link)
         return out
 
+    def delete_by_account(self, username: str, workspace_slug: Optional[str] = None) -> int:
+        """Remove TODOS os links de uma conta específica. Usado em cleanup."""
+        if not username:
+            return 0
+        with self._lock:
+            slugs_to_delete = [
+                slug for slug, link in self._items.items()
+                if link.account == username
+                and (not workspace_slug or link.workspace_slug == workspace_slug)
+            ]
+            for slug in slugs_to_delete:
+                del self._items[slug]
+            if slugs_to_delete:
+                self._save()
+            return len(slugs_to_delete)
+
     def delete(self, slug: str) -> bool:
         with self._lock:
             if slug not in self._items:
