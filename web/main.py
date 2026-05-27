@@ -2389,7 +2389,10 @@ def api_list_links(
 ):
     """Lista links. Se since/until fornecidos, recalcula click_count_filtered
     contando só cliques na janela (mantém click_count total intacto).
-    Filtra pelo workspace ativo — isolamento."""
+    Filtra pelo workspace ativo — isolamento.
+
+    click_count_filtered EXCLUI bots E dedupes — só cliques humanos reais.
+    """
     from core import paths as _paths
     out = []
     raw_links = link_manager.list(workspace_slug=_paths.get_workspace())
@@ -2397,10 +2400,13 @@ def api_list_links(
         d = _link_dict_view(d, request)
         if since or until:
             clicks = d.get("clicks") or []
+            # Só conta cliques REAIS (não-bot E não-duplicate) dentro da janela
             filt = [
                 c for c in clicks
                 if (not since or (c.get("ts") and c["ts"] >= since))
                 and (not until or (c.get("ts") and c["ts"] <= until))
+                and not c.get("is_bot")
+                and not c.get("is_duplicate")
             ]
             d["click_count_filtered"] = len(filt)
             d["clicks_filtered"] = filt

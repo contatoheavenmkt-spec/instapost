@@ -293,10 +293,14 @@
     tbody.innerHTML = filtered.map(l => {
       const isFiltered = _dateSince || _dateUntil;
       const total = l.click_count || 0;
+      const unique = l.unique_clicks || 0;
+      const bots = l.bot_count || 0;
       const inWindow = cc(l);
+      const botBadge = bots > 0 ? `<span class="text-muted text-[10.5px] ml-1" title="${bots} hits de bot/preview (Insta/WhatsApp/etc) excluidos do contador">+${bots} bot</span>` : '';
+      const uniqueBadge = unique > 0 && unique !== total ? `<span class="text-muted text-[10.5px] ml-1" title="IPs unicos (cada usuario clicando varias vezes conta 1)">${unique} uniq</span>` : '';
       const clicksCell = isFiltered
-        ? `<span class="font-semibold">${inWindow}</span> <span class="text-muted text-[11px]" title="total acumulado">/ ${total}</span>`
-        : `<span class="font-semibold">${total}</span>`;
+        ? `<span class="font-semibold">${inWindow}</span> <span class="text-muted text-[11px]" title="total acumulado de cliques reais">/ ${total}</span>${botBadge}`
+        : `<span class="font-semibold">${total}</span>${uniqueBadge}${botBadge}`;
       return `
       <tr>
         <td>
