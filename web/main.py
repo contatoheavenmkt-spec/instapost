@@ -666,6 +666,7 @@ class AccountIn(BaseModel):
     proxy: Optional[str] = None
     active: bool = True
     totp_secret: Optional[str] = None
+    email: Optional[str] = None
 
 
 class BulkUsernames(BaseModel):
@@ -759,6 +760,8 @@ def _account_view(a: dict) -> dict:
         "shadowban_reason": a.get("shadowban_reason"),
         "health_score": int(a.get("health_score", 50)),
         "follower_count": int(a.get("follower_count", 0)),
+        # Email (tempmail pra verificação automática)
+        "email": a.get("email"),
     }
 
 
@@ -862,6 +865,7 @@ def api_add_account(payload: AccountIn):
         "proxy": (payload.proxy or "").strip() or None,
         "active": payload.active,
         "totp_secret": (payload.totp_secret or "").strip() or None,
+        "email": (payload.email or "").strip() or None,
     })
     save_accounts(accounts)
     return {"ok": True, "account": _account_view(accounts[-1])}
@@ -878,6 +882,20 @@ def api_update_totp(username: str, payload: TotpIn):
             if a["username"] == username:
                 a["totp_secret"] = (payload.totp_secret or "").strip() or None
                 return {"ok": True, "has_totp": bool(a["totp_secret"])}
+    raise HTTPException(404, "Conta não encontrada")
+
+
+class EmailIn(BaseModel):
+    email: Optional[str] = None
+
+
+@app.post("/api/accounts/{username}/email")
+def api_update_email(username: str, payload: EmailIn):
+    with accounts_transaction() as accounts:
+        for a in accounts:
+            if a["username"] == username:
+                a["email"] = (payload.email or "").strip() or None
+                return {"ok": True, "email": a["email"]}
     raise HTTPException(404, "Conta não encontrada")
 
 

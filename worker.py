@@ -1634,6 +1634,191 @@ def _save_session_from_chrome(username: str) -> tuple[bool, str]:
             pass
 
 
+def _auto_login_flow(username: str, password: str, email: str = None, proxy: str = None):
+    """Fluxo semi-automático: abre Chrome, preenche login/senha via CDP,
+    espera verificação do IG, busca código no tempmail e preenche.
+
+    Roda em thread separada pra não bloquear o HTTP server."""
+    import websocket as _ws_auto
+
+    print(f"[auto-login] iniciando pra @{username}")
+
+    # 1. Abre Chrome na página de login
+    ok, info = _open_chrome_for_account(
+        username, reset=True, proxy=proxy, clean_mobile=True,
+    )
+    if not ok:
+        print(f"[auto-login] falha abrindo Chrome: {info}")
+        return
+
+    # 2. Espera Chrome carregar e acha a porta de debug
+    safe = "".join(c for c in username if c.isalnum() or c in "._-")
+    profile_dir = CHROME_PROFILES_DIR / safe
+    port_file = profile_dir / "DevToolsActivePort"
+
+    # Espera até 20s pelo DevToolsActivePort
+    deadline = time.time() + 20
+    debug_port = None
+    while time.time() < deadline:
+        if port_file.exists():
+            try:
+                debug_port = int(port_file.read_text("utf-8").strip().split("\n")[0])
+                break
+            except Exception:
+                pass
+        time.sleep(0.5)
+
+    if not debug_port:
+        print(f"[auto-login] DevToolsActivePort não encontrado — Chrome não abriu com debug")
+        return
+
+    # 3. Espera a página de login carregar
+    time.sleep(5)
+
+    # 4. Conecta via CDP
+    try:
+        import urllib.request as _urlr_auto
+        r = _urlr_auto.urlopen(f"http://127.0.0.1:{debug_port}/json", timeout=5)
+        targets = json.loads(r.read().decode("utf-8"))
+        page = next((t for t in targets if t.get("type") == "page"), None)
+        if not page:
+            print(f"[auto-login] nenhuma aba encontrada")
+            return
+        ws_url = page.get("webSocketDebuggerUrl")
+        ws = _ws_auto.create_connection(ws_url, timeout=10)
+    except Exception as e:
+        print(f"[auto-login] falha conectando CDP: {e}")
+        return
+
+    msg_id = [0]
+
+    def cdp_send(method, params=None):
+        msg_id[0] += 1
+        payload = {"id": msg_id[0], "method": method, "params": params or {}}
+        ws.send(json.dumps(payload))
+        # Drena resposta
+        for _ in range(5):
+            try:
+                resp = json.loads(ws.recv())
+                if resp.get("id") == msg_id[0]:
+                    return resp.get("result", {})
+            except Exception:
+                break
+        return {}
+
+    def cdp_eval(expression):
+        return cdp_send("Runtime.evaluate", {"expression": expression})
+
+    try:
+        # 5. Preenche username
+        print(f"[auto-login] preenchendo login @{username}")
+        cdp_eval(f'''
+            (function() {{
+                var el = document.querySelector('input[name="username"]');
+                if (!el) return "no_field";
+                var nativeSet = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                nativeSet.call(el, "{username}");
+                el.dispatchEvent(new Event('input', {{bubbles: true}}));
+                el.dispatchEvent(new Event('change', {{bubbles: true}}));
+                return "ok";
+            }})()
+        ''')
+        time.sleep(1)
+
+        # 6. Preenche senha
+        print(f"[auto-login] preenchendo senha")
+        # Escapa caracteres especiais na senha pra JS
+        escaped_pw = password.replace("\\", "\\\\").replace('"', '\\"').replace("'", "\\'")
+        cdp_eval(f'''
+            (function() {{
+                var el = document.querySelector('input[name="password"]');
+                if (!el) return "no_field";
+                var nativeSet = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                nativeSet.call(el, "{escaped_pw}");
+                el.dispatchEvent(new Event('input', {{bubbles: true}}));
+                el.dispatchEvent(new Event('change', {{bubbles: true}}));
+                return "ok";
+            }})()
+        ''')
+        time.sleep(1)
+
+        # 7. Clica no botão de login
+        print(f"[auto-login] clicando login")
+        cdp_eval('''
+            (function() {
+                var btn = document.querySelector('button[type="submit"]');
+                if (btn) btn.click();
+                return "ok";
+            })()
+        ''')
+
+        # 8. Espera resposta do Instagram (pode pedir código)
+        print(f"[auto-login] aguardando resposta do Instagram (15s)...")
+        time.sleep(15)
+
+        # 9. Se tem email tempmail, busca código de verificação automaticamente
+        if email:
+            print(f"[auto-login] buscando código de verificação em {email}...")
+            try:
+                from core.tempmail import fetch_instagram_code
+                code = fetch_instagram_code(email, timeout=120, poll_interval=5)
+                if code:
+                    print(f"[auto-login] código encontrado: {code} — preenchendo")
+                    # Tenta preencher em campo de código (Instagram usa input genérico)
+                    cdp_eval(f'''
+                        (function() {{
+                            var inputs = document.querySelectorAll('input[name="security_code"], input[name="verificationCode"], input[type="text"], input[type="number"]');
+                            for (var i = 0; i < inputs.length; i++) {{
+                                var el = inputs[i];
+                                if (el.offsetParent !== null) {{
+                                    var nativeSet = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                                    nativeSet.call(el, "{code}");
+                                    el.dispatchEvent(new Event('input', {{bubbles: true}}));
+                                    el.dispatchEvent(new Event('change', {{bubbles: true}}));
+                                    return "filled";
+                                }}
+                            }}
+                            return "no_input";
+                        }})()
+                    ''')
+                    time.sleep(1)
+                    # Clica confirmar
+                    cdp_eval('''
+                        (function() {
+                            var btns = document.querySelectorAll('button[type="button"], button[type="submit"]');
+                            for (var i = 0; i < btns.length; i++) {
+                                var txt = btns[i].textContent.toLowerCase();
+                                if (txt.includes("confirm") || txt.includes("enviar") || txt.includes("submit") || txt.includes("next") || txt.includes("continuar")) {
+                                    btns[i].click();
+                                    return "clicked";
+                                }
+                            }
+                            // Fallback: clica o último submit
+                            var last = btns[btns.length - 1];
+                            if (last) last.click();
+                            return "fallback";
+                        })()
+                    ''')
+                    print(f"[auto-login] código preenchido e confirmado! Aguardando...")
+                    time.sleep(10)
+                else:
+                    print(f"[auto-login] código não chegou — preencha manualmente no Chrome")
+            except Exception as e:
+                print(f"[auto-login] erro buscando código: {e}")
+        else:
+            print(f"[auto-login] sem email cadastrado — se pedir código, preencha manualmente")
+
+        print(f"[auto-login] fluxo concluído pra @{username} — verifique o Chrome e clique 'Salvar Sessão'")
+
+    except Exception as e:
+        print(f"[auto-login] erro: {e}")
+    finally:
+        try:
+            ws.close()
+        except Exception:
+            pass
+
+
 class _LocalAPIHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         # Silencia o log default do http.server (polui o terminal do worker)
@@ -1687,6 +1872,41 @@ class _LocalAPIHandler(BaseHTTPRequestHandler):
                 body = _json.dumps({"ok": False, "error": info}).encode("utf-8")
                 self._send(400, body)
                 print(f"[local-api] ⚠️ save-session @{username} falhou: {info}")
+            return
+
+        # /auto-login: abre Chrome, preenche login/senha, busca código email, preenche
+        if parsed.path == "/auto-login":
+            qs = parse_qs(parsed.query)
+            username = (qs.get("username") or [""])[0].strip()
+            if not username:
+                self._send(400, b'{"error":"username obrigatorio"}')
+                return
+            # Lê credenciais do body JSON
+            password = None
+            email = None
+            proxy = None
+            try:
+                content_len = int(self.headers.get("Content-Length", "0"))
+                if content_len > 0:
+                    raw = self.rfile.read(content_len)
+                    body_data = _json.loads(raw.decode("utf-8"))
+                    password = (body_data.get("password") or "").strip() or None
+                    email = (body_data.get("email") or "").strip() or None
+                    proxy = (body_data.get("proxy") or "").strip() or None
+            except Exception:
+                pass
+            if not password:
+                self._send(400, b'{"error":"password obrigatorio no body JSON"}')
+                return
+            # Executa auto-login em thread separada (não bloqueia o HTTP server)
+            threading.Thread(
+                target=_auto_login_flow,
+                args=(username, password, email, proxy),
+                daemon=True,
+                name=f"auto-login-{username}",
+            ).start()
+            body = _json.dumps({"ok": True, "message": f"Auto-login iniciado pra @{username}. Acompanhe no Chrome."}).encode("utf-8")
+            self._send(200, body)
             return
 
         if parsed.path != "/open-browser":
