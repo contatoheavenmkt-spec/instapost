@@ -324,12 +324,45 @@ def execute_job(job: dict):
             if _download_session_from_server(username):
                 log("📥 sessão sincronizada do servidor")
         report_step(job_id, "logging")
+
+        # Challenge handler: busca código de verificação no tempmail automaticamente
+        account_email = job.get("account_email")
+        challenge_handler = None
+        if account_email and operation == "test_login":
+            def _tempmail_challenge_handler(username_arg, choice):
+                """Busca código de verificação no tempmail quando Instagram pede challenge."""
+                log(f"📧 Instagram pediu verificação — buscando código em {account_email}...")
+                try:
+                    from core.tempmail import fetch_instagram_code
+                    code = fetch_instagram_code(account_email, timeout=120, poll_interval=4)
+                    if code:
+                        log(f"✅ código encontrado: {code}")
+                        # Envia pro servidor pra mostrar no painel
+                        try:
+                            import requests as _req_ch
+                            _req_ch.post(
+                                f"{SERVER_URL}/api/auto-login-code/{username}",
+                                json={"code": code, "status": "code_found"},
+                                headers={"X-Worker-Token": WORKER_TOKEN},
+                                timeout=5,
+                            )
+                        except Exception:
+                            pass
+                        return code
+                    log(f"⚠️ código não chegou no email")
+                    return None
+                except Exception as e:
+                    log(f"❌ erro buscando código: {e}")
+                    return None
+            challenge_handler = _tempmail_challenge_handler
+
         cl = get_client(
             username=username,
             password=job["account_password"],
             proxy=job_proxy,
             totp_secret=job.get("account_totp_secret"),
             allow_fresh_login=(operation == "test_login"),
+            challenge_handler=challenge_handler,
         )
         store_client(username, cl, proxy=job_proxy)
         return cl

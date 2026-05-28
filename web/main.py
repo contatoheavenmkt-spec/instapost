@@ -2115,6 +2115,7 @@ def api_bulk_import(payload: BulkImportIn, user=Depends(auth.require_user)):
                     "account_password": acc["password"],
                     "account_totp_secret": acc.get("totp_secret"),
                     "account_proxy": acc.get("proxy"),
+                    "account_email": acc.get("email"),
                     "scheduled_for": scheduled_for,
                     "created_by": f"bulk-import:{user['email']}",
                 })
@@ -2177,6 +2178,7 @@ def api_bulk_connect(payload: BulkConnectIn, user=Depends(auth.require_user)):
                 "account_password": acc["password"],
                 "account_totp_secret": acc.get("totp_secret"),
                 "account_proxy": acc.get("proxy"),
+                "account_email": acc.get("email"),
                 "scheduled_for": scheduled_for,
                 "created_by": f"bulk-connect:{user['email']}",
             })
@@ -2612,6 +2614,7 @@ def api_connect_via_worker(username: str, user=Depends(auth.require_user)):
         "account_password": account["password"],
         "account_totp_secret": account.get("totp_secret"),
         "account_proxy": account.get("proxy"),
+        "account_email": account.get("email"),
         "video_name": "",
         "media_type": "video",
         "kind": "reel",
@@ -2651,6 +2654,7 @@ def api_check_all_accounts(user=Depends(auth.require_user)):
             "account_password": acc["password"],
             "account_totp_secret": acc.get("totp_secret"),
             "account_proxy": acc.get("proxy"),
+            "account_email": acc.get("email"),
             "created_by": user["email"],
         })
         created.append(rj.id)

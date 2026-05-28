@@ -216,11 +216,31 @@ def get_client(
                 cl.username = username
                 cl.password = password
             if session_is_manual:
-                # Sessão veio de login manual no Chrome — CONFIA, pula teste.
-                # Evita: rate limit no get_timeline_feed → assume "expired" →
-                # força login API → IG dá challenge → conta morre.
-                print(f"[{username}] Sessão MANUAL (Chrome) — usando direto sem teste")
-                return cl
+                # Sessão veio de login manual no Chrome — faz teste LEVE pra
+                # garantir que cookies web funcionam na API mobile.
+                # Se falhar com redirect/HTML = sessão web incompatível.
+                try:
+                    cl.get_timeline_feed()
+                    print(f"[{username}] Sessão MANUAL (Chrome) — validada ✓")
+                    return cl
+                except LoginRequired:
+                    print(f"[{username}] ⚠️ Sessão manual rejeitada (LoginRequired)")
+                    raise ManualReconnectNeeded(
+                        f"Sessão manual de @{username} expirou ou é incompatível. "
+                        f"Tente: 1) Abra Chrome via Smartphone, 2) Loga manual, "
+                        f"3) Clique Conectar (não só Salvar Sessão) pra criar sessão mobile."
+                    )
+                except Exception as e:
+                    err_str = str(e).lower()
+                    if "redirect" in err_str or "json" in err_str or "decode" in err_str:
+                        print(f"[{username}] ⚠️ Sessão manual incompatível ({e})")
+                        raise ManualReconnectNeeded(
+                            f"Sessão de @{username} salva do Chrome mas incompatível com API mobile. "
+                            f"Use o botão Conectar pra criar sessão via API."
+                        )
+                    # Outros erros (rate limit, network) = usa mesmo assim
+                    print(f"[{username}] Sessão manual com erro temporário ({e}) — usando")
+                    return cl
             # Teste leve da sessão. Se válida, segue sem TOTP.
             cl.get_timeline_feed()
             print(f"[{username}] Sessão restaurada ✓ (sem relogin)")
