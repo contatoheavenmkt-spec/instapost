@@ -1786,6 +1786,18 @@ def _auto_login_flow(username: str, password: str, email: str = None, proxy: str
                     _set_auto_login_status(username, "code_found", code=code)
                     print(f"[auto-login] CÓDIGO: {code}")
 
+                    # Mostra banner GIGANTE no Chrome com o código
+                    cdp_eval(f'''
+                        (function() {{
+                            var d = document.createElement('div');
+                            d.id = 'auto-login-code-banner';
+                            d.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:999999;background:#1a1a2e;color:#00ff88;font-size:28px;font-weight:bold;text-align:center;padding:20px;border-bottom:3px solid #00ff88;font-family:monospace;';
+                            d.innerHTML = '🔑 CÓDIGO: <span style="font-size:42px;letter-spacing:8px;color:#fff">{code}</span> — preenchido automaticamente';
+                            document.body.prepend(d);
+                            setTimeout(function() {{ d.remove(); }}, 30000);
+                        }})()
+                    ''')
+
                     # Preenche código no campo
                     cdp_eval(f'''
                         (function() {{
