@@ -1710,11 +1710,13 @@ def _auto_login_flow(username: str, password: str, email: str = None, proxy: str
         return cdp_send("Runtime.evaluate", {"expression": expression})
 
     try:
-        # 5. Preenche username
+        # 5. Preenche username (Instagram usa name="email" ou name="username")
         print(f"[auto-login] preenchendo login @{username}")
         cdp_eval(f'''
             (function() {{
-                var el = document.querySelector('input[name="username"]');
+                var el = document.querySelector('input[name="email"]') ||
+                         document.querySelector('input[name="username"]') ||
+                         document.querySelector('input[autocomplete*="username"]');
                 if (!el) return "no_field";
                 var nativeSet = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
                 nativeSet.call(el, "{username}");
@@ -1725,13 +1727,15 @@ def _auto_login_flow(username: str, password: str, email: str = None, proxy: str
         ''')
         time.sleep(1)
 
-        # 6. Preenche senha
+        # 6. Preenche senha (Instagram usa name="pass" ou name="password")
         print(f"[auto-login] preenchendo senha")
         # Escapa caracteres especiais na senha pra JS
         escaped_pw = password.replace("\\", "\\\\").replace('"', '\\"').replace("'", "\\'")
         cdp_eval(f'''
             (function() {{
-                var el = document.querySelector('input[name="password"]');
+                var el = document.querySelector('input[name="pass"]') ||
+                         document.querySelector('input[name="password"]') ||
+                         document.querySelector('input[type="password"]');
                 if (!el) return "no_field";
                 var nativeSet = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
                 nativeSet.call(el, "{escaped_pw}");
