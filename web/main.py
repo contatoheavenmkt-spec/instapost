@@ -580,11 +580,15 @@ def page_videos(request: Request):
 def page_jobs(request: Request):
     accounts = load_accounts()
     pending = list_videos(PENDING_DIR)
-    # Só contas ativas E com sessão (servidor OU worker) entram no disparo manual via /jobs
+    # Só contas ativas E conectadas via worker entram no disparo manual via /jobs
+    # Exclui contas bloqueadas, com verificação pendente ou sessão expirada
     connected = [
         a for a in accounts
         if a.get("active", True)
-        and (session_status(a["username"]) == "saved" or a.get("connected_via_worker_id"))
+        and a.get("connected_via_worker_id")
+        and not a.get("blocked")
+        and not a.get("needs_verification")
+        and not a.get("needs_session_renewal")
     ]
     total_active = sum(1 for a in accounts if a.get("active", True))
     return templates.TemplateResponse(
