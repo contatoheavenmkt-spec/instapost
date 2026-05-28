@@ -2537,20 +2537,25 @@ def api_worker_next_job(request: Request):
     if job.video_name:
         d["media_url"] = (
             f"{str(request.base_url).rstrip('/')}/api/worker/media/{job.video_name}"
-            f"?account={job.account_username}"
+            f"?account={job.account_username}&ws={job.workspace_slug or 'default'}"
         )
     return {"job": d}
 
 
 @app.get("/api/worker/media/{name}")
-def api_worker_media(name: str, request: Request, account: Optional[str] = None):
+def api_worker_media(name: str, request: Request, account: Optional[str] = None, ws: Optional[str] = None):
     """Download de mídia pelo worker. Auth via X-Worker-Token.
 
     Se ?account=<username> for passado, devolve a VARIANTE única daquela conta
     (anti-cluster: cada conta recebe um arquivo levemente diferente).
     Sem ?account=, devolve o original (legacy / preview).
+    Se ?ws=<workspace_slug> for passado, busca no workspace correto.
     """
     _require_worker(request)
+    # Seta workspace se passado (garante que PENDING_DIR aponta pro workspace certo)
+    if ws:
+        from core import paths as _paths_media
+        _paths_media.set_workspace(ws)
     name = safe_name(name)
     # Tenta pending primeiro, depois posted (caso arquivado entre criação e execução)
     for folder in (PENDING_DIR, POSTED_DIR):
@@ -2844,7 +2849,7 @@ def api_create_remote_job(payload: RemoteJobIn, request: Request, user=Depends(a
 
     for acc in targets:
         # media_url COM ?account= pra disparar a variante anti-cluster por conta
-        media_url = f"{base}/api/worker/media/{video_name}?account={acc['username']}"
+        media_url = f"{base}/api/worker/media/{video_name}?account={acc['username']}&ws={_paths.get_workspace()}"
         # Se for story+link, gera 1 short link único por conta (anti-cluster)
         link_url = raw_link
         if effective_kind == "story" and raw_link:
@@ -3085,7 +3090,7 @@ def api_dispatch_diversified(payload: DiversifiedDispatchIn, request: Request, u
         if meta.get("kind") == "story" and acc.get("auto_highlight_enabled") and acc.get("auto_highlight_title"):
             highlight_title = acc["auto_highlight_title"]
 
-        media_url = f"{base}/api/worker/media/{video_name}?account={acc['username']}"
+        media_url = f"{base}/api/worker/media/{video_name}?account={acc['username']}&ws={_paths.get_workspace()}"
         job = rjob_manager.create({
             "operation": "post",
             "params": {"auto_highlight_title": highlight_title} if highlight_title else {},
