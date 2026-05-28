@@ -2033,10 +2033,12 @@ def api_bulk_import(payload: BulkImportIn, user=Depends(auth.require_user)):
     existing_usernames = {a["username"].lower() for a in accounts}
 
     to_add = []
+    to_update = []
     skipped_existing = []
     for entry in valid:
         if entry["username"].lower() in existing_usernames:
-            skipped_existing.append(entry["username"])
+            # Conta já existe — atualiza senha/email/2fa se vieram na lista
+            to_update.append(entry)
         else:
             to_add.append(entry)
 
@@ -2046,14 +2048,34 @@ def api_bulk_import(payload: BulkImportIn, user=Depends(auth.require_user)):
             "dry_run": True,
             "would_add_count": len(to_add),
             "would_add": [e["username"] for e in to_add],
-            "skipped_existing_count": len(skipped_existing),
-            "skipped_existing": skipped_existing,
+            "would_update_count": len(to_update),
+            "would_update": [e["username"] for e in to_update],
+            "skipped_existing_count": 0,
+            "skipped_existing": [],
             "invalid_count": len(invalid),
             "invalid": invalid,
             "total_lines_parsed": len(valid) + len(invalid),
         }
 
-    # Aplica importação
+    # Atualiza contas existentes (senha, email, 2fa)
+    updated = []
+    if to_update:
+        update_map = {e["username"].lower(): e for e in to_update}
+        for a in accounts:
+            entry = update_map.get(a["username"].lower())
+            if entry:
+                if entry.get("password"):
+                    a["password"] = entry["password"]
+                if entry.get("email"):
+                    a["email"] = entry["email"]
+                if entry.get("totp_secret"):
+                    a["totp_secret"] = entry["totp_secret"]
+                updated.append(a["username"])
+        if updated:
+            save_accounts(accounts)
+            print(f"[bulk-import] {len(updated)} contas atualizadas (senha/email/2fa)")
+
+    # Aplica importação de novas
     added = []
     for entry in to_add:
         accounts.append({
@@ -2069,18 +2091,18 @@ def api_bulk_import(payload: BulkImportIn, user=Depends(auth.require_user)):
     if added:
         save_accounts(accounts)
 
-    # Se connect_after, cria jobs test_login com stagger
+    # Se connect_after, cria jobs test_login com stagger (novas + atualizadas)
     connect_jobs_created = 0
-    if payload.connect_after and added:
+    all_to_connect = added + updated
+    if payload.connect_after and all_to_connect:
+        # Recarrega accounts pra pegar os dados atualizados
+        accounts = load_accounts()
         from datetime import datetime as _dt, timezone as _tz, timedelta as _td
         from core.retry import humanlike_delay
         now_utc = _dt.now(_tz.utc)
-        # Stagger exponencial (long-tail, mimics real user) em vez de uniforme
-        # (linear, padrão detectável). Acumulado entre contas: 1ª em 0s, 2ª em
-        # 30-180s, 3ª no anterior+30-180s, etc.
         cumulative_s = 0
-        for idx, username in enumerate(added):
-            acc = next((a for a in accounts if a["username"] == username), None)
+        for idx, username in enumerate(all_to_connect):
+            acc = next((a for a in accounts if a["username"].lower() == username.lower()), None)
             if not acc:
                 continue
             if idx > 0:
@@ -2105,8 +2127,8 @@ def api_bulk_import(payload: BulkImportIn, user=Depends(auth.require_user)):
         "dry_run": False,
         "added_count": len(added),
         "added": added,
-        "skipped_existing_count": len(skipped_existing),
-        "skipped_existing": skipped_existing,
+        "updated_count": len(updated),
+        "updated": updated,
         "invalid_count": len(invalid),
         "invalid": invalid,
         "connect_jobs_created": connect_jobs_created,
