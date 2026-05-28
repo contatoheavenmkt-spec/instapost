@@ -598,40 +598,32 @@ def execute_job(job: dict):
         report_result(job_id, False, error_msg=f"download: {e}")
         return
 
-    # Login Instagram (usa cache se a mesma conta foi usada recentemente)
-    # post NUNCA dispara fresh login API — só usa sessão salva. Se expirou,
-    # falha suave (sem virar challenge automático) e user precisa Save Sessão.
-    job_proxy = job.get("account_proxy")
-    cached = get_cached_client(username, expected_proxy=job_proxy)
-    if cached is not None:
-        cl = cached
-        log(f"♻️ sessão Insta em cache (sem relogin)")
-    else:
-        # Sync: se não tem sessão local, tenta baixar do servidor central
-        if not _find_session_file(username):
-            if _download_session_from_server(username):
-                log("📥 sessão sincronizada do servidor")
-        report_step(job_id, "logging")
-        try:
-            log(f"fazendo login no Instagram (sessão local, se existir)")
-            cl = get_client(
-                username=username,
-                password=job["account_password"],
-                proxy=job_proxy,
-                totp_secret=job.get("account_totp_secret"),
-                allow_fresh_login=False,
-            )
-            store_client(username, cl, proxy=job_proxy)
-            log(f"✓ logado como @{username}")
-        except Exception as e:
-            invalidate_client(username)
-            log(f"❌ falha login: {e}")
-            report_result(job_id, False, error_msg=f"login: {e}")
-            return
+    # Carrega sessão (cookies do Chrome) pra usar na Web API
+    # Sync: se não tem sessão local, tenta baixar do servidor central
+    if not _find_session_file(username):
+        if _download_session_from_server(username):
+            log("📥 sessão sincronizada do servidor")
 
-    # Posta
+    report_step(job_id, "logging")
+    session_file = _find_session_file(username)
+    if not session_file:
+        log(f"❌ sem sessão pra @{username} — faça Save Sessão via Chrome")
+        report_result(job_id, False, error_msg=f"login: Conta @{username} sem sessão salva. Abra Chrome via Smartphone, loga manual e clica Salvar Sessão.")
+        return
+
+    try:
+        session_data = json.loads(session_file.read_text(encoding="utf-8"))
+        log(f"✓ sessão carregada de @{username}")
+    except Exception as e:
+        log(f"❌ erro lendo sessão: {e}")
+        report_result(job_id, False, error_msg=f"login: erro lendo sessão: {e}")
+        return
+
+    # Posta via Web API (usa cookies do Chrome, sem instagrapi)
     report_step(job_id, "posting")
     try:
+        from core.web_poster import web_post_reel, web_post_story_video, web_post_story_photo
+
         kind = job.get("kind", "reel")
         media_type = job.get("media_type", "video")
         caption = job.get("caption", "")
@@ -642,64 +634,25 @@ def execute_job(job: dict):
 
         if kind == "story":
             if media_type == "photo":
-                # Normaliza foto pra 1080x1920 + JPEG limpo (resolve erros do Insta com
-                # fotos do WhatsApp / proporções não-9:16 / EXIF estranho)
                 try:
                     from core.media import normalize_image_for_story
                     log("normalizando foto pra story (1080x1920)")
                     normalize_image_for_story(media_path)
                 except Exception as ne:
                     log(f"⚠️ normalização falhou ({ne}) — tentando com original")
-                result = post_story_photo(cl, str(media_path), caption, link_url, link_text)
+                result = web_post_story_photo(session_data, str(media_path), caption, link_url, link_text)
             else:
-                result = post_story_video(cl, str(media_path), caption, link_url, link_text)
+                result = web_post_story_video(session_data, str(media_path), caption, link_url, link_text)
         else:
             if media_type == "photo":
                 result = {"success": False, "media_id": None, "error": "Foto não pode virar Reel"}
             else:
-                result = post_reel(cl, str(media_path), caption)
+                result = web_post_reel(session_data, str(media_path), caption)
 
         if result.get("success"):
             mid = result.get("media_id")
-            if result.get("warning"):
-                log(f"⚠️  postado COM RESSALVA: {result.get('warning')}")
-            else:
-                log(f"✅ postado! media_id={mid}")
-
-            # Se foi Story + tem destaque configurado, adiciona ao destaque
-            highlight_info = None
-            if kind == "story":
-                highlight_title = params.get("auto_highlight_title") or job.get("auto_highlight_title")
-                if highlight_title:
-                    report_step(job_id, "finishing")
-                    # Fallback: se phantom error (sem mid), busca o último story ativo
-                    story_pk_for_highlight = mid
-                    if not story_pk_for_highlight:
-                        log(f"🔍 buscando ID do story recém-postado (fallback phantom error)")
-                        story_pk_for_highlight = get_latest_own_story_pk(cl)
-                        if story_pk_for_highlight:
-                            log(f"✓ encontrado story pk={story_pk_for_highlight}")
-                        else:
-                            log(f"⚠️ não consegui achar story recente — destaque pulado")
-
-                    if story_pk_for_highlight:
-                        log(f"📌 adicionando ao destaque '{highlight_title}'")
-                        try:
-                            hr = add_story_to_highlight(cl, story_pk_for_highlight, highlight_title)
-                            if hr.get("success"):
-                                acao = "criado novo" if hr.get("action") == "created_new" else "adicionado ao existente"
-                                log(f"✅ destaque {acao}: '{hr.get('highlight_title')}'")
-                                highlight_info = hr
-                            else:
-                                log(f"⚠️ destaque falhou: {hr.get('error')}")
-                        except Exception as e:
-                            log(f"⚠️ destaque exception: {e}")
-
-            report_result(
-                job_id, True,
-                media_id=mid,
-                result_data={"highlight": highlight_info} if highlight_info else None,
-            )
+            log(f"✅ postado! media_id={mid}")
+            report_result(job_id, True, media_id=mid)
         else:
             log(f"❌ post falhou: {result.get('error')}")
             report_result(job_id, False, error_msg=result.get("error"))
@@ -709,7 +662,6 @@ def execute_job(job: dict):
         report_result(job_id, False, error_msg=str(e))
 
     finally:
-        # Limpa mídia temp
         try:
             media_path.unlink()
         except Exception:
