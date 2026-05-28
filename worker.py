@@ -217,6 +217,51 @@ def report_step(job_id: str, step: str):
         pass
 
 
+# ----------- Session sync (worker <-> servidor central) -----------
+
+def _upload_session_to_server(username: str, session_data: dict):
+    """Best-effort: envia sessão pro servidor central pra sincronizar entre workers.
+    Se falhar, não impede nada — sessão local continua funcionando."""
+    try:
+        r = post("/api/worker/sessions/upload", {"username": username, "session_data": session_data})
+        if r.status_code == 200:
+            print(f"[sync] ✓ sessão de @{username} enviada pro servidor")
+        else:
+            print(f"[sync] ⚠️ upload falhou HTTP {r.status_code}: {r.text[:200]}")
+    except Exception as e:
+        print(f"[sync] ⚠️ upload falhou: {e}")
+
+
+def _download_session_from_server(username: str) -> bool:
+    """Tenta baixar sessão do servidor central se não existir localmente.
+    Permite que worker novo use sessão criada em outro PC.
+    Retorna True se baixou com sucesso."""
+    try:
+        r = get(f"/api/worker/sessions/download?username={username}")
+        if r.status_code != 200:
+            return False
+        data = r.json()
+        session_data = data.get("session_data")
+        if not session_data:
+            return False
+        # Salva localmente na estrutura de workspaces
+        project_root = Path(__file__).resolve().parent
+        data_dir = Path(os.environ.get("DATA_DIR", str(project_root)))
+        ws_slug = data.get("workspace_slug", "default")
+        target_dir = data_dir / "workspaces" / ws_slug / "sessions"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        session_file = target_dir / f"{username}.json"
+        session_file.write_text(
+            json.dumps(session_data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(f"[sync] ✓ sessão de @{username} baixada do servidor (ws={ws_slug})")
+        return True
+    except Exception as e:
+        print(f"[sync] download falhou ({e}) — seguindo sem sessão remota")
+        return False
+
+
 # ----------- Download media -----------
 
 def download_media(url: str, dest: Path):
@@ -270,6 +315,10 @@ def execute_job(job: dict):
         if cached is not None:
             log(f"♻️ sessão Insta em cache (sem relogin)")
             return cached
+        # Sync: se não tem sessão local, tenta baixar do servidor central
+        if not _find_session_file(username):
+            if _download_session_from_server(username):
+                log("📥 sessão sincronizada do servidor")
         report_step(job_id, "logging")
         cl = get_client(
             username=username,
@@ -290,6 +339,14 @@ def execute_job(job: dict):
             cl = do_login()
             info = cl.account_info()
             log(f"✅ conectado como @{info.username} ({info.full_name})")
+            # Sync: envia sessão pro servidor pra outros workers usarem
+            try:
+                _sess_path = _find_session_file(username)
+                if _sess_path:
+                    _sess_data = json.loads(_sess_path.read_text(encoding="utf-8"))
+                    _upload_session_to_server(username, _sess_data)
+            except Exception:
+                pass
             report_result(job_id, True, media_id="session_ok")
         except Exception as e:
             log(f"❌ falha conexão: {e}")
@@ -540,6 +597,10 @@ def execute_job(job: dict):
         cl = cached
         log(f"♻️ sessão Insta em cache (sem relogin)")
     else:
+        # Sync: se não tem sessão local, tenta baixar do servidor central
+        if not _find_session_file(username):
+            if _download_session_from_server(username):
+                log("📥 sessão sincronizada do servidor")
         report_step(job_id, "logging")
         try:
             log(f"fazendo login no Instagram (sessão local, se existir)")
@@ -1080,8 +1141,8 @@ def _open_chrome_for_account(
 
     profile_dir.mkdir(parents=True, exist_ok=True)
 
-    # Remove SingletonLock (sobra quando Chrome morre sem cleanup, impede novo launch)
-    for lock_name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+    # Remove SingletonLock e DevToolsActivePort antigo (sobra quando Chrome morre sem cleanup)
+    for lock_name in ("SingletonLock", "SingletonCookie", "SingletonSocket", "DevToolsActivePort"):
         try:
             lf = profile_dir / lock_name
             if lf.exists() or lf.is_symlink():
@@ -1240,19 +1301,26 @@ def _open_chrome_for_account(
         _t_wait.sleep(0.4)
     else:
         print(f"[local-api] ⚠️ DevToolsActivePort NÃO criado em 12s em {profile_dir}", flush=True)
-        print(f"[local-api]    → Chrome atachou a outra instância OU falhou ao bindar porta", flush=True)
-        # Lista processos chrome pra diagnóstico
+        # Chrome 148+ pode não criar o arquivo. Verifica se a porta responde e cria manualmente.
         try:
-            ps_get = (
-                f"Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
-                f"Where-Object {{ $_.CommandLine -like '*{safe}*' }} | "
-                f"Select-Object ProcessId,CommandLine | Format-List"
-            )
-            r = subprocess.run(["powershell.exe", "-NoProfile", "-Command", ps_get],
-                              capture_output=True, text=True, timeout=5)
-            print(f"[local-api]    Chromes com '{safe}' no cmdline:\n{r.stdout[:1500]}")
+            import urllib.request as _urlr_check
+            _urlr_check.urlopen(f"http://127.0.0.1:{debug_port}/json/version", timeout=3).read()
+            port_file.write_text(f"{debug_port}\n", encoding="utf-8")
+            print(f"[local-api] ✓ DevToolsActivePort criado manualmente (Chrome 148+): porta={debug_port}", flush=True)
         except Exception:
-            pass
+            print(f"[local-api]    → Chrome atachou a outra instância OU falhou ao bindar porta", flush=True)
+            # Lista processos chrome pra diagnóstico
+            try:
+                ps_get = (
+                    f"Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
+                    f"Where-Object {{ $_.CommandLine -like '*{safe}*' }} | "
+                    f"Select-Object ProcessId,CommandLine | Format-List"
+                )
+                r = subprocess.run(["powershell.exe", "-NoProfile", "-Command", ps_get],
+                                  capture_output=True, text=True, timeout=5)
+                print(f"[local-api]    Chromes com '{safe}' no cmdline:\n{r.stdout[:1500]}")
+            except Exception:
+                pass
 
     proxy_desc = " + proxy" if proxy else " (SEM proxy)"
     desc = f"Chrome desktop{proxy_desc}"
@@ -1329,7 +1397,9 @@ def _save_session_from_chrome(username: str) -> tuple[bool, str]:
                                   capture_output=True, text=True, timeout=5)
             for line in (result.stdout or "").splitlines():
                 m_port = _re_cmd.search(r"remote-debugging-port=(\d+)", line)
-                m_dir = _re_cmd.search(r"--user-data-dir=([^\"\s]+)", line) or \
+                # Regex robusta: suporta paths com espaço (ex: "C:\Users\Edson Juan\...")
+                m_dir = _re_cmd.search(r'--user-data-dir="?([^"]+?)"?\s', line) or \
+                        _re_cmd.search(r"--user-data-dir=([^\"\s]+)", line) or \
                         _re_cmd.search(r"InstaposterProfiles[\\\\/](\w[\w.-]*)", line)
                 if m_port and m_dir:
                     port_candidate = int(m_port.group(1))
@@ -1542,6 +1612,11 @@ def _save_session_from_chrome(username: str) -> tuple[bool, str]:
             except Exception:
                 pass
         session_file.write_text(json.dumps(session_data, ensure_ascii=False, indent=2), encoding="utf-8")
+        # Sync: envia sessão pro servidor central pra outros workers usarem
+        try:
+            _upload_session_to_server(safe, session_data)
+        except Exception as _sync_err:
+            print(f"[sync] ⚠️ upload pro servidor falhou ({_sync_err}) — sessão local OK")
         return True, f"Sessão salva em {session_file.name} ({len(ig_cookies)} cookies, sessionid: ...{sessionid[-12:]})"
     finally:
         try:
@@ -1781,10 +1856,27 @@ def main():
     print(f"=" * 60)
     print()
 
-    # Heartbeat inicial pra validar token
-    info = heartbeat()
+    # Heartbeat inicial com retry (até 60s) — cobre race condition em docker compose:
+    # worker pode iniciar antes do app terminar de subir (FastAPI demora ~5-10s).
+    # Sem retry, worker morre com exit(2) e Docker fica recriando container.
+    info = None
+    MAX_BOOTSTRAP_ATTEMPTS = 30  # 30 * 2s = 60s de tolerância
+    for attempt in range(MAX_BOOTSTRAP_ATTEMPTS):
+        info = heartbeat()
+        if info:
+            break
+        if attempt == 0:
+            print(f"Aguardando servidor responder... (até {MAX_BOOTSTRAP_ATTEMPTS * 2}s)")
+        elif (attempt + 1) % 5 == 0:
+            print(f"  ainda tentando ({attempt + 1}/{MAX_BOOTSTRAP_ATTEMPTS})...")
+        time.sleep(2)
+
     if not info:
-        print("Heartbeat inicial falhou. Verifica SERVER_URL e WORKER_TOKEN.")
+        print(f"Heartbeat inicial falhou após {MAX_BOOTSTRAP_ATTEMPTS * 2}s.")
+        print("Verifica:")
+        print(f"  - SERVER_URL acessível: {SERVER_URL}")
+        print(f"  - WORKER_TOKEN válido (gerado em /workers do painel)")
+        print(f"  - App docker container está rodando")
         sys.exit(2)
     print(f"✓ Conectado (worker_id: {info.get('worker_id')})")
     print(f"  Aguardando jobs… ({WORKER_CONCURRENCY} thread(s), poll {POLL_INTERVAL_SECONDS}s)")
