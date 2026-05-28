@@ -3535,84 +3535,76 @@ def api_worker_job_result(job_id: str, payload: WorkerResultIn, request: Request
     # 3) post: registra mídia em posted_media (pra dedup + sync)
     if payload.success and job:
         try:
-          with accounts_transaction() as accounts:
-            for a in accounts:
-                if a["username"] == job.account_username:
-                    a["connected_via_worker_id"] = w.id
-                    a["connected_via_worker_name"] = w.name
-                    a["connected_at"] = scheduler_mod.now_local().isoformat(timespec="seconds")
-                    # Se estava marcada como bloqueada e voltou a funcionar, limpa
-                    if a.get("blocked"):
-                        a["blocked"] = False
-                        a["blocked_at"] = None
-                        a["blocked_reason"] = None
-                        print(f"[block] @{a['username']} desmarcada (voltou a funcionar)")
-                    # Mesma coisa pra needs_verification — login OK = challenge resolvido
-                    if a.get("needs_verification"):
-                        a["needs_verification"] = False
-                        a["verification_at"] = None
-                        a["verification_reason"] = None
-                        print(f"[verify] @{a['username']} verificação desmarcada (login OK)")
-                    # Idem pra needs_session_renewal — job sucesso = cookies funcionando
-                    if a.get("needs_session_renewal"):
-                        a["needs_session_renewal"] = False
-                        a["session_renewal_at"] = None
-                        a["session_renewal_reason"] = None
-                        print(f"[session] @{a['username']} renovação desmarcada (cookies OK)")
-                    if job.operation == "auto_follow_back" and payload.result_data:
-                        new_seen = payload.result_data.get("seen_followers")
-                        if isinstance(new_seen, list) and new_seen:
-                            a["auto_follow_back_seen_followers"] = new_seen
-                    if job.operation == "post" and job.video_name:
-                        posted = a.get("posted_media") or []
-                        # Procura entry existente pra esse video
-                        existing = next((p for p in posted if p.get("name") == job.video_name), None)
-                        now_iso_str = scheduler_mod.now_local().isoformat(timespec="seconds")
-                        if existing:
-                            # Incrementa contador de repetições
-                            existing["count"] = int(existing.get("count", 1)) + 1
-                            existing["posted_at"] = now_iso_str  # data do post mais recente
-                            existing["media_id"] = payload.media_id  # último media_id
-                        else:
-                            posted.append({
-                                "name": job.video_name,
-                                "kind": job.kind or "reel",
-                                "posted_at": now_iso_str,
-                                "media_id": payload.media_id,
-                                "count": 1,
-                            })
-                        a["posted_media"] = posted
-                    # Health tracker: collect_insights → salva snapshot + analisa
-                    if job.operation == "collect_insights" and payload.result_data:
-                        try:
-                            from web import health as _health
-                            analysis = _health.record(
-                                username=a["username"],
-                                snapshot=payload.result_data,
-                            )
-                            # Atualiza campos resumidos no accounts.json
-                            a["follower_count"] = int(payload.result_data.get("follower_count") or 0)
-                            a["health_score"] = int(analysis.get("health_score", 50))
-                            if analysis.get("suspected"):
-                                # So marca se ainda nao tava marcado (preserva data original)
-                                if not a.get("shadowban_suspected"):
-                                    a["shadowban_suspected"] = True
-                                    a["shadowban_at"] = scheduler_mod.now_local().isoformat(timespec="seconds")
-                                a["shadowban_reason"] = analysis.get("reason") or "queda anormal detectada"
+            with accounts_transaction() as accounts:
+                for a in accounts:
+                    if a["username"] == job.account_username:
+                        a["connected_via_worker_id"] = w.id
+                        a["connected_via_worker_name"] = w.name
+                        a["connected_at"] = scheduler_mod.now_local().isoformat(timespec="seconds")
+                        # Se estava marcada como bloqueada e voltou a funcionar, limpa
+                        if a.get("blocked"):
+                            a["blocked"] = False
+                            a["blocked_at"] = None
+                            a["blocked_reason"] = None
+                            print(f"[block] @{a['username']} desmarcada (voltou a funcionar)")
+                        # Mesma coisa pra needs_verification — login OK = challenge resolvido
+                        if a.get("needs_verification"):
+                            a["needs_verification"] = False
+                            a["verification_at"] = None
+                            a["verification_reason"] = None
+                            print(f"[verify] @{a['username']} verificação desmarcada (login OK)")
+                        # Idem pra needs_session_renewal — job sucesso = cookies funcionando
+                        if a.get("needs_session_renewal"):
+                            a["needs_session_renewal"] = False
+                            a["session_renewal_at"] = None
+                            a["session_renewal_reason"] = None
+                            print(f"[session] @{a['username']} renovação desmarcada (cookies OK)")
+                        if job.operation == "auto_follow_back" and payload.result_data:
+                            new_seen = payload.result_data.get("seen_followers")
+                            if isinstance(new_seen, list) and new_seen:
+                                a["auto_follow_back_seen_followers"] = new_seen
+                        if job.operation == "post" and job.video_name:
+                            posted = a.get("posted_media") or []
+                            existing = next((p for p in posted if p.get("name") == job.video_name), None)
+                            now_iso_str = scheduler_mod.now_local().isoformat(timespec="seconds")
+                            if existing:
+                                existing["count"] = int(existing.get("count", 1)) + 1
+                                existing["posted_at"] = now_iso_str
+                                existing["media_id"] = payload.media_id
                             else:
-                                # Se voltou ao normal, limpa
-                                if a.get("shadowban_suspected"):
-                                    a["shadowban_suspected"] = False
-                                    a["shadowban_at"] = None
-                                    a["shadowban_reason"] = None
-                                    print(f"[health] @{a['username']} recuperou — desmarcada")
-                        except Exception as he:
-                            print(f"[health] erro analisando @{a['username']}: {he}")
-                        # Se veio do sync_loop, atualiza marcador
-                        if (job.created_by or "").startswith("sync:"):
-                            a["sync_last_post_at"] = scheduler_mod.now_local().isoformat(timespec="seconds")
-                    break
-            # save automático no exit do accounts_transaction context manager
+                                posted.append({
+                                    "name": job.video_name,
+                                    "kind": job.kind or "reel",
+                                    "posted_at": now_iso_str,
+                                    "media_id": payload.media_id,
+                                    "count": 1,
+                                })
+                            a["posted_media"] = posted
+                        if job.operation == "collect_insights" and payload.result_data:
+                            try:
+                                from web import health as _health
+                                analysis = _health.record(
+                                    username=a["username"],
+                                    snapshot=payload.result_data,
+                                )
+                                a["follower_count"] = int(payload.result_data.get("follower_count") or 0)
+                                a["health_score"] = int(analysis.get("health_score", 50))
+                                if analysis.get("suspected"):
+                                    if not a.get("shadowban_suspected"):
+                                        a["shadowban_suspected"] = True
+                                        a["shadowban_at"] = scheduler_mod.now_local().isoformat(timespec="seconds")
+                                    a["shadowban_reason"] = analysis.get("reason") or "queda anormal detectada"
+                                else:
+                                    if a.get("shadowban_suspected"):
+                                        a["shadowban_suspected"] = False
+                                        a["shadowban_at"] = None
+                                        a["shadowban_reason"] = None
+                                        print(f"[health] @{a['username']} recuperou — desmarcada")
+                            except Exception as he:
+                                print(f"[health] erro analisando @{a['username']}: {he}")
+                            if (job.created_by or "").startswith("sync:"):
+                                a["sync_last_post_at"] = scheduler_mod.now_local().isoformat(timespec="seconds")
+                        break
         except Exception as e:
             print(f"[worker_result] erro side-effects: {e}")
 
