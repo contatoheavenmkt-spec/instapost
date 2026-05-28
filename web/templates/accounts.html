@@ -903,12 +903,9 @@ elMSoYMQakO</pre>
       });
       clearTimeout(t);
       if (r.ok) {
-        toast(
-          `🤖 Auto-login iniciado pra @${username}!\n` +
-          `Chrome vai abrir, preencher login/senha e buscar código do email.\n` +
-          `Quando terminar, clique "Salvar Sessão" (disco verde).`,
-          'success'
-        );
+        toast(`🤖 Auto-login iniciado pra @${username}...`, 'success');
+        // Poll status do auto-login pra mostrar código quando chegar
+        _pollAutoLoginStatus(username);
       } else {
         const data = await r.json().catch(() => ({}));
         toast(data.error || 'Falha no auto-login', 'error');
@@ -919,6 +916,46 @@ elMSoYMQakO</pre>
         'cd T:\\instapost && venv\\Scripts\\activate && python worker.py',
         'error'
       );
+    }
+  }
+
+  async function _pollAutoLoginStatus(username) {
+    const statusMessages = {
+      opening_chrome: '🌐 Abrindo Chrome...',
+      filling_credentials: '✏️ Preenchendo login e senha...',
+      logging_in: '🔐 Fazendo login...',
+      waiting_code: '📧 Aguardando código de verificação no email...',
+      code_found: '✅ Código encontrado!',
+      done: '✅ Login completo! Clique Salvar Sessão (disco verde)',
+      code_timeout: '⏱️ Código não chegou — preencha manualmente',
+      no_email: '⚠️ Sem email cadastrado — preencha código manualmente se pedir',
+      error: '❌ Erro no auto-login',
+    };
+    let lastStatus = '';
+    for (let i = 0; i < 60; i++) { // poll até 5min (60 * 5s)
+      await new Promise(r => setTimeout(r, 3000));
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 4000);
+        const r = await fetch(`http://localhost:17777/auto-login-status?username=${encodeURIComponent(username)}`, {
+          signal: ctrl.signal, mode: 'cors',
+        });
+        clearTimeout(t);
+        if (!r.ok) continue;
+        const data = await r.json();
+        const st = data.status || 'idle';
+        if (st === lastStatus) continue;
+        lastStatus = st;
+        const msg = statusMessages[st] || st;
+        if (st === 'code_found' || st === 'done') {
+          const code = data.code || '???';
+          alert(`🔑 Código de verificação pra @${username}:\n\n${code}\n\n${st === 'done' ? 'Já foi preenchido no Chrome! Clique Salvar Sessão.' : 'Preenchendo no Chrome...'}`);
+          if (st === 'done') return;
+        } else {
+          toast(msg, st === 'error' ? 'error' : 'info');
+        }
+        if (['done', 'error', 'code_timeout', 'no_email'].includes(st)) return;
+      } catch (_) {}
     }
   }
 

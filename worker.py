@@ -1634,6 +1634,20 @@ def _save_session_from_chrome(username: str) -> tuple[bool, str]:
             pass
 
 
+# Estado do auto-login (consultável via /auto-login-status)
+_auto_login_status: dict[str, dict] = {}
+_auto_login_status_lock = threading.Lock()
+
+
+def _set_auto_login_status(username: str, status: str, code: str = None):
+    with _auto_login_status_lock:
+        _auto_login_status[username.lower()] = {
+            "status": status,
+            "code": code,
+            "timestamp": time.time(),
+        }
+
+
 def _auto_login_flow(username: str, password: str, email: str = None, proxy: str = None):
     """Fluxo semi-automático: abre Chrome, preenche login/senha via CDP,
     espera verificação do IG, busca código no tempmail e preenche.
@@ -1641,6 +1655,7 @@ def _auto_login_flow(username: str, password: str, email: str = None, proxy: str
     Roda em thread separada pra não bloquear o HTTP server."""
     import websocket as _ws_auto
 
+    _set_auto_login_status(username, "opening_chrome")
     print(f"[auto-login] iniciando pra @{username}")
 
     # 1. Abre Chrome na página de login
@@ -1648,6 +1663,7 @@ def _auto_login_flow(username: str, password: str, email: str = None, proxy: str
         username, reset=True, proxy=proxy, clean_mobile=True,
     )
     if not ok:
+        _set_auto_login_status(username, "error")
         print(f"[auto-login] falha abrindo Chrome: {info}")
         return
 
@@ -1656,7 +1672,6 @@ def _auto_login_flow(username: str, password: str, email: str = None, proxy: str
     profile_dir = CHROME_PROFILES_DIR / safe
     port_file = profile_dir / "DevToolsActivePort"
 
-    # Espera até 20s pelo DevToolsActivePort
     deadline = time.time() + 20
     debug_port = None
     while time.time() < deadline:
@@ -1669,11 +1684,12 @@ def _auto_login_flow(username: str, password: str, email: str = None, proxy: str
         time.sleep(0.5)
 
     if not debug_port:
-        print(f"[auto-login] DevToolsActivePort não encontrado — Chrome não abriu com debug")
+        _set_auto_login_status(username, "error")
+        print(f"[auto-login] DevToolsActivePort não encontrado")
         return
 
-    # 3. Espera a página de login carregar
-    time.sleep(5)
+    # 3. Espera página carregar (rápido)
+    time.sleep(3)
 
     # 4. Conecta via CDP
     try:
@@ -1682,21 +1698,19 @@ def _auto_login_flow(username: str, password: str, email: str = None, proxy: str
         targets = json.loads(r.read().decode("utf-8"))
         page = next((t for t in targets if t.get("type") == "page"), None)
         if not page:
-            print(f"[auto-login] nenhuma aba encontrada")
+            _set_auto_login_status(username, "error")
             return
-        ws_url = page.get("webSocketDebuggerUrl")
-        ws = _ws_auto.create_connection(ws_url, timeout=10)
+        ws = _ws_auto.create_connection(page["webSocketDebuggerUrl"], timeout=10)
     except Exception as e:
-        print(f"[auto-login] falha conectando CDP: {e}")
+        _set_auto_login_status(username, "error")
+        print(f"[auto-login] falha CDP: {e}")
         return
 
     msg_id = [0]
 
     def cdp_send(method, params=None):
         msg_id[0] += 1
-        payload = {"id": msg_id[0], "method": method, "params": params or {}}
-        ws.send(json.dumps(payload))
-        # Drena resposta
+        ws.send(json.dumps({"id": msg_id[0], "method": method, "params": params or {}}))
         for _ in range(5):
             try:
                 resp = json.loads(ws.recv())
@@ -1710,7 +1724,9 @@ def _auto_login_flow(username: str, password: str, email: str = None, proxy: str
         return cdp_send("Runtime.evaluate", {"expression": expression})
 
     try:
-        # 5. Preenche username (Instagram usa name="email" ou name="username")
+        _set_auto_login_status(username, "filling_credentials")
+
+        # 5. Preenche username (rápido, sem delay desnecessário)
         print(f"[auto-login] preenchendo login @{username}")
         cdp_eval(f'''
             (function() {{
@@ -1725,11 +1741,9 @@ def _auto_login_flow(username: str, password: str, email: str = None, proxy: str
                 return "ok";
             }})()
         ''')
-        time.sleep(1)
+        time.sleep(0.3)
 
-        # 6. Preenche senha (Instagram usa name="pass" ou name="password")
-        print(f"[auto-login] preenchendo senha")
-        # Escapa caracteres especiais na senha pra JS
+        # 6. Preenche senha
         escaped_pw = password.replace("\\", "\\\\").replace('"', '\\"').replace("'", "\\'")
         cdp_eval(f'''
             (function() {{
@@ -1744,9 +1758,10 @@ def _auto_login_flow(username: str, password: str, email: str = None, proxy: str
                 return "ok";
             }})()
         ''')
-        time.sleep(1)
+        time.sleep(0.3)
 
-        # 7. Clica no botão de login
+        # 7. Clica login
+        _set_auto_login_status(username, "logging_in")
         print(f"[auto-login] clicando login")
         cdp_eval('''
             (function() {
@@ -1756,19 +1771,22 @@ def _auto_login_flow(username: str, password: str, email: str = None, proxy: str
             })()
         ''')
 
-        # 8. Espera resposta do Instagram (pode pedir código)
-        print(f"[auto-login] aguardando resposta do Instagram (15s)...")
-        time.sleep(15)
+        # 8. Espera resposta (reduzido de 15s pra 8s)
+        print(f"[auto-login] aguardando resposta do Instagram...")
+        time.sleep(8)
 
-        # 9. Se tem email tempmail, busca código de verificação automaticamente
+        # 9. Busca código de verificação
         if email:
-            print(f"[auto-login] buscando código de verificação em {email}...")
+            _set_auto_login_status(username, "waiting_code")
+            print(f"[auto-login] buscando código em {email}...")
             try:
                 from core.tempmail import fetch_instagram_code
-                code = fetch_instagram_code(email, timeout=120, poll_interval=5)
+                code = fetch_instagram_code(email, timeout=120, poll_interval=4)
                 if code:
-                    print(f"[auto-login] código encontrado: {code} — preenchendo")
-                    # Tenta preencher em campo de código (Instagram usa input genérico)
+                    _set_auto_login_status(username, "code_found", code=code)
+                    print(f"[auto-login] CÓDIGO: {code}")
+
+                    # Preenche código no campo
                     cdp_eval(f'''
                         (function() {{
                             var inputs = document.querySelectorAll('input[name="security_code"], input[name="verificationCode"], input[type="text"], input[type="number"]');
@@ -1785,7 +1803,8 @@ def _auto_login_flow(username: str, password: str, email: str = None, proxy: str
                             return "no_input";
                         }})()
                     ''')
-                    time.sleep(1)
+                    time.sleep(0.5)
+
                     # Clica confirmar
                     cdp_eval('''
                         (function() {
@@ -1797,22 +1816,25 @@ def _auto_login_flow(username: str, password: str, email: str = None, proxy: str
                                     return "clicked";
                                 }
                             }
-                            // Fallback: clica o último submit
                             var last = btns[btns.length - 1];
                             if (last) last.click();
                             return "fallback";
                         })()
                     ''')
-                    print(f"[auto-login] código preenchido e confirmado! Aguardando...")
-                    time.sleep(10)
+                    _set_auto_login_status(username, "done", code=code)
+                    print(f"[auto-login] código preenchido e confirmado!")
+                    time.sleep(5)
                 else:
-                    print(f"[auto-login] código não chegou — preencha manualmente no Chrome")
+                    _set_auto_login_status(username, "code_timeout")
+                    print(f"[auto-login] código não chegou — preencha manualmente")
             except Exception as e:
+                _set_auto_login_status(username, "error")
                 print(f"[auto-login] erro buscando código: {e}")
         else:
-            print(f"[auto-login] sem email cadastrado — se pedir código, preencha manualmente")
+            _set_auto_login_status(username, "no_email")
+            print(f"[auto-login] sem email — preencha código manualmente se pedir")
 
-        print(f"[auto-login] fluxo concluído pra @{username} — verifique o Chrome e clique 'Salvar Sessão'")
+        print(f"[auto-login] concluído pra @{username} — clique 'Salvar Sessão'")
 
     except Exception as e:
         print(f"[auto-login] erro: {e}")
@@ -1846,11 +1868,19 @@ class _LocalAPIHandler(BaseHTTPRequestHandler):
         self._send(204)
 
     def do_GET(self):
-        from urllib.parse import urlparse
+        from urllib.parse import urlparse, parse_qs
         import json as _json
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
         if path == "/health":
             body = _json.dumps({"ok": True, "worker_name": WORKER_NAME}).encode("utf-8")
+            self._send(200, body)
+        elif path == "/auto-login-status":
+            qs = parse_qs(parsed.query)
+            username = (qs.get("username") or [""])[0].strip().lower()
+            with _auto_login_status_lock:
+                status = _auto_login_status.get(username, {"status": "idle"})
+            body = _json.dumps({"ok": True, **status}).encode("utf-8")
             self._send(200, body)
         else:
             self._send(404, b'{"error":"not found"}')
