@@ -732,6 +732,9 @@ elMSoYMQakO</pre>
             <button class="btn btn-ghost btn-sm" onclick="onOpenBrowser('${a.username}', {clean_mobile: true})" title="📲 SIMULADOR MOBILE (precisa worker.py rodando NESTE PC): abre Chrome local com UA Android + proxy da conta. Vc loga manual no Insta. Depois clica 'Salvar Sessão' (botão disco verde). 💡 Se vc acessa o painel de outro PC, use a Extensão Chrome (botão Extensão no topo) — funciona de qualquer lugar.">
               <i data-lucide="smartphone" class="icon"></i>
             </button>
+            <button class="btn btn-ghost btn-sm" onclick="onAutoLogin('${a.username}')" title="🤖 AUTO LOGIN: abre Chrome, preenche login/senha automaticamente, busca código de verificação no email e preenche. Precisa worker.py rodando + email cadastrado." style="color:#a78bfa">
+              <i data-lucide="wand-2" class="icon"></i>
+            </button>
             <button class="btn btn-ghost btn-sm" onclick="onOpenBrowser('${a.username}', {reset: true})" title="RESETAR profile e abrir Chrome limpo (use quando aparece ERR_TOO_MANY_REDIRECTS ou perfil esquisito sem header)" style="opacity:.6">
               <i data-lucide="refresh-ccw" class="icon"></i>
             </button>
@@ -848,6 +851,74 @@ elMSoYMQakO</pre>
       await load();
     } catch (e) {
       toast(e.message, 'error');
+    }
+  }
+
+  async function onAutoLogin(username) {
+    // Auto-login: abre Chrome, preenche login/senha, busca código email
+    const acc = accounts.find(a => a.username === username);
+    if (!acc) { toast('Conta não encontrada', 'error'); return; }
+
+    // Busca senha via API (campo password é encriptado no frontend)
+    let password = '';
+    try {
+      const creds = await api(`/api/accounts/${username}/totp-code`);
+      password = creds.password || '';
+    } catch (_) {}
+    if (!password) {
+      toast('Senha não encontrada pra essa conta', 'error');
+      return;
+    }
+
+    const email = acc.email || '';
+    if (!email) {
+      const proceed = confirm(
+        `@${username} não tem email cadastrado.\n\n` +
+        `O auto-login vai preencher login/senha mas NÃO vai buscar código de verificação automaticamente.\n\n` +
+        `Dica: cadastre o email tempmail no campo "email" da conta.\n\nContinuar mesmo assim?`
+      );
+      if (!proceed) return;
+    }
+
+    toast(`🤖 Iniciando auto-login pra @${username}...`, 'info');
+
+    // Pausa worker 30min
+    try {
+      await api(`/api/accounts/${username}/pause-worker?minutes=30`, { method: 'POST' });
+    } catch (_) {}
+
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 10000);
+      const r = await fetch(`http://localhost:17777/auto-login?username=${encodeURIComponent(username)}`, {
+        method: 'POST',
+        mode: 'cors',
+        signal: ctrl.signal,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          password: password,
+          email: email,
+          proxy: acc.proxy || null,
+        }),
+      });
+      clearTimeout(t);
+      if (r.ok) {
+        toast(
+          `🤖 Auto-login iniciado pra @${username}!\n` +
+          `Chrome vai abrir, preencher login/senha e buscar código do email.\n` +
+          `Quando terminar, clique "Salvar Sessão" (disco verde).`,
+          'success'
+        );
+      } else {
+        const data = await r.json().catch(() => ({}));
+        toast(data.error || 'Falha no auto-login', 'error');
+      }
+    } catch (_) {
+      toast(
+        'Worker local não está rodando. Abra PowerShell e rode:\n' +
+        'cd T:\\instapost && venv\\Scripts\\activate && python worker.py',
+        'error'
+      );
     }
   }
 
