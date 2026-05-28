@@ -13,6 +13,23 @@ from instagrapi import Client
 
 # ----------- REELS -----------
 
+def _generate_thumbnail(video_path: Path) -> Optional[Path]:
+    """Gera thumbnail do vídeo via ffmpeg (fallback se MoviePy não estiver instalado)."""
+    thumb_path = video_path.with_suffix(".jpg")
+    try:
+        import subprocess
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", str(video_path), "-ss", "00:00:01",
+             "-vframes", "1", "-q:v", "2", str(thumb_path)],
+            capture_output=True, timeout=30,
+        )
+        if thumb_path.exists() and thumb_path.stat().st_size > 0:
+            return thumb_path
+    except Exception:
+        pass
+    return None
+
+
 def post_reel(cl: Client, video_path: str, caption: str) -> dict:
     """
     Posta um Reel.
@@ -23,10 +40,13 @@ def post_reel(cl: Client, video_path: str, caption: str) -> dict:
         if not video.exists():
             return {"success": False, "media_id": None, "error": f"Arquivo não encontrado: {video_path}"}
 
-        media = cl.clip_upload(
-            path=video,
-            caption=caption,
-        )
+        # Gera thumbnail via ffmpeg pra evitar dependência de MoviePy
+        thumb = _generate_thumbnail(video)
+        kwargs = {"path": video, "caption": caption}
+        if thumb:
+            kwargs["thumbnail"] = thumb
+
+        media = cl.clip_upload(**kwargs)
         return {"success": True, "media_id": str(media.pk), "error": None}
     except Exception as e:
         return {"success": False, "media_id": None, "error": str(e)}
@@ -81,6 +101,10 @@ def post_story_video(cl: Client, video_path: str, caption: str = "",
         links = _build_story_links(link_url, link_text)
         if links:
             kwargs["links"] = links
+        # Thumbnail via ffmpeg (evita MoviePy)
+        thumb = _generate_thumbnail(video)
+        if thumb:
+            kwargs["thumbnail"] = thumb
 
         media = cl.video_upload_to_story(**kwargs)
         return {"success": True, "media_id": str(media.pk), "error": None}
