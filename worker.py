@@ -1795,6 +1795,17 @@ def _auto_login_flow(username: str, password: str, email: str = None, proxy: str
         # 9. Busca código de verificação
         if email:
             _set_auto_login_status(username, "waiting_code")
+            # Notifica servidor que está buscando código
+            try:
+                import requests as _req_st
+                _req_st.post(
+                    f"{SERVER_URL}/api/auto-login-code/{username}",
+                    json={"code": None, "status": "waiting_code"},
+                    headers={"X-Worker-Token": WORKER_TOKEN},
+                    timeout=5,
+                )
+            except Exception:
+                pass
             print(f"[auto-login] buscando código em {email}...")
             try:
                 from core.tempmail import fetch_instagram_code
@@ -1802,6 +1813,19 @@ def _auto_login_flow(username: str, password: str, email: str = None, proxy: str
                 if code:
                     _set_auto_login_status(username, "code_found", code=code)
                     print(f"[auto-login] CÓDIGO: {code}")
+
+                    # Envia código pro servidor (frontend consulta de lá)
+                    try:
+                        import requests as _req_code
+                        _req_code.post(
+                            f"{SERVER_URL}/api/auto-login-code/{username}",
+                            json={"code": code, "status": "code_found"},
+                            headers={"X-Worker-Token": WORKER_TOKEN},
+                            timeout=5,
+                        )
+                        print(f"[auto-login] código enviado pro servidor")
+                    except Exception as e:
+                        print(f"[auto-login] falha enviando código pro servidor: {e}")
 
                     # Reconecta CDP AGORA (página pode ter mudado desde o login)
                     try:

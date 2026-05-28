@@ -2780,6 +2780,44 @@ def api_clear_session_renewal(username: str, user=Depends(auth.require_user)):
     raise HTTPException(404, "Conta não encontrada")
 
 
+# ---------- Auto-login: códigos de verificação ----------
+# Worker envia código pra cá, frontend consulta (mesma origem = sem CORS)
+_auto_login_codes: dict[str, dict] = {}
+
+@app.post("/api/auto-login-code/{username}")
+def api_set_auto_login_code(username: str, request: Request):
+    """Worker envia código de verificação encontrado no tempmail."""
+    _require_worker(request)
+    import json as _json_alc
+    body = _json_alc.loads(request.body()) if hasattr(request, 'body') else {}
+    try:
+        raw = asyncio.get_event_loop().run_until_complete(request.body())
+        body = json.loads(raw)
+    except Exception:
+        body = {}
+    code = body.get("code") or ""
+    status = body.get("status") or "code_found"
+    _auto_login_codes[username.lower()] = {
+        "code": code,
+        "status": status,
+        "timestamp": time.time(),
+    }
+    print(f"[auto-login] código recebido pra @{username}: {code} ({status})")
+    return {"ok": True}
+
+
+@app.get("/api/auto-login-code/{username}")
+def api_get_auto_login_code(username: str):
+    """Frontend consulta se tem código disponível."""
+    data = _auto_login_codes.get(username.lower())
+    if not data:
+        return {"ok": True, "status": "idle", "code": None}
+    # Expira após 5 minutos
+    if time.time() - data.get("timestamp", 0) > 300:
+        return {"ok": True, "status": "expired", "code": None}
+    return {"ok": True, **data}
+
+
 # ---------- API: videos ----------
 
 @app.get("/api/videos")

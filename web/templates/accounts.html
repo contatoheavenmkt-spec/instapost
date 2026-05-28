@@ -920,43 +920,40 @@ elMSoYMQakO</pre>
   }
 
   async function _pollAutoLoginStatus(username) {
-    const statusMessages = {
-      opening_chrome: '🌐 Abrindo Chrome...',
-      filling_credentials: '✏️ Preenchendo login e senha...',
-      logging_in: '🔐 Fazendo login...',
-      waiting_code: '📧 Aguardando código de verificação no email...',
-      code_found: '✅ Código encontrado!',
-      done: '✅ Login completo! Clique Salvar Sessão (disco verde)',
-      code_timeout: '⏱️ Código não chegou — preencha manualmente',
-      no_email: '⚠️ Sem email cadastrado — preencha código manualmente se pedir',
-      error: '❌ Erro no auto-login',
-    };
+    // Faz polling no SERVIDOR (mesma origem, sem CORS/mixed content)
     let lastStatus = '';
-    for (let i = 0; i < 60; i++) { // poll até 5min (60 * 5s)
+    let codeShown = false;
+    for (let i = 0; i < 60; i++) {
       await new Promise(r => setTimeout(r, 3000));
       try {
-        const ctrl = new AbortController();
-        const t = setTimeout(() => ctrl.abort(), 4000);
-        const r = await fetch(`http://localhost:17777/auto-login-status?username=${encodeURIComponent(username)}`, {
-          signal: ctrl.signal, mode: 'cors',
-        });
-        clearTimeout(t);
-        if (!r.ok) continue;
-        const data = await r.json();
-        const st = data.status || 'idle';
-        if (st === lastStatus) continue;
+        const r = await api(`/api/auto-login-code/${encodeURIComponent(username)}`);
+        const st = r.status || 'idle';
+        if (st === lastStatus && st !== 'code_found') continue;
         lastStatus = st;
-        const msg = statusMessages[st] || st;
-        if (st === 'code_found' || st === 'done') {
-          const code = data.code || '???';
-          alert(`🔑 Código de verificação pra @${username}:\n\n${code}\n\n${st === 'done' ? 'Já foi preenchido no Chrome! Clique Salvar Sessão.' : 'Preenchendo no Chrome...'}`);
-          if (st === 'done') return;
-        } else {
-          toast(msg, st === 'error' ? 'error' : 'info');
+
+        if (st === 'waiting_code') {
+          toast('📧 Buscando código de verificação no email...', 'info');
+        } else if ((st === 'code_found') && !codeShown) {
+          codeShown = true;
+          const code = r.code || '???';
+          // Mostra popup grande com o código
+          await confirmModal({
+            title: '🔑 Código de Verificação',
+            message: `
+              <div style="text-align:center;padding:20px 0">
+                <div style="font-size:14px;color:#aaa;margin-bottom:10px">Código pra @${username}:</div>
+                <div style="font-size:48px;font-weight:bold;letter-spacing:12px;color:#00ff88;font-family:monospace;background:#1a1a2e;padding:20px 30px;border-radius:12px;display:inline-block;user-select:all;cursor:text">${code}</div>
+                <div style="margin-top:15px;font-size:13px;color:#888">Cole no campo de verificação do Instagram.<br>O código também foi preenchido automaticamente no Chrome.</div>
+              </div>`,
+            confirmText: 'OK, entendi',
+          });
+          return;
+        } else if (st === 'expired' || st === 'idle') {
+          // Ainda não chegou, continua esperando
         }
-        if (['done', 'error', 'code_timeout', 'no_email'].includes(st)) return;
       } catch (_) {}
     }
+    toast('⏱️ Timeout — código não chegou. Verifique o email manualmente.', 'warning');
   }
 
   async function onSaveSession(username) {
