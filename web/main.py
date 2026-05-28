@@ -784,11 +784,9 @@ CHALLENGE_PATTERNS = (
 # Diferente de challenge: aqui não tem ação clara pro user resolver na hora.
 BLOCK_PATTERNS = (
     "feedback_required",
-    "login_required",
     "please_wait", "please wait",
     "try_again_later", "try again later",
     "account_disabled", "account disabled",
-    "user_has_logged_out",
     "instagram bloqueou",  # nossa string custom em core/profile.py
 )
 
@@ -802,6 +800,8 @@ SESSION_RENEWAL_PATTERNS = (
     "fresh login api desativado",             # msg explicativa
     "salvar sessão",                          # genérico — captura instruções de Save Sessão
     "refaça login no chrome",                 # variante da mesma msg
+    "login_required",                         # cookies expiraram no IG (não é bloqueio)
+    "user_has_logged_out",                    # sessão invalidada pelo IG
 )
 
 

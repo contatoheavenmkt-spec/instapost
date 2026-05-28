@@ -74,6 +74,10 @@ CLIENT_CACHE_TTL_SECONDS = 10 * 60
 TMP_DIR = Path(__file__).resolve().parent / ".worker_tmp"
 TMP_DIR.mkdir(exist_ok=True)
 
+# Perfis isolados do Chrome — ao lado do worker (não em Path.home() que pode estar cheio)
+CHROME_PROFILES_DIR = Path(__file__).resolve().parent / "InstaposterProfiles"
+CHROME_PROFILES_DIR.mkdir(exist_ok=True)
+
 # Estado global compartilhado entre threads de jobs
 _stop_flag = threading.Event()
 _account_locks: dict[str, threading.Lock] = {}
@@ -1104,7 +1108,7 @@ def _open_chrome_for_account(
     # Vantagem: cookies do Chrome ficam entre launches → Smartphone abre
     # JÁ LOGADO depois da 1ª vez. Requer kill robusto de Chromes anteriores
     # antes de relançar pra evitar conflito singleton.
-    profile_base = Path.home() / "InstaposterProfiles"
+    profile_base = CHROME_PROFILES_DIR
     profile_base.mkdir(parents=True, exist_ok=True)
 
     # Migration cleanup: remove profiles timestamped antigos (legado do experimento
@@ -1176,6 +1180,11 @@ def _open_chrome_for_account(
         # Modo antigo: tenta auto-login com cookies + proxy
         if not reset:
             session_path = _find_session_file(safe)
+            # Se não tem sessão local, tenta baixar do servidor central
+            if not session_path:
+                if _download_session_from_server(safe):
+                    print(f"[local-api] sessão de @{safe} baixada do servidor")
+                    session_path = _find_session_file(safe)
             if session_path:
                 cdp_cookies = _extract_cdp_cookies(session_path)
                 if not cdp_cookies:
@@ -1352,7 +1361,7 @@ def _save_session_from_chrome(username: str) -> tuple[bool, str]:
         return False, "username inválido"
 
     # Estratégia: profiles têm timestamp suffix (<user>_<ts>).
-    profile_base = Path.home() / "InstaposterProfiles"
+    profile_base = CHROME_PROFILES_DIR
     candidates: list[Path] = []
     if (profile_base / safe).exists():
         candidates.append(profile_base / safe)
