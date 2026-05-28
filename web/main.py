@@ -1807,17 +1807,22 @@ _RE_TOTP_SECRET = _re_acct.compile(r"^[A-Z2-7]{16,64}$")
 _RE_USERNAME = _re_acct.compile(r"^[a-z0-9._]{1,30}$", _re_acct.IGNORECASE)
 # Numero solto tipo "1", "2)", "3:"
 _RE_JUST_NUMBER = _re_acct.compile(r"^\d{1,4}[\.\)\-:]?$")
+# Email: algo@algo.algo
+_RE_EMAIL = _re_acct.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 
 
 def _classify_field(s: str) -> str:
-    """Identifica o tipo do campo: '2fa', 'username', 'password' ou 'unknown'."""
+    """Identifica o tipo do campo: 'email', '2fa', 'username', 'password' ou 'unknown'."""
     s = s.strip()
+    # Email tem prioridade (contém @ — fácil de detectar)
+    if _RE_EMAIL.match(s):
+        return "email"
     if _RE_TOTP_SECRET.match(s):
         return "2fa"
     # Username Insta NÃO pode ter espaços/símbolos exceto . _
     if _RE_USERNAME.match(s) and not any(c in s for c in (" ", ":", "|", ";")):
         return "username"
-    # Resto é senha (qualquer coisa que não bate em 2fa nem username)
+    # Resto é senha (qualquer coisa que não bate em email, 2fa nem username)
     return "password"
 
 
@@ -1847,11 +1852,13 @@ def _parse_account_block(lines: list[str]) -> Optional[dict]:
         return None
 
     # Classifica cada linha
-    fields = {"2fa": None, "username": None, "password": None}
+    fields = {"2fa": None, "username": None, "password": None, "email": None}
     unclassified = []
     for s in cleaned:
         cat = _classify_field(s)
-        if cat == "2fa" and not fields["2fa"]:
+        if cat == "email" and not fields["email"]:
+            fields["email"] = s
+        elif cat == "2fa" and not fields["2fa"]:
             fields["2fa"] = s
         elif cat == "username" and not fields["username"]:
             fields["username"] = s
@@ -1874,6 +1881,7 @@ def _parse_account_block(lines: list[str]) -> Optional[dict]:
         "username": fields["username"],
         "password": fields["password"],
         "totp_secret": fields["2fa"],
+        "email": fields["email"],
     }
 
 
@@ -1896,11 +1904,13 @@ def _parse_account_line(line: str) -> Optional[dict]:
     if len(parts) < 2:
         return None
 
-    # Detecta automaticamente qual posição tem o 2FA (base32)
-    fields = {"2fa": None, "username": None, "password": None}
+    # Detecta automaticamente qual posição tem o 2FA (base32) ou email
+    fields = {"2fa": None, "username": None, "password": None, "email": None}
     for p in parts:
         cat = _classify_field(p)
-        if cat == "2fa" and not fields["2fa"]:
+        if cat == "email" and not fields["email"]:
+            fields["email"] = p
+        elif cat == "2fa" and not fields["2fa"]:
             fields["2fa"] = p
         elif cat == "username" and not fields["username"]:
             fields["username"] = p
@@ -1922,6 +1932,7 @@ def _parse_account_line(line: str) -> Optional[dict]:
         "username": fields["username"],
         "password": fields["password"],
         "totp_secret": fields["2fa"],
+        "email": fields["email"],
     }
 
 
@@ -2049,7 +2060,8 @@ def api_bulk_import(payload: BulkImportIn, user=Depends(auth.require_user)):
             # Normaliza username pra lowercase (consistência)
             "username": entry["username"].strip().lower(),
             "password": entry["password"],
-            "totp_secret": entry["totp_secret"],
+            "totp_secret": entry.get("totp_secret"),
+            "email": entry.get("email"),
             "proxy": None,
             "active": True,
         })
