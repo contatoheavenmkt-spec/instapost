@@ -2782,6 +2782,7 @@ def api_get_remote_job(job_id: str, user=Depends(auth.require_user)):
 
 @app.post("/api/remote-jobs")
 def api_create_remote_job(payload: RemoteJobIn, request: Request, user=Depends(auth.require_user)):
+    from core import paths as _paths
     # Valida video
     video_name = safe_name(payload.video)
     media_path = PENDING_DIR / video_name
@@ -2941,6 +2942,7 @@ def _build_pending_pool(only_names: Optional[list[str]] = None, kind_filter: str
 
 @app.post("/api/remote-jobs/dispatch-diversified")
 def api_dispatch_diversified(payload: DiversifiedDispatchIn, request: Request, user=Depends(auth.require_user)):
+    from core import paths as _paths
     """Distribui vídeos DIFERENTES entre as contas.
 
     Algoritmo:
