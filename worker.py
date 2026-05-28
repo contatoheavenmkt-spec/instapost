@@ -282,6 +282,16 @@ def execute_job(job: dict):
     operation = job.get("operation", "post")
     params = job.get("params") or {}
 
+    # CRÍTICO: seta workspace do job ANTES de qualquer operação.
+    # Sem isso, SESSIONS_DIR aponta pro workspace default e não encontra
+    # sessões de contas em outros workspaces.
+    ws_slug = job.get("workspace_slug", "default")
+    try:
+        from core import paths as _paths_job
+        _paths_job.set_workspace(ws_slug)
+    except Exception:
+        pass
+
     def log(msg):
         print(f"[{job_id[:8]}] {msg}")
         log_to_server(job_id, msg)
