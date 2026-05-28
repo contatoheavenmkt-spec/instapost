@@ -195,76 +195,57 @@ def get_client(
         with_retry(_attempt_login, max_retries=3, base_delay=4.0, max_delay=300.0, label=f"login:{username}")
 
     # Tentativa 1: usar sessão salva (SEM refazer login)
+    # File lock garante atomicidade: 2 jobs paralelos pra mesma conta esperam.
     from core.file_lock import file_lock as _file_lock
+    # Detecta se a sessão foi salva manual via Chrome (Save Sessão verde).
+    # Se sim, CONFIA nela e NÃO faz teste (que pode falhar por rate-limit
+    # temporário e disparar fresh login = challenge desnecessário).
+    # ESTE FLUXO FUNCIONAVA ANTES — sessão manual é usada direto.
     session_is_manual = False
-    session_age_hours = 0
     if session_file.exists():
         try:
             import json as _json2
-            import time as _time2
             _peek = _json2.loads(session_file.read_text(encoding="utf-8"))
             session_is_manual = bool(_peek.get("manually_saved") or _peek.get("from_chrome"))
-            saved_at = _peek.get("saved_at") or _peek.get("last_login") or 0
-            if saved_at:
-                session_age_hours = (_time2.time() - saved_at) / 3600
         except Exception:
             pass
     if session_file.exists():
         try:
             with _file_lock(session_file, timeout=15):
                 cl.load_settings(session_file)
+                # Set creds pra que, em LoginRequired, o instagrapi possa relogar sozinho
                 cl.username = username
                 cl.password = password
-
-            # Sessão muito velha (>6h)? Sempre testa antes de usar.
-            # Instagram invalida sessões periodicamente.
-            needs_validation = session_age_hours > 6 or not session_is_manual
-            if session_is_manual and session_age_hours <= 6:
-                # Sessão manual recente — confia sem testar (evita rate limit
-                # no get_timeline_feed que poderia disparar fresh login).
-                print(f"[{username}] Sessão MANUAL (Chrome, {session_age_hours:.1f}h) — usando direto")
+            if session_is_manual:
+                # Sessão veio de login manual no Chrome — CONFIA, pula teste.
+                # Evita: rate limit no get_timeline_feed → assume "expired" →
+                # força login API → IG dá challenge → conta morre.
+                print(f"[{username}] Sessão MANUAL (Chrome) — usando direto sem teste")
                 return cl
-
-            # Testa sessão (manual velha ou sessão API)
-            try:
-                cl.get_timeline_feed()
-                label = "MANUAL" if session_is_manual else "API"
-                print(f"[{username}] Sessão {label} ({session_age_hours:.1f}h) — validada ✓")
-                # Atualiza timestamp de validação
-                try:
-                    import time as _tv
-                    _sd = _json2.loads(session_file.read_text(encoding="utf-8"))
-                    _sd["last_validated_at"] = int(_tv.time())
-                    session_file.write_text(_json2.dumps(_sd, ensure_ascii=False, indent=2), encoding="utf-8")
-                except Exception:
-                    pass
-                return cl
-            except LoginRequired:
-                if session_is_manual:
-                    print(f"[{username}] ⚠️ Sessão manual EXPIROU ({session_age_hours:.1f}h)")
-                    raise ManualReconnectNeeded(
-                        f"Sessão de @{username} expirou ({session_age_hours:.0f}h). "
-                        f"Refaça: Auto Login → Salvar Sessão → Conectar."
-                    )
-                print(f"[{username}] Sessão expirou, fazendo login novo...")
-            except Exception as e:
-                err_str = str(e).lower()
-                is_fatal = ("redirect" in err_str or "json" in err_str or
-                           "decode" in err_str or "challenge" in err_str or
-                           "checkpoint" in err_str)
-                if session_is_manual and is_fatal:
-                    print(f"[{username}] ⚠️ Sessão manual incompatível ({e})")
-                    raise ManualReconnectNeeded(
-                        f"Sessão de @{username} incompatível com API mobile. "
-                        f"Use: Auto Login → Salvar Sessão → Conectar."
-                    )
-                if session_is_manual and not is_fatal:
-                    # Rate limit ou erro de rede temporário — usa mesmo assim
-                    print(f"[{username}] Sessão manual com erro temporário ({e}) — usando")
-                    return cl
-                print(f"[{username}] Sessão inválida ({e}), refazendo...")
+            # Teste leve da sessão (só pra sessões API, não manuais).
+            cl.get_timeline_feed()
+            print(f"[{username}] Sessão restaurada ✓ (sem relogin)")
+            return cl
+        except LoginRequired:
+            if session_is_manual:
+                # Sessão manual rejeitada com 401 = cookies realmente inválidos.
+                # NÃO faz fresh login API (causaria challenge). Levanta erro pro
+                # user re-fazer Save Sessão manual.
+                print(f"[{username}] ⚠️ Sessão manual EXPIROU — refaça Save Sessão")
+                raise ManualReconnectNeeded(
+                    f"Sessão manual de @{username} expirou. Abra Chrome via Smartphone, "
+                    f"loga manual, clica Salvar Sessão de novo. Worker NÃO tentou login "
+                    f"API pra não disparar challenge automático."
+                )
+            print(f"[{username}] Sessão expirou, fazendo login novo...")
         except Exception as e:
-            print(f"[{username}] Erro carregando sessão: {e}")
+            if session_is_manual:
+                # Erro não-401 (rate limit, network, etc) em sessão manual = não
+                # descarta. Usa assim mesmo. Se realmente quebrada, próximas calls
+                # do worker vão dar erro e aí marca como blocked/needs_verification.
+                print(f"[{username}] Sessão manual com erro temporário ({e}) — usando mesmo assim")
+                return cl
+            print(f"[{username}] Sessão inválida ({e}), refazendo...")
 
     # GUARDA: bloqueia fresh login API se o caller não autorizou.
     # Auto-loops (post, like, follow-back, sync, health) passam allow_fresh_login=False
