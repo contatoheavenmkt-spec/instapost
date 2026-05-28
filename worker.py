@@ -1775,6 +1775,23 @@ def _auto_login_flow(username: str, password: str, email: str = None, proxy: str
         print(f"[auto-login] aguardando resposta do Instagram...")
         time.sleep(8)
 
+        # 8.5 Reconecta CDP (página pode ter redirecionado após login)
+        try:
+            ws.close()
+        except Exception:
+            pass
+        try:
+            import urllib.request as _urlr2
+            r2 = _urlr2.urlopen(f"http://127.0.0.1:{debug_port}/json", timeout=5)
+            targets2 = json.loads(r2.read().decode("utf-8"))
+            page2 = next((t for t in targets2 if t.get("type") == "page"), None)
+            if page2:
+                ws = _ws_auto.create_connection(page2["webSocketDebuggerUrl"], timeout=10)
+                msg_id[0] = 0
+                print(f"[auto-login] CDP reconectado na página: {page2.get('url', '?')[:60]}")
+        except Exception as e:
+            print(f"[auto-login] falha reconectando CDP: {e}")
+
         # 9. Busca código de verificação
         if email:
             _set_auto_login_status(username, "waiting_code")
