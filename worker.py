@@ -1688,8 +1688,8 @@ def _auto_login_flow(username: str, password: str, email: str = None, proxy: str
         print(f"[auto-login] DevToolsActivePort não encontrado")
         return
 
-    # 3. Espera página carregar (rápido)
-    time.sleep(3)
+    # 3. Espera página carregar
+    time.sleep(2)
 
     # 4. Conecta via CDP
     try:
@@ -1771,9 +1771,9 @@ def _auto_login_flow(username: str, password: str, email: str = None, proxy: str
             })()
         ''')
 
-        # 8. Espera resposta (reduzido de 15s pra 8s)
-        print(f"[auto-login] aguardando resposta do Instagram...")
-        time.sleep(8)
+        # 8. Espera resposta do Instagram
+        print(f"[auto-login] aguardando resposta do Instagram (5s)...")
+        time.sleep(5)
 
         # 8.5 Reconecta CDP (página pode ter redirecionado após login)
         try:
@@ -1803,17 +1803,58 @@ def _auto_login_flow(username: str, password: str, email: str = None, proxy: str
                     _set_auto_login_status(username, "code_found", code=code)
                     print(f"[auto-login] CÓDIGO: {code}")
 
-                    # Mostra banner GIGANTE no Chrome com o código
-                    cdp_eval(f'''
-                        (function() {{
-                            var d = document.createElement('div');
-                            d.id = 'auto-login-code-banner';
-                            d.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:999999;background:#1a1a2e;color:#00ff88;font-size:28px;font-weight:bold;text-align:center;padding:20px;border-bottom:3px solid #00ff88;font-family:monospace;';
-                            d.innerHTML = '🔑 CÓDIGO: <span style="font-size:42px;letter-spacing:8px;color:#fff">{code}</span> — preenchido automaticamente';
-                            document.body.prepend(d);
-                            setTimeout(function() {{ d.remove(); }}, 30000);
-                        }})()
-                    ''')
+                    # Reconecta CDP AGORA (página pode ter mudado desde o login)
+                    try:
+                        ws.close()
+                    except Exception:
+                        pass
+                    try:
+                        import urllib.request as _urlr3
+                        r3 = _urlr3.urlopen(f"http://127.0.0.1:{debug_port}/json", timeout=5)
+                        targets3 = json.loads(r3.read().decode("utf-8"))
+                        page3 = next((t for t in targets3 if t.get("type") == "page"), None)
+                        if page3:
+                            ws = _ws_auto.create_connection(page3["webSocketDebuggerUrl"], timeout=10)
+                            msg_id[0] = 0
+                            print(f"[auto-login] CDP reconectado: {page3.get('url', '?')[:80]}")
+                        else:
+                            print(f"[auto-login] AVISO: nenhuma aba encontrada pra injetar código")
+                    except Exception as e:
+                        print(f"[auto-login] AVISO: falha reconectando CDP: {e}")
+
+                    # Mostra o código de 3 formas:
+                    # 1) Título da janela (sempre visível na barra de tarefas)
+                    try:
+                        cdp_eval(f'document.title = "CÓDIGO: {code}"')
+                        print(f"[auto-login] título atualizado")
+                    except Exception as e:
+                        print(f"[auto-login] falha título: {e}")
+
+                    # 2) Banner fixo no topo da página
+                    try:
+                        cdp_eval(f'''
+                            (function() {{
+                                var d = document.createElement('div');
+                                d.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:999999;background:#1a1a2e;color:#00ff88;font-size:28px;font-weight:bold;text-align:center;padding:20px;border-bottom:3px solid #00ff88;font-family:monospace;';
+                                d.innerHTML = 'CÓDIGO: <span style="font-size:42px;letter-spacing:8px;color:#fff">{code}</span>';
+                                document.body.prepend(d);
+                                return "banner_ok";
+                            }})()
+                        ''')
+                        print(f"[auto-login] banner injetado")
+                    except Exception as e:
+                        print(f"[auto-login] falha banner: {e}")
+
+                    # 3) Alert nativo (impossível de perder)
+                    try:
+                        cdp_send("Page.handleJavaScriptDialog", {"accept": True})
+                    except Exception:
+                        pass
+                    try:
+                        cdp_eval(f'setTimeout(function(){{ alert("CÓDIGO DE VERIFICAÇÃO: {code}"); }}, 500)')
+                        print(f"[auto-login] alert disparado")
+                    except Exception as e:
+                        print(f"[auto-login] falha alert: {e}")
 
                     # Preenche código no campo
                     cdp_eval(f'''
