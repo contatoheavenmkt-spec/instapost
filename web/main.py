@@ -59,8 +59,7 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 # Rotas que dispensam login do PAINEL (login, signup, estáticos, health, redirect curto, API do worker)
 # API do worker tem auth própria via header X-Worker-Token (em vez de cookie de sessão)
-# API da extensão tem auth via Authorization: Bearer <extension_token>
-PUBLIC_PATH_PREFIXES = ("/login", "/signup/", "/static/", "/api/health", "/r/", "/api/worker/", "/api/sessions/")
+PUBLIC_PATH_PREFIXES = ("/login", "/signup/", "/static/", "/api/health", "/r/", "/api/worker/")
 
 
 class RequireLoginMiddleware(BaseHTTPMiddleware):
@@ -94,17 +93,6 @@ app.add_middleware(
     same_site="lax",
     # HTTPS-only só em prod (atrás de reverse proxy com TLS)
     https_only=os.environ.get("HTTPS_ONLY", "").lower() in ("1", "true", "yes"),
-)
-
-# CORS pra extensão Chrome: aceita qualquer origem chrome-extension://*
-# (extensão é instalada com ID aleatório, não dá pra whitelistar pré-fixo)
-from fastapi.middleware.cors import CORSMiddleware as _CORS
-app.add_middleware(
-    _CORS,
-    allow_origin_regex=r"^chrome-extension://.+$",
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization"],
-    allow_credentials=False,  # extensão usa Bearer token, não cookies
 )
 auth.ensure_owner_seed()
 
@@ -386,125 +374,6 @@ def local_ip() -> str:
         s.close()
 
 
-# ---------- onboarding ----------
-
-def _compute_onboarding_status(request: Request, user: dict) -> dict:
-    """Detecta progresso do onboarding lendo estado do sistema.
-    Cada step retorna {done: bool, hint: str, value: int|str opcional}.
-    """
-    from core import paths as _paths
-    from web.workers import manager as worker_manager
-    from web.remote_jobs import manager as rjob_manager
-
-    # Step 1: pelo menos 1 conta cadastrada
-    accounts = load_accounts()
-    active = [a for a in accounts if a.get("active", True)]
-
-    # Step 2: worker VPS online (qualquer worker online conta)
-    workers = worker_manager.list(hide_token=True)
-    online_workers = [w for w in workers if w.get("online")]
-
-    # Step 3: token de extensão gerado
-    u = auth.find_user(user["email"]) if user else None
-    has_ext_token = bool(u and u.get("extension_token"))
-
-    # Step 4: pelo menos 1 conta com session manual salva (cookies)
-    sessions_with_cookies = 0
-    ws_slug = _paths.get_workspace()
-    sessions_path = _paths.sessions_dir(ws_slug)
-    for a in active:
-        sf = sessions_path / f"{a['username']}.json"
-        if sf.exists():
-            try:
-                jd = json.loads(sf.read_text(encoding="utf-8"))
-                if jd.get("manually_saved") or jd.get("from_chrome") or jd.get("from_extension"):
-                    sessions_with_cookies += 1
-            except Exception:
-                pass
-
-    # Step 5: pelo menos 1 mídia na biblioteca
-    pending_count = 0
-    if PENDING_DIR.exists():
-        for p in PENDING_DIR.iterdir():
-            if p.is_file() and p.suffix.lower() in MEDIA_EXTS and not p.name.endswith(".meta.json"):
-                pending_count += 1
-
-    # Step 6: pelo menos 1 post bem-sucedido
-    has_posted = any(
-        j.operation == "post" and j.status == "done" and j.workspace_slug == ws_slug
-        for j in rjob_manager.snapshot_values()
-    )
-
-    steps = [
-        {
-            "key": "account",
-            "title": "Cadastre sua primeira conta Insta",
-            "done": len(active) > 0,
-            "hint": f"{len(active)} conta(s) ativa(s)" if active else "Vá em Contas → Nova conta",
-            "link": "/accounts",
-        },
-        {
-            "key": "worker",
-            "title": "Conecte o worker (VPS ou local)",
-            "done": len(online_workers) > 0,
-            "hint": f"{len(online_workers)} worker(s) online" if online_workers else "Cadastre em Meu PC e suba o worker",
-            "link": "/workers",
-        },
-        {
-            "key": "ext_token",
-            "title": "Gere o token de extensão",
-            "done": has_ext_token,
-            "hint": "Token gerado" if has_ext_token else "Vá em Contas → Extensão → Gerar token",
-            "link": "/accounts",
-        },
-        {
-            "key": "save_session",
-            "title": "Salve cookies de pelo menos 1 conta",
-            "done": sessions_with_cookies > 0,
-            "hint": f"{sessions_with_cookies} conta(s) com cookies" if sessions_with_cookies else "Use extensão Chrome OU botão Smartphone no painel",
-            "link": "/accounts",
-        },
-        {
-            "key": "library",
-            "title": "Suba sua primeira mídia",
-            "done": pending_count > 0,
-            "hint": f"{pending_count} mídia(s) na biblioteca" if pending_count else "Vá em Biblioteca → Subir mídia",
-            "link": "/videos",
-        },
-        {
-            "key": "first_post",
-            "title": "Faça seu primeiro post",
-            "done": has_posted,
-            "hint": "Pelo menos 1 post bem-sucedido" if has_posted else "Use Disparos → Disparar manual OU agende",
-            "link": "/jobs",
-        },
-    ]
-
-    done_count = sum(1 for s in steps if s["done"])
-    return {
-        "steps": steps,
-        "done_count": done_count,
-        "total": len(steps),
-        "percent": int(done_count * 100 / max(1, len(steps))),
-        "completed": done_count == len(steps),
-    }
-
-
-@app.get("/api/onboarding/status")
-def api_onboarding_status(request: Request, user=Depends(auth.require_user)):
-    return _compute_onboarding_status(request, user)
-
-
-@app.get("/onboarding", response_class=HTMLResponse)
-def page_onboarding(request: Request, user=Depends(auth.require_user)):
-    status = _compute_onboarding_status(request, user)
-    return templates.TemplateResponse(
-        request,
-        "onboarding.html",
-        _ctx(request, active="onboarding", onboarding=status),
-    )
-
-
 # ---------- pages ----------
 
 @app.get("/", response_class=HTMLResponse)
@@ -528,10 +397,6 @@ def page_dashboard(request: Request):
     upcoming_schedules = [s for s in all_schedules if s["status"] == "pending"][:5]
     upcoming_count = sum(1 for s in all_schedules if s["status"] == "pending")
 
-    # Onboarding status (mostra banner no topo se < 100%)
-    user_obj = auth.current_user(request)
-    onboarding_status = _compute_onboarding_status(request, user_obj) if user_obj else None
-
     return templates.TemplateResponse(
         request,
         "dashboard.html",
@@ -547,7 +412,6 @@ def page_dashboard(request: Request):
             upcoming_schedules=upcoming_schedules,
             upcoming_count=upcoming_count,
             host_ip=local_ip(),
-            onboarding=onboarding_status,
         ),
     )
 
@@ -580,15 +444,11 @@ def page_videos(request: Request):
 def page_jobs(request: Request):
     accounts = load_accounts()
     pending = list_videos(PENDING_DIR)
-    # Só contas ativas E conectadas via worker entram no disparo manual via /jobs
-    # Exclui contas bloqueadas, com verificação pendente ou sessão expirada
+    # Só contas ativas E com sessão (servidor OU worker) entram no disparo manual via /jobs
     connected = [
         a for a in accounts
         if a.get("active", True)
-        and a.get("connected_via_worker_id")
-        and not a.get("blocked")
-        and not a.get("needs_verification")
-        and not a.get("needs_session_renewal")
+        and (session_status(a["username"]) == "saved" or a.get("connected_via_worker_id"))
     ]
     total_active = sum(1 for a in accounts if a.get("active", True))
     return templates.TemplateResponse(
@@ -670,7 +530,6 @@ class AccountIn(BaseModel):
     proxy: Optional[str] = None
     active: bool = True
     totp_secret: Optional[str] = None
-    email: Optional[str] = None
 
 
 class BulkUsernames(BaseModel):
@@ -752,10 +611,6 @@ def _account_view(a: dict) -> dict:
         "needs_verification": bool(a.get("needs_verification", False)),
         "verification_at": a.get("verification_at"),
         "verification_reason": a.get("verification_reason"),
-        # Cookies expiraram — só refazer Save Sessão via extensão/Smartphone
-        "needs_session_renewal": bool(a.get("needs_session_renewal", False)),
-        "session_renewal_at": a.get("session_renewal_at"),
-        "session_renewal_reason": a.get("session_renewal_reason"),
         # Pausa do worker (quando user tá usando a conta manualmente no browser)
         "worker_paused_until": a.get("worker_paused_until"),
         # Health / shadow ban detector
@@ -764,8 +619,6 @@ def _account_view(a: dict) -> dict:
         "shadowban_reason": a.get("shadowban_reason"),
         "health_score": int(a.get("health_score", 50)),
         "follower_count": int(a.get("follower_count", 0)),
-        # Email (tempmail pra verificação automática)
-        "email": a.get("email"),
     }
 
 
@@ -791,24 +644,12 @@ CHALLENGE_PATTERNS = (
 # Diferente de challenge: aqui não tem ação clara pro user resolver na hora.
 BLOCK_PATTERNS = (
     "feedback_required",
+    "login_required",
     "please_wait", "please wait",
     "try_again_later", "try again later",
     "account_disabled", "account disabled",
+    "user_has_logged_out",
     "instagram bloqueou",  # nossa string custom em core/profile.py
-)
-
-# Erros que indicam "cookies expiraram, refaça Save Sessão" — NÃO é ban, NÃO é
-# challenge. Conta volta a funcionar instantâneo quando user atualiza os cookies
-# via extensão Chrome OU botão Smartphone. Estado mais leve dos 3.
-SESSION_RENEWAL_PATTERNS = (
-    "manualreconnectneeded",                  # nome da exception class
-    "sem sessão válida",                      # msg do raise em session.py
-    "sessão manual de @",                     # msg do raise em session.py (sessão manual expirou)
-    "fresh login api desativado",             # msg explicativa
-    "salvar sessão",                          # genérico — captura instruções de Save Sessão
-    "refaça login no chrome",                 # variante da mesma msg
-    "login_required",                         # cookies expiraram no IG (não é bloqueio)
-    "user_has_logged_out",                    # sessão invalidada pelo IG
 )
 
 
@@ -830,18 +671,6 @@ def _is_block_error(error_msg: Optional[str]) -> Optional[str]:
         return None
     low = error_msg.lower()
     for pat in BLOCK_PATTERNS:
-        if pat in low:
-            return pat
-    return None
-
-
-def _is_session_renewal_error(error_msg: Optional[str]) -> Optional[str]:
-    """Retorna padrão casado se for erro de cookies expirados / Save Sessão necessário.
-    Mais leve que block/challenge — só precisa renovar cookies, conta tá OK."""
-    if not error_msg:
-        return None
-    low = error_msg.lower()
-    for pat in SESSION_RENEWAL_PATTERNS:
         if pat in low:
             return pat
     return None
@@ -869,7 +698,6 @@ def api_add_account(payload: AccountIn):
         "proxy": (payload.proxy or "").strip() or None,
         "active": payload.active,
         "totp_secret": (payload.totp_secret or "").strip() or None,
-        "email": (payload.email or "").strip() or None,
     })
     save_accounts(accounts)
     return {"ok": True, "account": _account_view(accounts[-1])}
@@ -886,20 +714,6 @@ def api_update_totp(username: str, payload: TotpIn):
             if a["username"] == username:
                 a["totp_secret"] = (payload.totp_secret or "").strip() or None
                 return {"ok": True, "has_totp": bool(a["totp_secret"])}
-    raise HTTPException(404, "Conta não encontrada")
-
-
-class EmailIn(BaseModel):
-    email: Optional[str] = None
-
-
-@app.post("/api/accounts/{username}/email")
-def api_update_email(username: str, payload: EmailIn):
-    with accounts_transaction() as accounts:
-        for a in accounts:
-            if a["username"] == username:
-                a["email"] = (payload.email or "").strip() or None
-                return {"ok": True, "email": a["email"]}
     raise HTTPException(404, "Conta não encontrada")
 
 
@@ -1115,359 +929,6 @@ def api_bulk_set_proxy(payload: BulkProxyIn, user=Depends(auth.require_user)):
     }
 
 
-# ============================================================================
-# SESSIONS UPLOAD (extensão Chrome) — endpoint pra extensão enviar cookies
-# ============================================================================
-
-class ExtensionSessionIn(BaseModel):
-    workspace_slug: Optional[str] = None  # se não enviar, usa ws ativo do user
-    username: str                          # username IG
-    cookies: dict                          # dict de cookies do instagram.com
-    user_agent: Optional[str] = None       # do browser que capturou (debug)
-
-
-@app.options("/api/sessions/upload")
-def api_sessions_upload_preflight():
-    """CORS preflight pra extensão — middleware CORS já trata, mas explícito é mais seguro."""
-    return {"ok": True}
-
-
-@app.post("/api/sessions/upload")
-def api_sessions_upload(payload: ExtensionSessionIn, request: Request):
-    """Recebe cookies da extensão Chrome e salva como session.json no workspace.
-
-    Auth: Authorization: Bearer <extension_token> OU sessão de painel.
-    Replica EXATAMENTE o formato que o worker.py produz em _save_session_from_chrome,
-    pra session.py carregar como sessão MANUAL (manually_saved=True).
-    """
-    user = auth.require_user_or_extension(request)
-
-    safe_username = "".join(c for c in (payload.username or "").lower() if c.isalnum() or c in "._-")
-    if not safe_username:
-        raise HTTPException(400, "username inválido")
-
-    cookies = payload.cookies or {}
-    sessionid = cookies.get("sessionid")
-    ds_user_id = cookies.get("ds_user_id")
-    if not sessionid or not ds_user_id:
-        raise HTTPException(400, "Cookies obrigatórios faltando (sessionid + ds_user_id). Vc tá logado no instagram.com nesse browser?")
-
-    # Resolve workspace: payload > sessão > default
-    from core import paths as _paths
-    ws_slug = (payload.workspace_slug or "").strip() or _paths.get_workspace() or "default"
-    # Sanitize ws slug
-    if not all(c.isalnum() or c in "-_" for c in ws_slug):
-        raise HTTPException(400, "workspace_slug inválido")
-
-    # Verifica que o workspace existe (cria se não — defensivo)
-    sessions_dir_path = _paths.sessions_dir(ws_slug)
-
-    # Garante que a conta exista no workspace
-    accounts_file = _paths.accounts_file(ws_slug)
-    if accounts_file.exists():
-        try:
-            accs = json.loads(accounts_file.read_text(encoding="utf-8"))
-            if not any(a.get("username", "").lower() == safe_username for a in accs):
-                raise HTTPException(404, f"Conta @{safe_username} não existe no workspace '{ws_slug}'. Cadastra ela no painel primeiro.")
-        except HTTPException:
-            raise
-        except Exception:
-            pass
-
-    import time as _time
-    import uuid as _uuid
-
-    # Gera fingerprint determinístico pro browser (estável por conta)
-    try:
-        from core.browser_fingerprint import generate_fingerprint
-        browser_fp = generate_fingerprint(safe_username, ws_slug)
-    except Exception as _fp_err:
-        browser_fp = None
-
-    # session.json no formato esperado pelo instagrapi + flags manually_saved
-    session_data = {
-        "uuids": {
-            "phone_id": str(_uuid.uuid4()),
-            "uuid": str(_uuid.uuid4()),
-            "client_session_id": str(_uuid.uuid4()),
-            "advertising_id": str(_uuid.uuid4()),
-            "android_device_id": str(_uuid.uuid4()),
-            "request_id": str(_uuid.uuid4()),
-            "tray_session_id": str(_uuid.uuid4()),
-        },
-        "mid": cookies.get("mid", ""),
-        "ig_u_rur": cookies.get("rur"),
-        "ig_www_claim": "",
-        "authorization_data": {
-            "ds_user_id": ds_user_id,
-            "sessionid": sessionid,
-        },
-        "cookies": cookies,
-        "last_login": _time.time(),
-        # Device padrão pra montar headers do instagrapi (mesmo do worker.py)
-        "device_settings": {
-            "app_version": "428.0.0.47.67",
-            "android_version": 34,
-            "android_release": "14",
-            "dpi": "480dpi",
-            "resolution": "1344x2992",
-            "manufacturer": "Google/google",
-            "device": "husky",
-            "model": "Pixel 8 Pro",
-            "cpu": "husky",
-            "version_code": "961145276",
-        },
-        "user_agent": "Instagram 428.0.0.47.67 Android (34/14; 480dpi; 1344x2992; Google/google; Pixel 8 Pro; husky; husky; pt_BR; 961145276)",
-        "country": "BR",
-        "country_code": 55,
-        "locale": "pt_BR",
-        "timezone_offset": -10800,
-        "manually_saved": True,
-        "from_chrome": True,
-        "from_extension": True,
-        "captured_user_agent": (payload.user_agent or "")[:240],
-        "uploaded_by": user.get("email"),
-        "saved_at": int(_time.time()),
-        # Browser fingerprint determinístico — extensão usa pra spoofar UA/screen/etc
-        # na próxima vez que abrir Instagram nessa conta (anti-clustering)
-        "browser_fingerprint": browser_fp,
-    }
-
-    # Path final no workspace
-    session_file = sessions_dir_path / f"{safe_username}.json"
-    # Backup do anterior se existir
-    if session_file.exists():
-        try:
-            backup = session_file.with_suffix(".json.bak")
-            backup.write_bytes(session_file.read_bytes())
-        except Exception:
-            pass
-
-    session_file.write_text(json.dumps(session_data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    print(f"[sessions] upload OK: @{safe_username} ws={ws_slug} by={user.get('email')} ({len(cookies)} cookies, sid=...{sessionid[-8:]})")
-    return {
-        "ok": True,
-        "username": safe_username,
-        "workspace_slug": ws_slug,
-        "cookies_count": len(cookies),
-        "sessionid_preview": "..." + sessionid[-12:],
-    }
-
-
-@app.get("/api/sessions/extension-bundle")
-def api_extension_bundle(request: Request):
-    """Zipa a pasta /extension e devolve como download. Permite usuário baixar
-    sem precisar acessar SSH. Sempre pega versão mais nova do disco.
-
-    Auth: exige login OU extension token. Mesmo que o ZIP não tenha segredos,
-    evita scraping aleatório do endpoint."""
-    auth.require_user_or_extension(request)
-    import io as _io
-    import zipfile as _zf
-    from pathlib import Path as _P
-    code_root = _P(__file__).resolve().parent.parent
-    ext_dir = code_root / "extension"
-    if not ext_dir.exists():
-        raise HTTPException(404, "extension/ não encontrado no servidor")
-    buf = _io.BytesIO()
-    with _zf.ZipFile(buf, "w", _zf.ZIP_DEFLATED) as zf:
-        for f in ext_dir.rglob("*"):
-            if f.is_file() and not f.name.endswith(".pyc"):
-                # Pula make_icons.py — só dev precisa
-                if f.name == "make_icons.py":
-                    continue
-                arcname = f.relative_to(ext_dir).as_posix()
-                zf.write(f, arcname)
-    buf.seek(0)
-    from fastapi.responses import Response
-    return Response(
-        content=buf.read(),
-        media_type="application/zip",
-        headers={"Content-Disposition": 'attachment; filename="insta-poster-extension.zip"'},
-    )
-
-
-@app.get("/api/sessions/extension-info")
-def api_extension_info(request: Request):
-    """Endpoint pra extensão validar token + obter contexto inicial.
-    Devolve workspaces, contas + proxy (decomposto) + has_session (se tem
-    cookies salvos na VPS). Auth via Bearer extension_token.
-    """
-    user = auth.require_user_or_extension(request)
-    from web.workspaces import manager as ws_manager
-    from core import paths as _paths
-    workspaces = ws_manager.list()
-    out_accounts = []
-    for ws in workspaces:
-        accs_file = _paths.accounts_file(ws["slug"])
-        if not accs_file.exists():
-            continue
-        sessions_path = _paths.sessions_dir(ws["slug"])
-        try:
-            accs = json.loads(accs_file.read_text(encoding="utf-8"))
-            for a in accs:
-                if a.get("active", True):
-                    # Decompoe proxy URL pra extensão usar via chrome.proxy API
-                    raw_proxy = (a.get("proxy") or "").strip()
-                    proxy_info = None
-                    if raw_proxy:
-                        normalized = _normalize_proxy(raw_proxy)
-                        if normalized:
-                            try:
-                                from urllib.parse import urlparse as _urlparse
-                                p = _urlparse(normalized)
-                                proxy_info = {
-                                    "scheme": p.scheme or "http",
-                                    "host": p.hostname or "",
-                                    "port": p.port or 80,
-                                    "username": p.username or "",
-                                    "password": p.password or "",
-                                }
-                            except Exception:
-                                proxy_info = None
-                    # Flag: tem cookies na VPS pra essa conta?
-                    safe_user = "".join(c for c in (a.get("username") or "").lower() if c.isalnum() or c in "._-")
-                    session_file = sessions_path / f"{safe_user}.json"
-                    has_session = False
-                    session_saved_at = None
-                    if session_file.exists():
-                        try:
-                            sd = json.loads(session_file.read_text(encoding="utf-8"))
-                            sid = (sd.get("authorization_data") or {}).get("sessionid") or (sd.get("cookies") or {}).get("sessionid")
-                            if sid:
-                                has_session = True
-                                session_saved_at = sd.get("saved_at")
-                        except Exception:
-                            pass
-                    # Browser fingerprint determinístico — gera sempre (mesmo user = mesmo fp)
-                    # Extensão usa pra spoofar UA/screen/etc antes de abrir a aba do IG
-                    try:
-                        from core.browser_fingerprint import generate_fingerprint as _gen_fp
-                        browser_fp = _gen_fp(safe_user, ws["slug"])
-                    except Exception:
-                        browser_fp = None
-                    out_accounts.append({
-                        "username": a.get("username"),
-                        "workspace_slug": ws["slug"],
-                        "workspace_name": ws.get("name") or ws["slug"],
-                        "proxy": proxy_info,
-                        "has_session": has_session,
-                        "session_saved_at": session_saved_at,
-                        "browser_fingerprint": browser_fp,
-                    })
-        except Exception:
-            pass
-    return {
-        "ok": True,
-        "user_email": user.get("email"),
-        "workspaces": [{"slug": ws["slug"], "name": ws.get("name") or ws["slug"]} for ws in workspaces],
-        "accounts": out_accounts,
-    }
-
-
-@app.get("/api/sessions/cookies")
-def api_get_session_cookies(
-    request: Request,
-    username: str,
-    workspace_slug: Optional[str] = None,
-):
-    """Baixa cookies salvos da conta pra extensão injetar no Chrome local.
-    Permite "abrir já logado" em qualquer browser com a extensão.
-
-    Auth: Bearer extension_token. Workspace-scoped.
-    Retorna lista no formato chrome.cookies.set (name/value/domain/path/
-    secure/httpOnly/sameSite/expirationDate).
-    """
-    auth.require_user_or_extension(request)
-
-    safe_user = "".join(c for c in (username or "").lower() if c.isalnum() or c in "._-")
-    if not safe_user:
-        raise HTTPException(400, "username inválido")
-
-    from core import paths as _paths
-    ws = (workspace_slug or "").strip() or _paths.get_workspace() or "default"
-    if not all(c.isalnum() or c in "-_" for c in ws):
-        raise HTTPException(400, "workspace_slug inválido")
-
-    session_file = _paths.sessions_dir(ws) / f"{safe_user}.json"
-    if not session_file.exists():
-        raise HTTPException(404, "Sessão ainda não foi salva pra essa conta — faça Save Sessão primeiro")
-
-    try:
-        data = json.loads(session_file.read_text(encoding="utf-8"))
-    except Exception:
-        raise HTTPException(500, "session.json corrompido — refaça Save Sessão")
-
-    # Coleta cookies do dict + authorization_data (worker às vezes guarda em ambos)
-    cookies_dict = dict(data.get("cookies") or {})
-    auth_data = data.get("authorization_data") or {}
-    for k in ("sessionid", "ds_user_id"):
-        if auth_data.get(k) and not cookies_dict.get(k):
-            cookies_dict[k] = auth_data[k]
-
-    if not cookies_dict.get("sessionid"):
-        raise HTTPException(400, "Sessão sem sessionid — cookies corrompidos, refaça Save Sessão")
-
-    # Mapeia pra formato chrome.cookies.set
-    # HttpOnly só pros cookies que o IG marca como httponly (descobertos via inspect)
-    HTTP_ONLY_COOKIES = {"sessionid"}  # único certo HttpOnly
-    import time as _t
-    expires = int(_t.time()) + 90 * 24 * 3600  # 90 dias
-    cookies_out = []
-    for name, value in cookies_dict.items():
-        if not value:
-            continue
-        cookies_out.append({
-            "name": name,
-            "value": str(value),
-            "domain": ".instagram.com",
-            "path": "/",
-            "secure": True,
-            "httpOnly": name in HTTP_ONLY_COOKIES,
-            "sameSite": "lax",
-            "expirationDate": expires,
-        })
-
-    return {
-        "ok": True,
-        "username": safe_user,
-        "workspace_slug": ws,
-        "cookies": cookies_out,
-        "count": len(cookies_out),
-        "saved_at": data.get("saved_at"),
-        "from_extension": bool(data.get("from_extension")),
-    }
-
-
-@app.post("/api/me/extension-token/rotate")
-def api_rotate_extension_token(user=Depends(auth.require_user)):
-    """Gera novo token pra extensão (sobrescreve antigo se existir).
-    Token só aparece nesta resposta — guarda em local seguro."""
-    token = auth.rotate_extension_token(user["email"])
-    return {"ok": True, "extension_token": token}
-
-
-@app.post("/api/me/extension-token/revoke")
-def api_revoke_extension_token(user=Depends(auth.require_user)):
-    """Remove token (extensão para de funcionar até nova rotação)."""
-    revoked = auth.revoke_extension_token(user["email"])
-    return {"ok": True, "revoked": revoked}
-
-
-@app.get("/api/me/extension-token")
-def api_get_extension_token_status(user=Depends(auth.require_user)):
-    """Devolve só se tem token configurado (NÃO devolve o token em si por segurança).
-    UI usa pra mostrar 'Gerar token' vs 'Rotacionar/Revogar'."""
-    u = auth.find_user(user["email"])
-    has_token = bool(u and u.get("extension_token"))
-    return {
-        "ok": True,
-        "has_token": has_token,
-        "token_at": u.get("extension_token_at") if u else None,
-    }
-
-
 @app.post("/api/accounts/normalize-proxies")
 def api_normalize_all_proxies():
     """Bulk fix: normaliza TODOS os proxies já salvos pra formato URL.
@@ -1678,121 +1139,17 @@ def api_toggle_warmup(username: str):
     raise HTTPException(404, "Conta não encontrada")
 
 
-def _purge_account_data(username: str, workspace_slug: Optional[str] = None) -> dict:
-    """Limpa TUDO que pertence a uma conta. Idempotente — pode chamar várias vezes.
-
-    Inclui:
-    - session.json + .bak
-    - <user>_sticky.txt (sticky session tracker)
-    - health/<user>.json (snapshots de shadow ban)
-    - profile_pics/<user>.* (avatares baixados)
-    - remote_jobs com essa account
-    - schedules com essa account
-    - links criados pra essa account
-    - ip_pool: release ownership
-
-    Retorna dict com contagens do que foi removido (debug + audit log).
-    """
-    from core import paths as _paths
-    from core import ip_pool as _ip_pool
-    from web.shortener import manager as _link_manager
-
-    ws = workspace_slug or _paths.get_workspace() or "default"
-    safe_user = "".join(c for c in (username or "").lower() if c.isalnum() or c in "._-")
-    if not safe_user:
-        return {"error": "username inválido"}
-
-    counts = {"session": 0, "sticky": 0, "health": 0, "pics": 0, "links": 0, "jobs": 0, "schedules": 0, "ip_pool": 0}
-
-    # session.json + .bak
-    sessions_path = _paths.sessions_dir(ws)
-    for fname in (f"{safe_user}.json", f"{safe_user}.json.bak"):
-        p = sessions_path / fname
-        if p.exists():
-            try:
-                p.unlink()
-                counts["session"] += 1
-            except Exception:
-                pass
-
-    # sticky session tracker
-    sticky = sessions_path / f"{safe_user}_sticky.txt"
-    if sticky.exists():
-        try:
-            sticky.unlink()
-            counts["sticky"] = 1
-        except Exception:
-            pass
-
-    # health snapshots
-    health_dir = _paths.workspace_root(ws) / "health"
-    if health_dir.exists():
-        health_file = health_dir / f"{safe_user}.json"
-        if health_file.exists():
-            try:
-                health_file.unlink()
-                counts["health"] = 1
-            except Exception:
-                pass
-
-    # profile pics — vários nomes possíveis (timestamped)
-    pics_dir = _paths.profile_pics_dir(ws)
-    if pics_dir.exists():
-        for p in pics_dir.glob(f"{safe_user}_*"):
-            try:
-                p.unlink()
-                counts["pics"] += 1
-            except Exception:
-                pass
-        for p in pics_dir.glob(f"{safe_user}.*"):
-            try:
-                p.unlink()
-                counts["pics"] += 1
-            except Exception:
-                pass
-
-    # links
-    try:
-        counts["links"] = _link_manager.delete_by_account(safe_user, workspace_slug=ws)
-    except Exception as e:
-        print(f"[purge] erro limpando links de @{safe_user}: {e}")
-
-    # remote jobs
-    try:
-        counts["jobs"] = rjob_manager.delete_by_account(safe_user, workspace_slug=ws)
-    except Exception as e:
-        print(f"[purge] erro limpando jobs de @{safe_user}: {e}")
-
-    # schedules
-    try:
-        counts["schedules"] = schedule_manager.delete_by_account(safe_user, workspace_slug=ws)
-    except Exception as e:
-        print(f"[purge] erro limpando schedules de @{safe_user}: {e}")
-
-    # ip_pool — release ownership (não deleta IPs, só remove username dos owners)
-    try:
-        _ip_pool.release_account(safe_user)
-        counts["ip_pool"] = 1
-    except Exception as e:
-        print(f"[purge] erro liberando ip_pool de @{safe_user}: {e}")
-
-    total = sum(v for k, v in counts.items() if isinstance(v, int))
-    print(f"[purge] @{safe_user} (ws={ws}) removido: {counts} (total={total})")
-    return counts
-
-
 @app.post("/api/accounts/{username}/delete")
 def api_delete_account(username: str):
-    """Deleta conta + purga TODO dado associado (session, jobs, schedules, links,
-    health, pics, ip_pool). Sem deixar órfãos pra trás."""
     accounts = load_accounts()
     new = [a for a in accounts if a["username"] != username]
     if len(new) == len(accounts):
         raise HTTPException(404, "Conta não encontrada")
     save_accounts(new)
-    # Purga tudo associado
-    purged = _purge_account_data(username)
-    return {"ok": True, "purged": purged}
+    session_file = SESSIONS_DIR / f"{username}.json"
+    if session_file.exists():
+        session_file.unlink()
+    return {"ok": True}
 
 
 # ---------- IMPORTAÇÃO EM MASSA ----------
@@ -1811,22 +1168,17 @@ _RE_TOTP_SECRET = _re_acct.compile(r"^[A-Z2-7]{16,64}$")
 _RE_USERNAME = _re_acct.compile(r"^[a-z0-9._]{1,30}$", _re_acct.IGNORECASE)
 # Numero solto tipo "1", "2)", "3:"
 _RE_JUST_NUMBER = _re_acct.compile(r"^\d{1,4}[\.\)\-:]?$")
-# Email: algo@algo.algo
-_RE_EMAIL = _re_acct.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 
 
 def _classify_field(s: str) -> str:
-    """Identifica o tipo do campo: 'email', '2fa', 'username', 'password' ou 'unknown'."""
+    """Identifica o tipo do campo: '2fa', 'username', 'password' ou 'unknown'."""
     s = s.strip()
-    # Email tem prioridade (contém @ — fácil de detectar)
-    if _RE_EMAIL.match(s):
-        return "email"
     if _RE_TOTP_SECRET.match(s):
         return "2fa"
     # Username Insta NÃO pode ter espaços/símbolos exceto . _
     if _RE_USERNAME.match(s) and not any(c in s for c in (" ", ":", "|", ";")):
         return "username"
-    # Resto é senha (qualquer coisa que não bate em email, 2fa nem username)
+    # Resto é senha (qualquer coisa que não bate em 2fa nem username)
     return "password"
 
 
@@ -1856,13 +1208,11 @@ def _parse_account_block(lines: list[str]) -> Optional[dict]:
         return None
 
     # Classifica cada linha
-    fields = {"2fa": None, "username": None, "password": None, "email": None}
+    fields = {"2fa": None, "username": None, "password": None}
     unclassified = []
     for s in cleaned:
         cat = _classify_field(s)
-        if cat == "email" and not fields["email"]:
-            fields["email"] = s
-        elif cat == "2fa" and not fields["2fa"]:
+        if cat == "2fa" and not fields["2fa"]:
             fields["2fa"] = s
         elif cat == "username" and not fields["username"]:
             fields["username"] = s
@@ -1885,7 +1235,6 @@ def _parse_account_block(lines: list[str]) -> Optional[dict]:
         "username": fields["username"],
         "password": fields["password"],
         "totp_secret": fields["2fa"],
-        "email": fields["email"],
     }
 
 
@@ -1908,13 +1257,11 @@ def _parse_account_line(line: str) -> Optional[dict]:
     if len(parts) < 2:
         return None
 
-    # Detecta automaticamente qual posição tem o 2FA (base32) ou email
-    fields = {"2fa": None, "username": None, "password": None, "email": None}
+    # Detecta automaticamente qual posição tem o 2FA (base32)
+    fields = {"2fa": None, "username": None, "password": None}
     for p in parts:
         cat = _classify_field(p)
-        if cat == "email" and not fields["email"]:
-            fields["email"] = p
-        elif cat == "2fa" and not fields["2fa"]:
+        if cat == "2fa" and not fields["2fa"]:
             fields["2fa"] = p
         elif cat == "username" and not fields["username"]:
             fields["username"] = p
@@ -1936,7 +1283,6 @@ def _parse_account_line(line: str) -> Optional[dict]:
         "username": fields["username"],
         "password": fields["password"],
         "totp_secret": fields["2fa"],
-        "email": fields["email"],
     }
 
 
@@ -2037,12 +1383,10 @@ def api_bulk_import(payload: BulkImportIn, user=Depends(auth.require_user)):
     existing_usernames = {a["username"].lower() for a in accounts}
 
     to_add = []
-    to_update = []
     skipped_existing = []
     for entry in valid:
         if entry["username"].lower() in existing_usernames:
-            # Conta já existe — atualiza senha/email/2fa se vieram na lista
-            to_update.append(entry)
+            skipped_existing.append(entry["username"])
         else:
             to_add.append(entry)
 
@@ -2052,42 +1396,21 @@ def api_bulk_import(payload: BulkImportIn, user=Depends(auth.require_user)):
             "dry_run": True,
             "would_add_count": len(to_add),
             "would_add": [e["username"] for e in to_add],
-            "would_update_count": len(to_update),
-            "would_update": [e["username"] for e in to_update],
-            "skipped_existing_count": 0,
-            "skipped_existing": [],
+            "skipped_existing_count": len(skipped_existing),
+            "skipped_existing": skipped_existing,
             "invalid_count": len(invalid),
             "invalid": invalid,
             "total_lines_parsed": len(valid) + len(invalid),
         }
 
-    # Atualiza contas existentes (senha, email, 2fa)
-    updated = []
-    if to_update:
-        update_map = {e["username"].lower(): e for e in to_update}
-        for a in accounts:
-            entry = update_map.get(a["username"].lower())
-            if entry:
-                if entry.get("password"):
-                    a["password"] = entry["password"]
-                if entry.get("email"):
-                    a["email"] = entry["email"]
-                if entry.get("totp_secret"):
-                    a["totp_secret"] = entry["totp_secret"]
-                updated.append(a["username"])
-        if updated:
-            save_accounts(accounts)
-            print(f"[bulk-import] {len(updated)} contas atualizadas (senha/email/2fa)")
-
-    # Aplica importação de novas
+    # Aplica importação
     added = []
     for entry in to_add:
         accounts.append({
             # Normaliza username pra lowercase (consistência)
             "username": entry["username"].strip().lower(),
             "password": entry["password"],
-            "totp_secret": entry.get("totp_secret"),
-            "email": entry.get("email"),
+            "totp_secret": entry["totp_secret"],
             "proxy": None,
             "active": True,
         })
@@ -2095,18 +1418,18 @@ def api_bulk_import(payload: BulkImportIn, user=Depends(auth.require_user)):
     if added:
         save_accounts(accounts)
 
-    # Se connect_after, cria jobs test_login com stagger (novas + atualizadas)
+    # Se connect_after, cria jobs test_login com stagger
     connect_jobs_created = 0
-    all_to_connect = added + updated
-    if payload.connect_after and all_to_connect:
-        # Recarrega accounts pra pegar os dados atualizados
-        accounts = load_accounts()
+    if payload.connect_after and added:
         from datetime import datetime as _dt, timezone as _tz, timedelta as _td
         from core.retry import humanlike_delay
         now_utc = _dt.now(_tz.utc)
+        # Stagger exponencial (long-tail, mimics real user) em vez de uniforme
+        # (linear, padrão detectável). Acumulado entre contas: 1ª em 0s, 2ª em
+        # 30-180s, 3ª no anterior+30-180s, etc.
         cumulative_s = 0
-        for idx, username in enumerate(all_to_connect):
-            acc = next((a for a in accounts if a["username"].lower() == username.lower()), None)
+        for idx, username in enumerate(added):
+            acc = next((a for a in accounts if a["username"] == username), None)
             if not acc:
                 continue
             if idx > 0:
@@ -2119,7 +1442,6 @@ def api_bulk_import(payload: BulkImportIn, user=Depends(auth.require_user)):
                     "account_password": acc["password"],
                     "account_totp_secret": acc.get("totp_secret"),
                     "account_proxy": acc.get("proxy"),
-                    "account_email": acc.get("email"),
                     "scheduled_for": scheduled_for,
                     "created_by": f"bulk-import:{user['email']}",
                 })
@@ -2132,8 +1454,8 @@ def api_bulk_import(payload: BulkImportIn, user=Depends(auth.require_user)):
         "dry_run": False,
         "added_count": len(added),
         "added": added,
-        "updated_count": len(updated),
-        "updated": updated,
+        "skipped_existing_count": len(skipped_existing),
+        "skipped_existing": skipped_existing,
         "invalid_count": len(invalid),
         "invalid": invalid,
         "connect_jobs_created": connect_jobs_created,
@@ -2182,7 +1504,6 @@ def api_bulk_connect(payload: BulkConnectIn, user=Depends(auth.require_user)):
                 "account_password": acc["password"],
                 "account_totp_secret": acc.get("totp_secret"),
                 "account_proxy": acc.get("proxy"),
-                "account_email": acc.get("email"),
                 "scheduled_for": scheduled_for,
                 "created_by": f"bulk-connect:{user['email']}",
             })
@@ -2205,139 +1526,12 @@ def api_bulk_delete(payload: BulkUsernames):
     new = [a for a in accounts if a["username"] not in targets]
     save_accounts(new)
     removed = []
-    purge_summary = {}
     for u in targets:
-        purged = _purge_account_data(u)
+        f = SESSIONS_DIR / f"{u}.json"
+        if f.exists():
+            f.unlink()
         removed.append(u)
-        purge_summary[u] = purged
-    return {"ok": True, "removed": removed, "remaining": len(new), "purge_summary": purge_summary}
-
-
-@app.post("/api/admin/cleanup-orphans")
-def api_cleanup_orphans(user=Depends(auth.require_owner)):
-    """Sweep manual: encontra e remove dados órfãos. Cada bloco é independente —
-    se 1 falhar, os outros continuam (defensivo)."""
-    import traceback as _tb
-
-    summary = {
-        "workspaces_scanned": 0,
-        "jobs_removed": 0,
-        "schedules_removed": 0,
-        "session_files_removed": 0,
-        "sticky_files_removed": 0,
-        "health_files_removed": 0,
-        "links_removed": 0,
-        "errors": [],
-    }
-
-    # ===== Constrói mapa de contas válidas =====
-    valid_accounts_by_ws: dict = {}
-    try:
-        from core import paths as _paths
-        from web.workspaces import manager as _ws_manager
-        ws_list = _ws_manager.list()
-        for ws in ws_list:
-            slug = ws.get("slug") if isinstance(ws, dict) else getattr(ws, "slug", None)
-            if not slug:
-                continue
-            try:
-                accs_file = _paths.accounts_file(slug)
-                if not accs_file.exists():
-                    valid_accounts_by_ws[slug] = set()
-                    continue
-                accs = json.loads(accs_file.read_text(encoding="utf-8"))
-                valid_accounts_by_ws[slug] = {
-                    (a.get("username") or "").lower()
-                    for a in accs if a.get("username")
-                }
-                summary["workspaces_scanned"] += 1
-            except Exception as e:
-                summary["errors"].append(f"ws {slug}: {e}")
-                valid_accounts_by_ws[slug] = set()
-    except Exception as e:
-        summary["errors"].append(f"map de workspaces: {e}")
-        print(f"[cleanup-orphans] FATAL map: {_tb.format_exc()}")
-        return {"ok": False, "error": str(e), "summary": summary}
-
-    # ===== 1) Jobs órfãos =====
-    try:
-        summary["jobs_removed"] = rjob_manager.purge_orphans(valid_accounts_by_ws)
-    except Exception as e:
-        summary["errors"].append(f"jobs: {e}")
-        print(f"[cleanup-orphans] purge_orphans jobs: {_tb.format_exc()}")
-
-    # ===== 2) Schedules órfãos =====
-    try:
-        summary["schedules_removed"] = schedule_manager.purge_orphans(valid_accounts_by_ws)
-    except Exception as e:
-        summary["errors"].append(f"schedules: {e}")
-        print(f"[cleanup-orphans] purge_orphans schedules: {_tb.format_exc()}")
-
-    # ===== 3) Arquivos órfãos por workspace =====
-    try:
-        from core import paths as _paths
-        for slug, valid_users in valid_accounts_by_ws.items():
-            try:
-                sessions_dir_p = _paths.sessions_dir(slug)
-                if sessions_dir_p.exists():
-                    for f in sessions_dir_p.iterdir():
-                        if not f.is_file():
-                            continue
-                        base = f.stem
-                        if base.endswith("_sticky"):
-                            user = base[:-len("_sticky")]
-                            if user.lower() not in valid_users:
-                                try: f.unlink(); summary["sticky_files_removed"] += 1
-                                except Exception: pass
-                        elif f.suffix == ".json":
-                            user = base
-                            if user.lower() not in valid_users:
-                                try: f.unlink(); summary["session_files_removed"] += 1
-                                except Exception: pass
-                health_dir = _paths.workspace_root(slug) / "health"
-                if health_dir.exists():
-                    for f in health_dir.iterdir():
-                        if f.is_file() and f.suffix == ".json":
-                            user = f.stem
-                            if user.lower() not in valid_users:
-                                try: f.unlink(); summary["health_files_removed"] += 1
-                                except Exception: pass
-            except Exception as e:
-                summary["errors"].append(f"files ws={slug}: {e}")
-    except Exception as e:
-        summary["errors"].append(f"files (geral): {e}")
-        print(f"[cleanup-orphans] files: {_tb.format_exc()}")
-
-    # ===== 4) Links órfãos =====
-    try:
-        from web.shortener import manager as _link_manager
-        all_users = set()
-        for users in valid_accounts_by_ws.values():
-            all_users.update(users)
-        # Usa lock + items diretamente — sem método público pra remover por filtro
-        # Encapsulamos pra ser robusto se algum atributo mudar
-        if hasattr(_link_manager, "_lock") and hasattr(_link_manager, "_items"):
-            with _link_manager._lock:
-                slugs_to_delete = []
-                for slug, link in list(_link_manager._items.items()):
-                    acc = getattr(link, "account", None)
-                    if acc and acc.lower() not in all_users:
-                        slugs_to_delete.append(slug)
-                for slug in slugs_to_delete:
-                    _link_manager._items.pop(slug, None)
-                if slugs_to_delete:
-                    try:
-                        _link_manager._save()
-                    except Exception as e:
-                        summary["errors"].append(f"links save: {e}")
-                summary["links_removed"] = len(slugs_to_delete)
-    except Exception as e:
-        summary["errors"].append(f"links: {e}")
-        print(f"[cleanup-orphans] links: {_tb.format_exc()}")
-
-    summary["errors"] = summary["errors"][:20]
-    print(f"[cleanup-orphans] feito por {user.get('email', '?')}: {summary}")
-    return {"ok": True, "summary": summary}
+    return {"ok": True, "removed": removed, "remaining": len(new)}
 
 
 @app.post("/api/accounts/{username}/test-login")
@@ -2618,7 +1812,6 @@ def api_connect_via_worker(username: str, user=Depends(auth.require_user)):
         "account_password": account["password"],
         "account_totp_secret": account.get("totp_secret"),
         "account_proxy": account.get("proxy"),
-        "account_email": account.get("email"),
         "video_name": "",
         "media_type": "video",
         "kind": "reel",
@@ -2658,7 +1851,6 @@ def api_check_all_accounts(user=Depends(auth.require_user)):
             "account_password": acc["password"],
             "account_totp_secret": acc.get("totp_secret"),
             "account_proxy": acc.get("proxy"),
-            "account_email": acc.get("email"),
             "created_by": user["email"],
         })
         created.append(rj.id)
@@ -2772,58 +1964,6 @@ def api_clear_verification(username: str, user=Depends(auth.require_user)):
                 a["verification_reason"] = None
                 return {"ok": True, "account": _account_view(a)}
     raise HTTPException(404, "Conta não encontrada")
-
-
-@app.post("/api/accounts/{username}/clear-session-renewal")
-def api_clear_session_renewal(username: str, user=Depends(auth.require_user)):
-    """Desmarca needs_session_renewal — use depois de refazer Save Sessão
-    via extensão Chrome OU botão Smartphone."""
-    with accounts_transaction() as accounts:
-        for a in accounts:
-            if a["username"] == username:
-                a["needs_session_renewal"] = False
-                a["session_renewal_at"] = None
-                a["session_renewal_reason"] = None
-                return {"ok": True, "account": _account_view(a)}
-    raise HTTPException(404, "Conta não encontrada")
-
-
-# ---------- Auto-login: códigos de verificação ----------
-# Worker envia código pra cá, frontend consulta (mesma origem = sem CORS)
-_auto_login_codes: dict[str, dict] = {}
-
-@app.post("/api/auto-login-code/{username}")
-def api_set_auto_login_code(username: str, request: Request):
-    """Worker envia código de verificação encontrado no tempmail."""
-    _require_worker(request)
-    import json as _json_alc
-    body = _json_alc.loads(request.body()) if hasattr(request, 'body') else {}
-    try:
-        raw = asyncio.get_event_loop().run_until_complete(request.body())
-        body = json.loads(raw)
-    except Exception:
-        body = {}
-    code = body.get("code") or ""
-    status = body.get("status") or "code_found"
-    _auto_login_codes[username.lower()] = {
-        "code": code,
-        "status": status,
-        "timestamp": time.time(),
-    }
-    print(f"[auto-login] código recebido pra @{username}: {code} ({status})")
-    return {"ok": True}
-
-
-@app.get("/api/auto-login-code/{username}")
-def api_get_auto_login_code(username: str):
-    """Frontend consulta se tem código disponível."""
-    data = _auto_login_codes.get(username.lower())
-    if not data:
-        return {"ok": True, "status": "idle", "code": None}
-    # Expira após 5 minutos
-    if time.time() - data.get("timestamp", 0) > 300:
-        return {"ok": True, "status": "expired", "code": None}
-    return {"ok": True, **data}
 
 
 # ---------- API: videos ----------
@@ -3496,16 +2636,14 @@ def api_worker_job_result(job_id: str, payload: WorkerResultIn, request: Request
         raise HTTPException(404, "Job não encontrado ou não atribuído a esse worker")
 
     # Side-effects pós-resultado:
-    # Failure: classifica o erro em 3 níveis (prioridade: challenge > block > session_renewal):
-    #   - challenge/verificação (IG pediu code) → needs_verification=True (amarelo "VERIFICAR")
-    #   - bloqueio serio (rate/disabled/banned) → blocked=True (vermelho "BLOQUEADA")
-    #   - cookies expiraram (refaz Save Sessão) → needs_session_renewal=True (laranja "REFAZER SESSÃO")
-    # Os 3 sao mutuamente exclusivos — UI mostra so o estado mais grave.
+    # Failure: classifica o erro em 2 níveis:
+    #   - challenge/verificação (resolúvel manual) → needs_verification=True
+    #   - bloqueio sério (rate/disabled) → blocked=True
+    # Challenge tem prioridade: muitas vezes o IG retorna challenge antes de blocar.
     if (not payload.success) and job and payload.error_msg:
         chal_pattern = _is_challenge_error(payload.error_msg)
         block_pattern = None if chal_pattern else _is_block_error(payload.error_msg)
-        renewal_pattern = None if (chal_pattern or block_pattern) else _is_session_renewal_error(payload.error_msg)
-        if chal_pattern or block_pattern or renewal_pattern:
+        if chal_pattern or block_pattern:
             try:
                 with accounts_transaction() as accounts:
                     for a in accounts:
@@ -3516,180 +2654,96 @@ def api_worker_job_result(job_id: str, payload: WorkerResultIn, request: Request
                                 a["verification_at"] = now_iso
                                 a["verification_reason"] = f"{chal_pattern} — {payload.error_msg[:200]}"
                                 print(f"[verify] @{a['username']} precisa verificação ({chal_pattern})")
-                            elif block_pattern:
+                            else:
                                 a["blocked"] = True
                                 a["blocked_at"] = now_iso
                                 a["blocked_reason"] = f"{block_pattern} — {payload.error_msg[:200]}"
                                 print(f"[block] @{a['username']} marcada como bloqueada ({block_pattern})")
-                            else:  # renewal_pattern
-                                a["needs_session_renewal"] = True
-                                a["session_renewal_at"] = now_iso
-                                a["session_renewal_reason"] = f"{renewal_pattern} — {payload.error_msg[:160]}"
-                                print(f"[session] @{a['username']} precisa refazer Save Sessão ({renewal_pattern})")
                             break
             except Exception as e:
-                print(f"[worker_result] erro marcando estado: {e}")
+                print(f"[worker_result] erro marcando bloqueio/verificação: {e}")
 
     # 1) Sucesso em qualquer op = marca conta como "conectada via worker"
     # 2) auto_follow_back: atualiza cache seen_followers no accounts.json
     # 3) post: registra mídia em posted_media (pra dedup + sync)
     if payload.success and job:
         try:
-            with accounts_transaction() as accounts:
-                for a in accounts:
-                    if a["username"] == job.account_username:
-                        a["connected_via_worker_id"] = w.id
-                        a["connected_via_worker_name"] = w.name
-                        a["connected_at"] = scheduler_mod.now_local().isoformat(timespec="seconds")
-                        # Se estava marcada como bloqueada e voltou a funcionar, limpa
-                        if a.get("blocked"):
-                            a["blocked"] = False
-                            a["blocked_at"] = None
-                            a["blocked_reason"] = None
-                            print(f"[block] @{a['username']} desmarcada (voltou a funcionar)")
-                        # Mesma coisa pra needs_verification — login OK = challenge resolvido
-                        if a.get("needs_verification"):
-                            a["needs_verification"] = False
-                            a["verification_at"] = None
-                            a["verification_reason"] = None
-                            print(f"[verify] @{a['username']} verificação desmarcada (login OK)")
-                        # Idem pra needs_session_renewal — job sucesso = cookies funcionando
-                        if a.get("needs_session_renewal"):
-                            a["needs_session_renewal"] = False
-                            a["session_renewal_at"] = None
-                            a["session_renewal_reason"] = None
-                            print(f"[session] @{a['username']} renovação desmarcada (cookies OK)")
-                        if job.operation == "auto_follow_back" and payload.result_data:
-                            new_seen = payload.result_data.get("seen_followers")
-                            if isinstance(new_seen, list) and new_seen:
-                                a["auto_follow_back_seen_followers"] = new_seen
-                        if job.operation == "post" and job.video_name:
-                            posted = a.get("posted_media") or []
-                            existing = next((p for p in posted if p.get("name") == job.video_name), None)
-                            now_iso_str = scheduler_mod.now_local().isoformat(timespec="seconds")
-                            if existing:
-                                existing["count"] = int(existing.get("count", 1)) + 1
-                                existing["posted_at"] = now_iso_str
-                                existing["media_id"] = payload.media_id
+          with accounts_transaction() as accounts:
+            for a in accounts:
+                if a["username"] == job.account_username:
+                    a["connected_via_worker_id"] = w.id
+                    a["connected_via_worker_name"] = w.name
+                    a["connected_at"] = scheduler_mod.now_local().isoformat(timespec="seconds")
+                    # Se estava marcada como bloqueada e voltou a funcionar, limpa
+                    if a.get("blocked"):
+                        a["blocked"] = False
+                        a["blocked_at"] = None
+                        a["blocked_reason"] = None
+                        print(f"[block] @{a['username']} desmarcada (voltou a funcionar)")
+                    # Mesma coisa pra needs_verification — login OK = challenge resolvido
+                    if a.get("needs_verification"):
+                        a["needs_verification"] = False
+                        a["verification_at"] = None
+                        a["verification_reason"] = None
+                        print(f"[verify] @{a['username']} verificação desmarcada (login OK)")
+                    if job.operation == "auto_follow_back" and payload.result_data:
+                        new_seen = payload.result_data.get("seen_followers")
+                        if isinstance(new_seen, list) and new_seen:
+                            a["auto_follow_back_seen_followers"] = new_seen
+                    if job.operation == "post" and job.video_name:
+                        posted = a.get("posted_media") or []
+                        # Procura entry existente pra esse video
+                        existing = next((p for p in posted if p.get("name") == job.video_name), None)
+                        now_iso_str = scheduler_mod.now_local().isoformat(timespec="seconds")
+                        if existing:
+                            # Incrementa contador de repetições
+                            existing["count"] = int(existing.get("count", 1)) + 1
+                            existing["posted_at"] = now_iso_str  # data do post mais recente
+                            existing["media_id"] = payload.media_id  # último media_id
+                        else:
+                            posted.append({
+                                "name": job.video_name,
+                                "kind": job.kind or "reel",
+                                "posted_at": now_iso_str,
+                                "media_id": payload.media_id,
+                                "count": 1,
+                            })
+                        a["posted_media"] = posted
+                    # Health tracker: collect_insights → salva snapshot + analisa
+                    if job.operation == "collect_insights" and payload.result_data:
+                        try:
+                            from web import health as _health
+                            analysis = _health.record(
+                                username=a["username"],
+                                snapshot=payload.result_data,
+                            )
+                            # Atualiza campos resumidos no accounts.json
+                            a["follower_count"] = int(payload.result_data.get("follower_count") or 0)
+                            a["health_score"] = int(analysis.get("health_score", 50))
+                            if analysis.get("suspected"):
+                                # So marca se ainda nao tava marcado (preserva data original)
+                                if not a.get("shadowban_suspected"):
+                                    a["shadowban_suspected"] = True
+                                    a["shadowban_at"] = scheduler_mod.now_local().isoformat(timespec="seconds")
+                                a["shadowban_reason"] = analysis.get("reason") or "queda anormal detectada"
                             else:
-                                posted.append({
-                                    "name": job.video_name,
-                                    "kind": job.kind or "reel",
-                                    "posted_at": now_iso_str,
-                                    "media_id": payload.media_id,
-                                    "count": 1,
-                                })
-                            a["posted_media"] = posted
-                        if job.operation == "collect_insights" and payload.result_data:
-                            try:
-                                from web import health as _health
-                                analysis = _health.record(
-                                    username=a["username"],
-                                    snapshot=payload.result_data,
-                                )
-                                a["follower_count"] = int(payload.result_data.get("follower_count") or 0)
-                                a["health_score"] = int(analysis.get("health_score", 50))
-                                if analysis.get("suspected"):
-                                    if not a.get("shadowban_suspected"):
-                                        a["shadowban_suspected"] = True
-                                        a["shadowban_at"] = scheduler_mod.now_local().isoformat(timespec="seconds")
-                                    a["shadowban_reason"] = analysis.get("reason") or "queda anormal detectada"
-                                else:
-                                    if a.get("shadowban_suspected"):
-                                        a["shadowban_suspected"] = False
-                                        a["shadowban_at"] = None
-                                        a["shadowban_reason"] = None
-                                        print(f"[health] @{a['username']} recuperou — desmarcada")
-                            except Exception as he:
-                                print(f"[health] erro analisando @{a['username']}: {he}")
-                            if (job.created_by or "").startswith("sync:"):
-                                a["sync_last_post_at"] = scheduler_mod.now_local().isoformat(timespec="seconds")
-                        break
+                                # Se voltou ao normal, limpa
+                                if a.get("shadowban_suspected"):
+                                    a["shadowban_suspected"] = False
+                                    a["shadowban_at"] = None
+                                    a["shadowban_reason"] = None
+                                    print(f"[health] @{a['username']} recuperou — desmarcada")
+                        except Exception as he:
+                            print(f"[health] erro analisando @{a['username']}: {he}")
+                        # Se veio do sync_loop, atualiza marcador
+                        if (job.created_by or "").startswith("sync:"):
+                            a["sync_last_post_at"] = scheduler_mod.now_local().isoformat(timespec="seconds")
+                    break
+            # save automático no exit do accounts_transaction context manager
         except Exception as e:
             print(f"[worker_result] erro side-effects: {e}")
 
     return {"ok": True}
-
-
-# ---------- SESSION SYNC (worker <-> servidor central) ----------
-
-class WorkerSessionUploadIn(BaseModel):
-    username: str
-    session_data: dict
-
-
-@app.post("/api/worker/sessions/upload")
-def api_worker_session_upload(payload: WorkerSessionUploadIn, request: Request):
-    """Worker envia sessão salva localmente pro servidor central.
-    Permite que outros workers (em outros PCs) baixem essa sessão depois,
-    mantendo todas as máquinas sincronizadas."""
-    w = _require_worker(request)
-    safe_username = "".join(c for c in (payload.username or "").lower() if c.isalnum() or c in "._-")
-    if not safe_username:
-        raise HTTPException(400, "username inválido")
-
-    session_data = payload.session_data or {}
-    # Valida que tem o mínimo pra ser uma sessão útil
-    auth_data = session_data.get("authorization_data") or {}
-    if not auth_data.get("sessionid"):
-        raise HTTPException(400, "session_data sem sessionid — sessão inválida")
-
-    from core import paths as _paths
-    # Acha workspace que tem essa conta
-    ws_slug = None
-    for slug in _paths.list_workspace_slugs():
-        acc_file = _paths.accounts_file(slug)
-        if acc_file.exists():
-            try:
-                accs = json.loads(acc_file.read_text(encoding="utf-8"))
-                if any(a.get("username", "").lower() == safe_username for a in accs):
-                    ws_slug = slug
-                    break
-            except Exception:
-                pass
-    if not ws_slug:
-        ws_slug = "default"
-
-    sessions_path = _paths.sessions_dir(ws_slug)
-    session_file = sessions_path / f"{safe_username}.json"
-
-    # Backup do anterior se existir
-    if session_file.exists():
-        try:
-            backup = session_file.with_suffix(".json.bak")
-            backup.write_bytes(session_file.read_bytes())
-        except Exception:
-            pass
-
-    session_file.write_text(json.dumps(session_data, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"[sync] sessão recebida do worker: @{safe_username} ws={ws_slug} worker={w.name}")
-    return {"ok": True, "username": safe_username, "workspace_slug": ws_slug}
-
-
-@app.get("/api/worker/sessions/download")
-def api_worker_session_download(request: Request, username: str):
-    """Worker baixa sessão do servidor central (salva por outro worker ou extensão).
-    Permite que um worker novo use sessão criada em outra máquina."""
-    _require_worker(request)
-    safe_user = "".join(c for c in (username or "").lower() if c.isalnum() or c in "._-")
-    if not safe_user:
-        raise HTTPException(400, "username inválido")
-
-    from core import paths as _paths
-    # Procura sessão em qualquer workspace
-    for slug in _paths.list_workspace_slugs():
-        session_file = _paths.sessions_dir(slug) / f"{safe_user}.json"
-        if session_file.exists():
-            try:
-                data = json.loads(session_file.read_text(encoding="utf-8"))
-                # Só retorna se tiver sessionid válido
-                auth_data = data.get("authorization_data") or {}
-                if auth_data.get("sessionid"):
-                    print(f"[sync] sessão enviada pro worker: @{safe_user} ws={slug}")
-                    return {"ok": True, "username": safe_user, "workspace_slug": slug, "session_data": data}
-            except Exception:
-                pass
-    raise HTTPException(404, "Sessão não encontrada no servidor")
 
 
 # ---------- REMOTE JOBS (criado pelo painel, executado por worker) ----------

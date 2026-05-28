@@ -200,7 +200,6 @@ def get_client(
     # Detecta se a sessão foi salva manual via Chrome (Save Sessão verde).
     # Se sim, CONFIA nela e NÃO faz teste (que pode falhar por rate-limit
     # temporário e disparar fresh login = challenge desnecessário).
-    # ESTE FLUXO FUNCIONAVA ANTES — sessão manual é usada direto.
     session_is_manual = False
     if session_file.exists():
         try:
@@ -222,7 +221,7 @@ def get_client(
                 # força login API → IG dá challenge → conta morre.
                 print(f"[{username}] Sessão MANUAL (Chrome) — usando direto sem teste")
                 return cl
-            # Teste leve da sessão (só pra sessões API, não manuais).
+            # Teste leve da sessão. Se válida, segue sem TOTP.
             cl.get_timeline_feed()
             print(f"[{username}] Sessão restaurada ✓ (sem relogin)")
             return cl
@@ -231,7 +230,7 @@ def get_client(
                 # Sessão manual rejeitada com 401 = cookies realmente inválidos.
                 # NÃO faz fresh login API (causaria challenge). Levanta erro pro
                 # user re-fazer Save Sessão manual.
-                print(f"[{username}] ⚠️ Sessão manual EXPIROU — refaça Save Sessão")
+                print(f"[{username}] ⚠️ Sessão manual EXPIROU — refaça login no Chrome + Salvar Sessão")
                 raise ManualReconnectNeeded(
                     f"Sessão manual de @{username} expirou. Abra Chrome via Smartphone, "
                     f"loga manual, clica Salvar Sessão de novo. Worker NÃO tentou login "

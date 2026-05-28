@@ -74,10 +74,6 @@ CLIENT_CACHE_TTL_SECONDS = 10 * 60
 TMP_DIR = Path(__file__).resolve().parent / ".worker_tmp"
 TMP_DIR.mkdir(exist_ok=True)
 
-# Perfis isolados do Chrome — ao lado do worker (não em Path.home() que pode estar cheio)
-CHROME_PROFILES_DIR = Path(__file__).resolve().parent / "InstaposterProfiles"
-CHROME_PROFILES_DIR.mkdir(exist_ok=True)
-
 # Estado global compartilhado entre threads de jobs
 _stop_flag = threading.Event()
 _account_locks: dict[str, threading.Lock] = {}
@@ -221,51 +217,6 @@ def report_step(job_id: str, step: str):
         pass
 
 
-# ----------- Session sync (worker <-> servidor central) -----------
-
-def _upload_session_to_server(username: str, session_data: dict):
-    """Best-effort: envia sessão pro servidor central pra sincronizar entre workers.
-    Se falhar, não impede nada — sessão local continua funcionando."""
-    try:
-        r = post("/api/worker/sessions/upload", {"username": username, "session_data": session_data})
-        if r.status_code == 200:
-            print(f"[sync] ✓ sessão de @{username} enviada pro servidor")
-        else:
-            print(f"[sync] ⚠️ upload falhou HTTP {r.status_code}: {r.text[:200]}")
-    except Exception as e:
-        print(f"[sync] ⚠️ upload falhou: {e}")
-
-
-def _download_session_from_server(username: str) -> bool:
-    """Tenta baixar sessão do servidor central se não existir localmente.
-    Permite que worker novo use sessão criada em outro PC.
-    Retorna True se baixou com sucesso."""
-    try:
-        r = get(f"/api/worker/sessions/download?username={username}")
-        if r.status_code != 200:
-            return False
-        data = r.json()
-        session_data = data.get("session_data")
-        if not session_data:
-            return False
-        # Salva localmente na estrutura de workspaces
-        project_root = Path(__file__).resolve().parent
-        data_dir = Path(os.environ.get("DATA_DIR", str(project_root)))
-        ws_slug = data.get("workspace_slug", "default")
-        target_dir = data_dir / "workspaces" / ws_slug / "sessions"
-        target_dir.mkdir(parents=True, exist_ok=True)
-        session_file = target_dir / f"{username}.json"
-        session_file.write_text(
-            json.dumps(session_data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        print(f"[sync] ✓ sessão de @{username} baixada do servidor (ws={ws_slug})")
-        return True
-    except Exception as e:
-        print(f"[sync] download falhou ({e}) — seguindo sem sessão remota")
-        return False
-
-
 # ----------- Download media -----------
 
 def download_media(url: str, dest: Path):
@@ -319,50 +270,13 @@ def execute_job(job: dict):
         if cached is not None:
             log(f"♻️ sessão Insta em cache (sem relogin)")
             return cached
-        # Sync: se não tem sessão local, tenta baixar do servidor central
-        if not _find_session_file(username):
-            if _download_session_from_server(username):
-                log("📥 sessão sincronizada do servidor")
         report_step(job_id, "logging")
-
-        # Challenge handler: busca código de verificação no tempmail automaticamente
-        account_email = job.get("account_email")
-        challenge_handler = None
-        if account_email and operation == "test_login":
-            def _tempmail_challenge_handler(username_arg, choice):
-                """Busca código de verificação no tempmail quando Instagram pede challenge."""
-                log(f"📧 Instagram pediu verificação — buscando código em {account_email}...")
-                try:
-                    from core.tempmail import fetch_instagram_code
-                    code = fetch_instagram_code(account_email, timeout=120, poll_interval=4)
-                    if code:
-                        log(f"✅ código encontrado: {code}")
-                        # Envia pro servidor pra mostrar no painel
-                        try:
-                            import requests as _req_ch
-                            _req_ch.post(
-                                f"{SERVER_URL}/api/auto-login-code/{username}",
-                                json={"code": code, "status": "code_found"},
-                                headers={"X-Worker-Token": WORKER_TOKEN},
-                                timeout=5,
-                            )
-                        except Exception:
-                            pass
-                        return code
-                    log(f"⚠️ código não chegou no email")
-                    return None
-                except Exception as e:
-                    log(f"❌ erro buscando código: {e}")
-                    return None
-            challenge_handler = _tempmail_challenge_handler
-
         cl = get_client(
             username=username,
             password=job["account_password"],
             proxy=job_proxy,
             totp_secret=job.get("account_totp_secret"),
             allow_fresh_login=(operation == "test_login"),
-            challenge_handler=challenge_handler,
         )
         store_client(username, cl, proxy=job_proxy)
         return cl
@@ -376,14 +290,6 @@ def execute_job(job: dict):
             cl = do_login()
             info = cl.account_info()
             log(f"✅ conectado como @{info.username} ({info.full_name})")
-            # Sync: envia sessão pro servidor pra outros workers usarem
-            try:
-                _sess_path = _find_session_file(username)
-                if _sess_path:
-                    _sess_data = json.loads(_sess_path.read_text(encoding="utf-8"))
-                    _upload_session_to_server(username, _sess_data)
-            except Exception:
-                pass
             report_result(job_id, True, media_id="session_ok")
         except Exception as e:
             log(f"❌ falha conexão: {e}")
@@ -634,10 +540,6 @@ def execute_job(job: dict):
         cl = cached
         log(f"♻️ sessão Insta em cache (sem relogin)")
     else:
-        # Sync: se não tem sessão local, tenta baixar do servidor central
-        if not _find_session_file(username):
-            if _download_session_from_server(username):
-                log("📥 sessão sincronizada do servidor")
         report_step(job_id, "logging")
         try:
             log(f"fazendo login no Instagram (sessão local, se existir)")
@@ -1141,7 +1043,7 @@ def _open_chrome_for_account(
     # Vantagem: cookies do Chrome ficam entre launches → Smartphone abre
     # JÁ LOGADO depois da 1ª vez. Requer kill robusto de Chromes anteriores
     # antes de relançar pra evitar conflito singleton.
-    profile_base = CHROME_PROFILES_DIR
+    profile_base = Path.home() / "InstaposterProfiles"
     profile_base.mkdir(parents=True, exist_ok=True)
 
     # Migration cleanup: remove profiles timestamped antigos (legado do experimento
@@ -1178,8 +1080,8 @@ def _open_chrome_for_account(
 
     profile_dir.mkdir(parents=True, exist_ok=True)
 
-    # Remove SingletonLock e DevToolsActivePort antigo (sobra quando Chrome morre sem cleanup)
-    for lock_name in ("SingletonLock", "SingletonCookie", "SingletonSocket", "DevToolsActivePort"):
+    # Remove SingletonLock (sobra quando Chrome morre sem cleanup, impede novo launch)
+    for lock_name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
         try:
             lf = profile_dir / lock_name
             if lf.exists() or lf.is_symlink():
@@ -1213,11 +1115,6 @@ def _open_chrome_for_account(
         # Modo antigo: tenta auto-login com cookies + proxy
         if not reset:
             session_path = _find_session_file(safe)
-            # Se não tem sessão local, tenta baixar do servidor central
-            if not session_path:
-                if _download_session_from_server(safe):
-                    print(f"[local-api] sessão de @{safe} baixada do servidor")
-                    session_path = _find_session_file(safe)
             if session_path:
                 cdp_cookies = _extract_cdp_cookies(session_path)
                 if not cdp_cookies:
@@ -1343,26 +1240,19 @@ def _open_chrome_for_account(
         _t_wait.sleep(0.4)
     else:
         print(f"[local-api] ⚠️ DevToolsActivePort NÃO criado em 12s em {profile_dir}", flush=True)
-        # Chrome 148+ pode não criar o arquivo. Verifica se a porta responde e cria manualmente.
+        print(f"[local-api]    → Chrome atachou a outra instância OU falhou ao bindar porta", flush=True)
+        # Lista processos chrome pra diagnóstico
         try:
-            import urllib.request as _urlr_check
-            _urlr_check.urlopen(f"http://127.0.0.1:{debug_port}/json/version", timeout=3).read()
-            port_file.write_text(f"{debug_port}\n", encoding="utf-8")
-            print(f"[local-api] ✓ DevToolsActivePort criado manualmente (Chrome 148+): porta={debug_port}", flush=True)
+            ps_get = (
+                f"Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
+                f"Where-Object {{ $_.CommandLine -like '*{safe}*' }} | "
+                f"Select-Object ProcessId,CommandLine | Format-List"
+            )
+            r = subprocess.run(["powershell.exe", "-NoProfile", "-Command", ps_get],
+                              capture_output=True, text=True, timeout=5)
+            print(f"[local-api]    Chromes com '{safe}' no cmdline:\n{r.stdout[:1500]}")
         except Exception:
-            print(f"[local-api]    → Chrome atachou a outra instância OU falhou ao bindar porta", flush=True)
-            # Lista processos chrome pra diagnóstico
-            try:
-                ps_get = (
-                    f"Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
-                    f"Where-Object {{ $_.CommandLine -like '*{safe}*' }} | "
-                    f"Select-Object ProcessId,CommandLine | Format-List"
-                )
-                r = subprocess.run(["powershell.exe", "-NoProfile", "-Command", ps_get],
-                                  capture_output=True, text=True, timeout=5)
-                print(f"[local-api]    Chromes com '{safe}' no cmdline:\n{r.stdout[:1500]}")
-            except Exception:
-                pass
+            pass
 
     proxy_desc = " + proxy" if proxy else " (SEM proxy)"
     desc = f"Chrome desktop{proxy_desc}"
@@ -1394,7 +1284,7 @@ def _save_session_from_chrome(username: str) -> tuple[bool, str]:
         return False, "username inválido"
 
     # Estratégia: profiles têm timestamp suffix (<user>_<ts>).
-    profile_base = CHROME_PROFILES_DIR
+    profile_base = Path.home() / "InstaposterProfiles"
     candidates: list[Path] = []
     if (profile_base / safe).exists():
         candidates.append(profile_base / safe)
@@ -1439,9 +1329,7 @@ def _save_session_from_chrome(username: str) -> tuple[bool, str]:
                                   capture_output=True, text=True, timeout=5)
             for line in (result.stdout or "").splitlines():
                 m_port = _re_cmd.search(r"remote-debugging-port=(\d+)", line)
-                # Regex robusta: suporta paths com espaço (ex: "C:\Users\Edson Juan\...")
-                m_dir = _re_cmd.search(r'--user-data-dir="?([^"]+?)"?\s', line) or \
-                        _re_cmd.search(r"--user-data-dir=([^\"\s]+)", line) or \
+                m_dir = _re_cmd.search(r"--user-data-dir=([^\"\s]+)", line) or \
                         _re_cmd.search(r"InstaposterProfiles[\\\\/](\w[\w.-]*)", line)
                 if m_port and m_dir:
                     port_candidate = int(m_port.group(1))
@@ -1654,320 +1542,10 @@ def _save_session_from_chrome(username: str) -> tuple[bool, str]:
             except Exception:
                 pass
         session_file.write_text(json.dumps(session_data, ensure_ascii=False, indent=2), encoding="utf-8")
-        # Sync: envia sessão pro servidor central pra outros workers usarem
-        try:
-            _upload_session_to_server(safe, session_data)
-        except Exception as _sync_err:
-            print(f"[sync] ⚠️ upload pro servidor falhou ({_sync_err}) — sessão local OK")
         return True, f"Sessão salva em {session_file.name} ({len(ig_cookies)} cookies, sessionid: ...{sessionid[-12:]})"
     finally:
         try:
             ws_conn.close()
-        except Exception:
-            pass
-
-
-# Estado do auto-login (consultável via /auto-login-status)
-_auto_login_status: dict[str, dict] = {}
-_auto_login_status_lock = threading.Lock()
-
-
-def _set_auto_login_status(username: str, status: str, code: str = None):
-    with _auto_login_status_lock:
-        _auto_login_status[username.lower()] = {
-            "status": status,
-            "code": code,
-            "timestamp": time.time(),
-        }
-
-
-def _auto_login_flow(username: str, password: str, email: str = None, proxy: str = None):
-    """Fluxo semi-automático: abre Chrome, preenche login/senha via CDP,
-    espera verificação do IG, busca código no tempmail e preenche.
-
-    Roda em thread separada pra não bloquear o HTTP server."""
-    import websocket as _ws_auto
-
-    _set_auto_login_status(username, "opening_chrome")
-    print(f"[auto-login] iniciando pra @{username}")
-
-    # 1. Abre Chrome na página de login
-    ok, info = _open_chrome_for_account(
-        username, reset=True, proxy=proxy, clean_mobile=True,
-    )
-    if not ok:
-        _set_auto_login_status(username, "error")
-        print(f"[auto-login] falha abrindo Chrome: {info}")
-        return
-
-    # 2. Espera Chrome carregar e acha a porta de debug
-    safe = "".join(c for c in username if c.isalnum() or c in "._-")
-    profile_dir = CHROME_PROFILES_DIR / safe
-    port_file = profile_dir / "DevToolsActivePort"
-
-    deadline = time.time() + 20
-    debug_port = None
-    while time.time() < deadline:
-        if port_file.exists():
-            try:
-                debug_port = int(port_file.read_text("utf-8").strip().split("\n")[0])
-                break
-            except Exception:
-                pass
-        time.sleep(0.5)
-
-    if not debug_port:
-        _set_auto_login_status(username, "error")
-        print(f"[auto-login] DevToolsActivePort não encontrado")
-        return
-
-    # 3. Espera página carregar
-    time.sleep(2)
-
-    # 4. Conecta via CDP
-    try:
-        import urllib.request as _urlr_auto
-        r = _urlr_auto.urlopen(f"http://127.0.0.1:{debug_port}/json", timeout=5)
-        targets = json.loads(r.read().decode("utf-8"))
-        page = next((t for t in targets if t.get("type") == "page"), None)
-        if not page:
-            _set_auto_login_status(username, "error")
-            return
-        ws = _ws_auto.create_connection(page["webSocketDebuggerUrl"], timeout=10)
-    except Exception as e:
-        _set_auto_login_status(username, "error")
-        print(f"[auto-login] falha CDP: {e}")
-        return
-
-    msg_id = [0]
-
-    def cdp_send(method, params=None):
-        msg_id[0] += 1
-        ws.send(json.dumps({"id": msg_id[0], "method": method, "params": params or {}}))
-        for _ in range(5):
-            try:
-                resp = json.loads(ws.recv())
-                if resp.get("id") == msg_id[0]:
-                    return resp.get("result", {})
-            except Exception:
-                break
-        return {}
-
-    def cdp_eval(expression):
-        return cdp_send("Runtime.evaluate", {"expression": expression})
-
-    try:
-        _set_auto_login_status(username, "filling_credentials")
-
-        # 5. Preenche username (rápido, sem delay desnecessário)
-        print(f"[auto-login] preenchendo login @{username}")
-        cdp_eval(f'''
-            (function() {{
-                var el = document.querySelector('input[name="email"]') ||
-                         document.querySelector('input[name="username"]') ||
-                         document.querySelector('input[autocomplete*="username"]');
-                if (!el) return "no_field";
-                var nativeSet = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-                nativeSet.call(el, "{username}");
-                el.dispatchEvent(new Event('input', {{bubbles: true}}));
-                el.dispatchEvent(new Event('change', {{bubbles: true}}));
-                return "ok";
-            }})()
-        ''')
-        time.sleep(0.3)
-
-        # 6. Preenche senha
-        escaped_pw = password.replace("\\", "\\\\").replace('"', '\\"').replace("'", "\\'")
-        cdp_eval(f'''
-            (function() {{
-                var el = document.querySelector('input[name="pass"]') ||
-                         document.querySelector('input[name="password"]') ||
-                         document.querySelector('input[type="password"]');
-                if (!el) return "no_field";
-                var nativeSet = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-                nativeSet.call(el, "{escaped_pw}");
-                el.dispatchEvent(new Event('input', {{bubbles: true}}));
-                el.dispatchEvent(new Event('change', {{bubbles: true}}));
-                return "ok";
-            }})()
-        ''')
-        time.sleep(0.3)
-
-        # 7. Clica login
-        _set_auto_login_status(username, "logging_in")
-        print(f"[auto-login] clicando login")
-        cdp_eval('''
-            (function() {
-                var btn = document.querySelector('button[type="submit"]');
-                if (btn) btn.click();
-                return "ok";
-            })()
-        ''')
-
-        # 8. Espera resposta do Instagram
-        print(f"[auto-login] aguardando resposta do Instagram (5s)...")
-        time.sleep(5)
-
-        # 8.5 Reconecta CDP (página pode ter redirecionado após login)
-        try:
-            ws.close()
-        except Exception:
-            pass
-        try:
-            import urllib.request as _urlr2
-            r2 = _urlr2.urlopen(f"http://127.0.0.1:{debug_port}/json", timeout=5)
-            targets2 = json.loads(r2.read().decode("utf-8"))
-            page2 = next((t for t in targets2 if t.get("type") == "page"), None)
-            if page2:
-                ws = _ws_auto.create_connection(page2["webSocketDebuggerUrl"], timeout=10)
-                msg_id[0] = 0
-                print(f"[auto-login] CDP reconectado na página: {page2.get('url', '?')[:60]}")
-        except Exception as e:
-            print(f"[auto-login] falha reconectando CDP: {e}")
-
-        # 9. Busca código de verificação
-        if email:
-            _set_auto_login_status(username, "waiting_code")
-            # Notifica servidor que está buscando código
-            try:
-                import requests as _req_st
-                _req_st.post(
-                    f"{SERVER_URL}/api/auto-login-code/{username}",
-                    json={"code": None, "status": "waiting_code"},
-                    headers={"X-Worker-Token": WORKER_TOKEN},
-                    timeout=5,
-                )
-            except Exception:
-                pass
-            print(f"[auto-login] buscando código em {email}...")
-            try:
-                from core.tempmail import fetch_instagram_code
-                code = fetch_instagram_code(email, timeout=120, poll_interval=4)
-                if code:
-                    _set_auto_login_status(username, "code_found", code=code)
-                    print(f"[auto-login] CÓDIGO: {code}")
-
-                    # Envia código pro servidor (frontend consulta de lá)
-                    try:
-                        import requests as _req_code
-                        _req_code.post(
-                            f"{SERVER_URL}/api/auto-login-code/{username}",
-                            json={"code": code, "status": "code_found"},
-                            headers={"X-Worker-Token": WORKER_TOKEN},
-                            timeout=5,
-                        )
-                        print(f"[auto-login] código enviado pro servidor")
-                    except Exception as e:
-                        print(f"[auto-login] falha enviando código pro servidor: {e}")
-
-                    # Reconecta CDP AGORA (página pode ter mudado desde o login)
-                    try:
-                        ws.close()
-                    except Exception:
-                        pass
-                    try:
-                        import urllib.request as _urlr3
-                        r3 = _urlr3.urlopen(f"http://127.0.0.1:{debug_port}/json", timeout=5)
-                        targets3 = json.loads(r3.read().decode("utf-8"))
-                        page3 = next((t for t in targets3 if t.get("type") == "page"), None)
-                        if page3:
-                            ws = _ws_auto.create_connection(page3["webSocketDebuggerUrl"], timeout=10)
-                            msg_id[0] = 0
-                            print(f"[auto-login] CDP reconectado: {page3.get('url', '?')[:80]}")
-                        else:
-                            print(f"[auto-login] AVISO: nenhuma aba encontrada pra injetar código")
-                    except Exception as e:
-                        print(f"[auto-login] AVISO: falha reconectando CDP: {e}")
-
-                    # Mostra o código de 3 formas:
-                    # 1) Título da janela (sempre visível na barra de tarefas)
-                    try:
-                        cdp_eval(f'document.title = "CÓDIGO: {code}"')
-                        print(f"[auto-login] título atualizado")
-                    except Exception as e:
-                        print(f"[auto-login] falha título: {e}")
-
-                    # 2) Banner fixo no topo da página
-                    try:
-                        cdp_eval(f'''
-                            (function() {{
-                                var d = document.createElement('div');
-                                d.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:999999;background:#1a1a2e;color:#00ff88;font-size:28px;font-weight:bold;text-align:center;padding:20px;border-bottom:3px solid #00ff88;font-family:monospace;';
-                                d.innerHTML = 'CÓDIGO: <span style="font-size:42px;letter-spacing:8px;color:#fff">{code}</span>';
-                                document.body.prepend(d);
-                                return "banner_ok";
-                            }})()
-                        ''')
-                        print(f"[auto-login] banner injetado")
-                    except Exception as e:
-                        print(f"[auto-login] falha banner: {e}")
-
-                    # 3) Alert nativo (impossível de perder)
-                    try:
-                        cdp_send("Page.handleJavaScriptDialog", {"accept": True})
-                    except Exception:
-                        pass
-                    try:
-                        cdp_eval(f'setTimeout(function(){{ alert("CÓDIGO DE VERIFICAÇÃO: {code}"); }}, 500)')
-                        print(f"[auto-login] alert disparado")
-                    except Exception as e:
-                        print(f"[auto-login] falha alert: {e}")
-
-                    # Preenche código no campo
-                    cdp_eval(f'''
-                        (function() {{
-                            var inputs = document.querySelectorAll('input[name="security_code"], input[name="verificationCode"], input[type="text"], input[type="number"]');
-                            for (var i = 0; i < inputs.length; i++) {{
-                                var el = inputs[i];
-                                if (el.offsetParent !== null) {{
-                                    var nativeSet = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-                                    nativeSet.call(el, "{code}");
-                                    el.dispatchEvent(new Event('input', {{bubbles: true}}));
-                                    el.dispatchEvent(new Event('change', {{bubbles: true}}));
-                                    return "filled";
-                                }}
-                            }}
-                            return "no_input";
-                        }})()
-                    ''')
-                    time.sleep(0.5)
-
-                    # Clica confirmar
-                    cdp_eval('''
-                        (function() {
-                            var btns = document.querySelectorAll('button[type="button"], button[type="submit"]');
-                            for (var i = 0; i < btns.length; i++) {
-                                var txt = btns[i].textContent.toLowerCase();
-                                if (txt.includes("confirm") || txt.includes("enviar") || txt.includes("submit") || txt.includes("next") || txt.includes("continuar")) {
-                                    btns[i].click();
-                                    return "clicked";
-                                }
-                            }
-                            var last = btns[btns.length - 1];
-                            if (last) last.click();
-                            return "fallback";
-                        })()
-                    ''')
-                    _set_auto_login_status(username, "done", code=code)
-                    print(f"[auto-login] código preenchido e confirmado!")
-                    time.sleep(5)
-                else:
-                    _set_auto_login_status(username, "code_timeout")
-                    print(f"[auto-login] código não chegou — preencha manualmente")
-            except Exception as e:
-                _set_auto_login_status(username, "error")
-                print(f"[auto-login] erro buscando código: {e}")
-        else:
-            _set_auto_login_status(username, "no_email")
-            print(f"[auto-login] sem email — preencha código manualmente se pedir")
-
-        print(f"[auto-login] concluído pra @{username} — clique 'Salvar Sessão'")
-
-    except Exception as e:
-        print(f"[auto-login] erro: {e}")
-    finally:
-        try:
-            ws.close()
         except Exception:
             pass
 
@@ -1995,19 +1573,11 @@ class _LocalAPIHandler(BaseHTTPRequestHandler):
         self._send(204)
 
     def do_GET(self):
-        from urllib.parse import urlparse, parse_qs
+        from urllib.parse import urlparse
         import json as _json
-        parsed = urlparse(self.path)
-        path = parsed.path
+        path = urlparse(self.path).path
         if path == "/health":
             body = _json.dumps({"ok": True, "worker_name": WORKER_NAME}).encode("utf-8")
-            self._send(200, body)
-        elif path == "/auto-login-status":
-            qs = parse_qs(parsed.query)
-            username = (qs.get("username") or [""])[0].strip().lower()
-            with _auto_login_status_lock:
-                status = _auto_login_status.get(username, {"status": "idle"})
-            body = _json.dumps({"ok": True, **status}).encode("utf-8")
             self._send(200, body)
         else:
             self._send(404, b'{"error":"not found"}')
@@ -2033,41 +1603,6 @@ class _LocalAPIHandler(BaseHTTPRequestHandler):
                 body = _json.dumps({"ok": False, "error": info}).encode("utf-8")
                 self._send(400, body)
                 print(f"[local-api] ⚠️ save-session @{username} falhou: {info}")
-            return
-
-        # /auto-login: abre Chrome, preenche login/senha, busca código email, preenche
-        if parsed.path == "/auto-login":
-            qs = parse_qs(parsed.query)
-            username = (qs.get("username") or [""])[0].strip()
-            if not username:
-                self._send(400, b'{"error":"username obrigatorio"}')
-                return
-            # Lê credenciais do body JSON
-            password = None
-            email = None
-            proxy = None
-            try:
-                content_len = int(self.headers.get("Content-Length", "0"))
-                if content_len > 0:
-                    raw = self.rfile.read(content_len)
-                    body_data = _json.loads(raw.decode("utf-8"))
-                    password = (body_data.get("password") or "").strip() or None
-                    email = (body_data.get("email") or "").strip() or None
-                    proxy = (body_data.get("proxy") or "").strip() or None
-            except Exception:
-                pass
-            if not password:
-                self._send(400, b'{"error":"password obrigatorio no body JSON"}')
-                return
-            # Executa auto-login em thread separada (não bloqueia o HTTP server)
-            threading.Thread(
-                target=_auto_login_flow,
-                args=(username, password, email, proxy),
-                daemon=True,
-                name=f"auto-login-{username}",
-            ).start()
-            body = _json.dumps({"ok": True, "message": f"Auto-login iniciado pra @{username}. Acompanhe no Chrome."}).encode("utf-8")
-            self._send(200, body)
             return
 
         if parsed.path != "/open-browser":
@@ -2246,27 +1781,10 @@ def main():
     print(f"=" * 60)
     print()
 
-    # Heartbeat inicial com retry (até 60s) — cobre race condition em docker compose:
-    # worker pode iniciar antes do app terminar de subir (FastAPI demora ~5-10s).
-    # Sem retry, worker morre com exit(2) e Docker fica recriando container.
-    info = None
-    MAX_BOOTSTRAP_ATTEMPTS = 30  # 30 * 2s = 60s de tolerância
-    for attempt in range(MAX_BOOTSTRAP_ATTEMPTS):
-        info = heartbeat()
-        if info:
-            break
-        if attempt == 0:
-            print(f"Aguardando servidor responder... (até {MAX_BOOTSTRAP_ATTEMPTS * 2}s)")
-        elif (attempt + 1) % 5 == 0:
-            print(f"  ainda tentando ({attempt + 1}/{MAX_BOOTSTRAP_ATTEMPTS})...")
-        time.sleep(2)
-
+    # Heartbeat inicial pra validar token
+    info = heartbeat()
     if not info:
-        print(f"Heartbeat inicial falhou após {MAX_BOOTSTRAP_ATTEMPTS * 2}s.")
-        print("Verifica:")
-        print(f"  - SERVER_URL acessível: {SERVER_URL}")
-        print(f"  - WORKER_TOKEN válido (gerado em /workers do painel)")
-        print(f"  - App docker container está rodando")
+        print("Heartbeat inicial falhou. Verifica SERVER_URL e WORKER_TOKEN.")
         sys.exit(2)
     print(f"✓ Conectado (worker_id: {info.get('worker_id')})")
     print(f"  Aguardando jobs… ({WORKER_CONCURRENCY} thread(s), poll {POLL_INTERVAL_SECONDS}s)")
