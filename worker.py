@@ -1589,6 +1589,200 @@ def _save_session_from_chrome(username: str) -> tuple[bool, str]:
             pass
 
 
+def _auto_login_flow(username: str, password: str, email: str = None, proxy: str = None):
+    """Abre Chrome, preenche login/senha via CDP, busca código no tempmail."""
+    import websocket as _ws_auto
+
+    print(f"[auto-login] iniciando pra @{username}")
+
+    ok, info = _open_chrome_for_account(username, reset=True, proxy=proxy, clean_mobile=True)
+    if not ok:
+        print(f"[auto-login] falha abrindo Chrome: {info}")
+        return
+
+    safe = "".join(c for c in username if c.isalnum() or c in "._-")
+    profile_dir = CHROME_PROFILES_DIR / safe
+    port_file = profile_dir / "DevToolsActivePort"
+
+    deadline = time.time() + 20
+    debug_port = None
+    while time.time() < deadline:
+        if port_file.exists():
+            try:
+                debug_port = int(port_file.read_text("utf-8").strip().split("\n")[0])
+                break
+            except Exception:
+                pass
+        time.sleep(0.5)
+
+    if not debug_port:
+        print(f"[auto-login] DevToolsActivePort não encontrado")
+        return
+
+    time.sleep(2)
+
+    try:
+        import urllib.request as _urlr_auto
+        r = _urlr_auto.urlopen(f"http://127.0.0.1:{debug_port}/json", timeout=5)
+        targets = json.loads(r.read().decode("utf-8"))
+        page = next((t for t in targets if t.get("type") == "page"), None)
+        if not page:
+            return
+        ws = _ws_auto.create_connection(page["webSocketDebuggerUrl"], timeout=10)
+    except Exception as e:
+        print(f"[auto-login] falha CDP: {e}")
+        return
+
+    msg_id = [0]
+
+    def cdp_send(method, params=None):
+        msg_id[0] += 1
+        ws.send(json.dumps({"id": msg_id[0], "method": method, "params": params or {}}))
+        for _ in range(5):
+            try:
+                resp = json.loads(ws.recv())
+                if resp.get("id") == msg_id[0]:
+                    return resp.get("result", {})
+            except Exception:
+                break
+        return {}
+
+    def cdp_eval(expression):
+        return cdp_send("Runtime.evaluate", {"expression": expression})
+
+    try:
+        print(f"[auto-login] preenchendo login @{username}")
+        cdp_eval(f'''
+            (function() {{
+                var el = document.querySelector('input[name="email"]') ||
+                         document.querySelector('input[name="username"]') ||
+                         document.querySelector('input[autocomplete*="username"]');
+                if (!el) return "no_field";
+                var nativeSet = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                nativeSet.call(el, "{username}");
+                el.dispatchEvent(new Event('input', {{bubbles: true}}));
+                el.dispatchEvent(new Event('change', {{bubbles: true}}));
+                return "ok";
+            }})()
+        ''')
+        time.sleep(0.3)
+
+        escaped_pw = password.replace("\\", "\\\\").replace('"', '\\"').replace("'", "\\'")
+        cdp_eval(f'''
+            (function() {{
+                var el = document.querySelector('input[name="pass"]') ||
+                         document.querySelector('input[name="password"]') ||
+                         document.querySelector('input[type="password"]');
+                if (!el) return "no_field";
+                var nativeSet = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                nativeSet.call(el, "{escaped_pw}");
+                el.dispatchEvent(new Event('input', {{bubbles: true}}));
+                el.dispatchEvent(new Event('change', {{bubbles: true}}));
+                return "ok";
+            }})()
+        ''')
+        time.sleep(0.3)
+
+        print(f"[auto-login] clicando login")
+        cdp_eval('(function() { var btn = document.querySelector("button[type=\\"submit\\"]"); if (btn) btn.click(); return "ok"; })()')
+
+        print(f"[auto-login] aguardando resposta (5s)...")
+        time.sleep(5)
+
+        if email:
+            # Reconecta CDP (página pode ter mudado)
+            try:
+                ws.close()
+            except Exception:
+                pass
+            try:
+                r2 = _urlr_auto.urlopen(f"http://127.0.0.1:{debug_port}/json", timeout=5)
+                targets2 = json.loads(r2.read().decode("utf-8"))
+                page2 = next((t for t in targets2 if t.get("type") == "page"), None)
+                if page2:
+                    ws2 = _ws_auto.create_connection(page2["webSocketDebuggerUrl"], timeout=10)
+                    # Reatribui pra usar nas funções
+                    msg_id[0] = 0
+                    def cdp_eval2(expr):
+                        msg_id[0] += 1
+                        ws2.send(json.dumps({"id": msg_id[0], "method": "Runtime.evaluate", "params": {"expression": expr}}))
+                        for _ in range(5):
+                            try:
+                                resp = json.loads(ws2.recv())
+                                if resp.get("id") == msg_id[0]:
+                                    return resp.get("result", {})
+                            except Exception:
+                                break
+                        return {}
+            except Exception:
+                pass
+
+            print(f"[auto-login] buscando código em {email}...")
+            try:
+                from core.tempmail import fetch_instagram_code
+                code = fetch_instagram_code(email, timeout=120, poll_interval=4)
+                if code:
+                    print(f"[auto-login] CÓDIGO: {code}")
+                    # Mostra no título do Chrome
+                    try:
+                        cdp_eval2(f'document.title = "CÓDIGO: {code}"')
+                    except Exception:
+                        pass
+                    # Preenche código
+                    try:
+                        cdp_eval2(f'''
+                            (function() {{
+                                var inputs = document.querySelectorAll('input[name="security_code"], input[name="verificationCode"], input[type="text"], input[type="number"]');
+                                for (var i = 0; i < inputs.length; i++) {{
+                                    var el = inputs[i];
+                                    if (el.offsetParent !== null) {{
+                                        var nativeSet = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                                        nativeSet.call(el, "{code}");
+                                        el.dispatchEvent(new Event('input', {{bubbles: true}}));
+                                        el.dispatchEvent(new Event('change', {{bubbles: true}}));
+                                        return "filled";
+                                    }}
+                                }}
+                                return "no_input";
+                            }})()
+                        ''')
+                        time.sleep(0.5)
+                        cdp_eval2('''
+                            (function() {
+                                var btns = document.querySelectorAll('button[type="button"], button[type="submit"]');
+                                for (var i = 0; i < btns.length; i++) {
+                                    var txt = btns[i].textContent.toLowerCase();
+                                    if (txt.includes("confirm") || txt.includes("enviar") || txt.includes("submit") || txt.includes("next") || txt.includes("continuar")) {
+                                        btns[i].click();
+                                        return "clicked";
+                                    }
+                                }
+                                var last = btns[btns.length - 1];
+                                if (last) last.click();
+                                return "fallback";
+                            })()
+                        ''')
+                        print(f"[auto-login] código preenchido e confirmado!")
+                    except Exception as e:
+                        print(f"[auto-login] erro preenchendo código: {e}")
+                else:
+                    print(f"[auto-login] código não chegou — preencha manualmente")
+            except Exception as e:
+                print(f"[auto-login] erro buscando código: {e}")
+        else:
+            print(f"[auto-login] sem email — preencha código manualmente se pedir")
+
+        print(f"[auto-login] concluído pra @{username} — clique 'Salvar Sessão'")
+
+    except Exception as e:
+        print(f"[auto-login] erro: {e}")
+    finally:
+        try:
+            ws.close()
+        except Exception:
+            pass
+
+
 class _LocalAPIHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         # Silencia o log default do http.server (polui o terminal do worker)
@@ -1642,6 +1836,38 @@ class _LocalAPIHandler(BaseHTTPRequestHandler):
                 body = _json.dumps({"ok": False, "error": info}).encode("utf-8")
                 self._send(400, body)
                 print(f"[local-api] ⚠️ save-session @{username} falhou: {info}")
+            return
+
+        # /auto-login: abre Chrome, preenche login/senha, busca código email
+        if parsed.path == "/auto-login":
+            qs = parse_qs(parsed.query)
+            username = (qs.get("username") or [""])[0].strip()
+            if not username:
+                self._send(400, b'{"error":"username obrigatorio"}')
+                return
+            password = None
+            email = None
+            proxy = None
+            try:
+                content_len = int(self.headers.get("Content-Length", "0"))
+                if content_len > 0:
+                    raw = self.rfile.read(content_len)
+                    body_data = _json.loads(raw.decode("utf-8"))
+                    password = (body_data.get("password") or "").strip() or None
+                    email = (body_data.get("email") or "").strip() or None
+                    proxy = (body_data.get("proxy") or "").strip() or None
+            except Exception:
+                pass
+            if not password:
+                self._send(400, b'{"error":"password obrigatorio no body JSON"}')
+                return
+            threading.Thread(
+                target=_auto_login_flow,
+                args=(username, password, email, proxy),
+                daemon=True,
+            ).start()
+            body = _json.dumps({"ok": True, "message": f"Auto-login iniciado pra @{username}"}).encode("utf-8")
+            self._send(200, body)
             return
 
         if parsed.path != "/open-browser":
