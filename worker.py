@@ -262,6 +262,31 @@ def _download_session_from_server(username: str) -> bool:
         return False
 
 
+def _mark_account_connected(username: str):
+    """Marca conta como conectada no servidor (pra aparecer no disparo)."""
+    try:
+        # Envia sessão pro servidor
+        session_file = _find_session_file(username)
+        if session_file:
+            session_data = json.loads(session_file.read_text(encoding="utf-8"))
+            _upload_session_to_server(username, session_data)
+            print(f"[sync] ✓ sessão de @{username} enviada pro servidor")
+
+        # Marca como conectada via API
+        r = requests.post(
+            f"{SERVER_URL}/api/worker/mark-connected",
+            headers=headers(),
+            json={"username": username, "worker_name": WORKER_NAME},
+            timeout=10,
+        )
+        if r.status_code == 200:
+            print(f"[sync] ✓ @{username} marcada como conectada")
+        else:
+            print(f"[sync] mark-connected: HTTP {r.status_code}")
+    except Exception as e:
+        print(f"[sync] erro: {e}")
+
+
 # ----------- Download media -----------
 
 def download_media(url: str, dest: Path):
@@ -1832,6 +1857,11 @@ class _LocalAPIHandler(BaseHTTPRequestHandler):
                 body = _json.dumps({"ok": True, "message": info}).encode("utf-8")
                 self._send(200, body)
                 print(f"[local-api] 💾 sessão SALVA pra @{username}: {info}")
+                # Marca conta como conectada no servidor
+                try:
+                    _mark_account_connected(username)
+                except Exception as e:
+                    print(f"[local-api] ⚠️ erro marcando conectada: {e}")
             else:
                 body = _json.dumps({"ok": False, "error": info}).encode("utf-8")
                 self._send(400, body)

@@ -2533,6 +2533,75 @@ def api_worker_heartbeat(payload: WorkerHeartbeatIn, request: Request):
     return {"ok": True, "worker_id": w.id, "name": w.name}
 
 
+@app.post("/api/worker/sessions/upload")
+def api_worker_upload_session(request: Request):
+    """Worker envia sessão (cookies do Chrome) pro servidor."""
+    w = _require_worker(request)
+    import asyncio
+    try:
+        raw = asyncio.get_event_loop().run_until_complete(request.body())
+        body = json.loads(raw)
+    except Exception:
+        raise HTTPException(400, "JSON inválido")
+    username = (body.get("username") or "").strip().lower()
+    session_data = body.get("session_data")
+    if not username or not session_data:
+        raise HTTPException(400, "username e session_data obrigatórios")
+    # Descobre workspace da conta
+    ws_slug = "default"
+    for slug in _paths.list_workspace_slugs():
+        f = _paths.accounts_file(slug)
+        if not f.exists():
+            continue
+        accs = json.loads(f.read_text("utf-8"))
+        if any(a.get("username") == username for a in accs):
+            ws_slug = slug
+            break
+    target_dir = _paths.workspace_root() / ws_slug / "sessions"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    sf = target_dir / f"{username}.json"
+    sf.write_text(json.dumps(session_data, ensure_ascii=False, indent=2), "utf-8")
+    print(f"[sessions] upload OK: @{username} ws={ws_slug} by={w.name}")
+    return {"ok": True, "workspace": ws_slug}
+
+
+@app.post("/api/worker/mark-connected")
+def api_worker_mark_connected(request: Request):
+    """Worker marca conta como conectada (sessão salva com sucesso)."""
+    w = _require_worker(request)
+    import asyncio
+    try:
+        raw = asyncio.get_event_loop().run_until_complete(request.body())
+        body = json.loads(raw)
+    except Exception:
+        raise HTTPException(400, "JSON inválido")
+    username = (body.get("username") or "").strip().lower()
+    if not username:
+        raise HTTPException(400, "username obrigatório")
+    worker_name = body.get("worker_name", w.name)
+    # Marca em TODOS os workspaces onde a conta existe
+    from datetime import datetime as _dt_mc, timezone as _tz_mc
+    now_iso = _dt_mc.now(_tz_mc.utc).isoformat(timespec="seconds")
+    found = False
+    for slug in _paths.list_workspace_slugs():
+        _paths.set_workspace(slug)
+        try:
+            with accounts_transaction() as accounts:
+                for a in accounts:
+                    if a["username"] == username:
+                        a["connected_via_worker_id"] = w.id
+                        a["connected_via_worker_name"] = worker_name
+                        a["connected_at"] = now_iso
+                        found = True
+                        print(f"[mark-connected] @{username} conectada (ws={slug})")
+                        break
+        except Exception:
+            pass
+    if not found:
+        raise HTTPException(404, f"Conta @{username} não encontrada")
+    return {"ok": True}
+
+
 @app.get("/api/worker/jobs/next")
 def api_worker_next_job(request: Request):
     w = _require_worker(request)
