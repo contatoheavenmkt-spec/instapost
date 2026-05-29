@@ -195,32 +195,55 @@ def web_post_reel(session_data: dict, video_path: str, caption: str = "") -> dic
         else:
             print(f"[web-poster] sem thumbnail (ffmpeg indisponível)")
 
-        # 3. Publish as Reel
-        print(f"[web-poster] publishing reel...")
-        r = s.post(
-            "https://www.instagram.com/api/v1/media/configure_to_clips/",
-            data={
-                "source_type": "library",
-                "caption": caption or "",
-                "upload_id": upload_id,
-                "disable_comments": "0",
-                "like_and_view_counts_disabled": "0",
-                "igtv_share_preview_to_feed": "1",
-                "is_unified_video": "1",
-                "video_subtitles_enabled": "0",
-            },
-            timeout=60,
-        )
+        # 3. Publish as Reel (com retry pra transcode)
+        configure_data = {
+            "source_type": "library",
+            "caption": caption or "",
+            "upload_id": upload_id,
+            "disable_comments": "0",
+            "like_and_view_counts_disabled": "0",
+            "igtv_share_preview_to_feed": "1",
+            "is_unified_video": "1",
+            "video_subtitles_enabled": "0",
+        }
 
-        if r.status_code != 200:
-            return {"success": False, "media_id": None, "error": f"Configure falhou: HTTP {r.status_code} - {r.text[:300]}"}
+        # Instagram precisa de tempo pra transcodificar o video.
+        # Retry até 5x com intervalo crescente.
+        for attempt in range(6):
+            if attempt > 0:
+                wait = 5 + attempt * 5  # 10s, 15s, 20s, 25s, 30s
+                print(f"[web-poster] aguardando transcode ({wait}s)...")
+                time.sleep(wait)
 
-        rj = r.json()
-        media = rj.get("media")
-        if media:
-            pk = media.get("pk") or media.get("id")
-            print(f"[web-poster] REEL POSTADO! pk={pk}")
-            return {"success": True, "media_id": str(pk), "error": None}
+            print(f"[web-poster] publishing reel (tentativa {attempt + 1})...")
+            r = s.post(
+                "https://www.instagram.com/api/v1/media/configure_to_clips/",
+                data=configure_data,
+                timeout=60,
+            )
+
+            if r.status_code == 200:
+                rj = r.json()
+                media = rj.get("media")
+                if media:
+                    pk = media.get("pk") or media.get("id")
+                    print(f"[web-poster] REEL POSTADO! pk={pk}")
+                    return {"success": True, "media_id": str(pk), "error": None}
+
+                msg = rj.get("message", "")
+                if "transcode" in msg.lower() or "not finished" in msg.lower():
+                    print(f"[web-poster] transcode em andamento...")
+                    continue  # retry
+                if "media_needs_reupload" in msg:
+                    return {"success": False, "media_id": None, "error": "Instagram pediu reupload (thumbnail inválido)"}
+                # Outro erro
+                return {"success": False, "media_id": None, "error": f"Resposta: {json.dumps(rj)[:300]}"}
+            elif r.status_code == 202:
+                # 202 = accepted but not done yet (transcode)
+                print(f"[web-poster] transcode em andamento (202)...")
+                continue
+            else:
+                return {"success": False, "media_id": None, "error": f"HTTP {r.status_code} - {r.text[:300]}"}
 
         msg = rj.get("message", "")
         if msg == "media_needs_reupload":
@@ -278,11 +301,23 @@ def web_post_story_video(session_data: dict, video_path: str, caption: str = "",
                 "rotation": 0.0,
             }])
 
-        r = s.post(
-            "https://www.instagram.com/api/v1/media/configure_to_story/",
-            data=configure_data,
-            timeout=60,
-        )
+        # Retry pra transcode
+        for attempt in range(6):
+            if attempt > 0:
+                wait = 5 + attempt * 5
+                print(f"[web-poster] aguardando transcode story ({wait}s)...")
+                time.sleep(wait)
+
+            r = s.post(
+                "https://www.instagram.com/api/v1/media/configure_to_story/",
+                data=configure_data,
+                timeout=60,
+            )
+
+            if r.status_code == 202 or (r.status_code == 200 and "transcode" in r.text.lower()):
+                continue
+
+            break
 
         if r.status_code != 200:
             return {"success": False, "media_id": None, "error": f"Configure story falhou: HTTP {r.status_code} - {r.text[:300]}"}
