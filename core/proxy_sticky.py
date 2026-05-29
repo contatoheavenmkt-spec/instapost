@@ -30,7 +30,8 @@ from urllib.parse import urlparse, urlunparse, quote
 
 # Mapping hostname → função que sabe injetar sticky id no username
 def _sticky_dataimpulse(user: str, sid: str) -> str:
-    """DataImpulse: 'token__cr.BR' → 'token__cr.BR__sid.<sid>'"""
+    """DataImpulse Desktop: 'token__cr.BR' → 'token__cr.BR__sid.<sid>'
+    NÃO usar pra Mobile — Mobile usa porta sticky (ver make_sticky)."""
     if "__sid." in user.lower():
         return user  # já tem
     return f"{user}__sid.{sid}"
@@ -66,6 +67,17 @@ def _sid_from_username(account_username: str, attempt: int = 0) -> str:
     return base
 
 
+def _is_dataimpulse_mobile(proxy_url: str, parsed=None) -> bool:
+    """Detecta se proxy DataImpulse é Mobile (porta 823 ou range 10000-20000)."""
+    p = parsed or urlparse(proxy_url)
+    if not p.hostname or "dataimpulse" not in p.hostname.lower():
+        return False
+    port = p.port or 0
+    # Porta 823 = gateway Mobile rotativo
+    # Portas 10000-20000 = sticky sessions Mobile
+    return port == 823 or (10000 <= port <= 20000)
+
+
 def make_sticky(
     proxy_url: Optional[str],
     account_username: Optional[str],
@@ -73,11 +85,11 @@ def make_sticky(
 ) -> Optional[str]:
     """Retorna proxy_url com sticky session id injetado, se possível.
 
-    attempt: 0 = IP padrão, 1+ = força IPs diferentes (mesmo username = série
-    determinística de IPs do pool). Útil pra retry quando IP atual tá blacklist.
+    DataImpulse Mobile: usa PORTA pra sticky (range 10000-20000).
+    DataImpulse Desktop: usa __sid no username.
+    Outros provedores: usa -session- no username.
 
-    Se não conhecer o provedor (hostname não casa com nenhum), devolve
-    o proxy original sem mexer.
+    attempt: 0 = IP padrão, 1+ = força IPs diferentes.
     """
     if not proxy_url or not account_username:
         return proxy_url
@@ -86,21 +98,35 @@ def make_sticky(
         if not p.hostname or not p.username:
             return proxy_url
         host_lower = p.hostname.lower()
+
+        # DataImpulse Mobile: sticky via PORTA (não __sid no username)
+        if _is_dataimpulse_mobile(proxy_url, parsed=p):
+            sid = _sid_from_username(account_username, attempt=attempt)
+            # Converte hash pra porta no range 10000-20000
+            port_offset = int(sid[:8], 16) % 10000  # 0-9999
+            sticky_port = 10000 + port_offset
+            # Re-monta URL com porta sticky, username LIMPO (sem __sid)
+            clean_user = re.sub(r"__sid\.[A-Za-z0-9]+", "", p.username)
+            encoded_user = quote(clean_user, safe="._-~")
+            encoded_pass = quote(p.password, safe="._-~") if p.password else ""
+            auth = f"{encoded_user}:{encoded_pass}" if encoded_pass else encoded_user
+            netloc = f"{auth}@{p.hostname}:{sticky_port}"
+            return urlunparse((p.scheme, netloc, p.path, p.params, p.query, p.fragment))
+
+        # Outros provedores: sticky via username
         handler = None
         for substrings, fn in _PROVIDER_HANDLERS:
             if any(s in host_lower for s in substrings):
                 handler = fn
                 break
         if handler is None:
-            return proxy_url  # provedor desconhecido — não mexe
+            return proxy_url
         sid = _sid_from_username(account_username, attempt=attempt)
-        # Remove sticky anterior antes de aplicar novo (idempotência com attempt)
         cleaned_user = re.sub(r"__sid\.[A-Za-z0-9]+", "", p.username)
         cleaned_user = re.sub(r"-session-[A-Za-z0-9]+", "", cleaned_user)
         new_user = handler(cleaned_user, sid)
         if new_user == p.username:
-            return proxy_url  # nada mudou
-        # Re-monta URL com o novo username (preserva password, host, port, etc)
+            return proxy_url
         encoded_user = quote(new_user, safe="._-~")
         encoded_pass = quote(p.password, safe="._-~") if p.password else ""
         auth = f"{encoded_user}:{encoded_pass}" if encoded_pass else encoded_user
