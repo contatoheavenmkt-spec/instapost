@@ -53,8 +53,15 @@ def _build_session(session_data: dict) -> requests.Session:
     cookies = session_data.get("cookies", {})
     auth = session_data.get("authorization_data", {})
 
+    # Usa UA da sessão (deve ser o mesmo UA do Chrome que fez login)
+    # Fallback: UA desktop padrão
+    ua = session_data.get("user_agent", "")
+    if not ua or "Instagram" in ua:
+        # UA mobile hardcoded antigo — usa desktop
+        ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
     s.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "User-Agent": ua,
         "X-CSRFToken": cookies.get("csrftoken", ""),
         "X-IG-App-ID": "936619743392459",
         "Referer": "https://www.instagram.com/",

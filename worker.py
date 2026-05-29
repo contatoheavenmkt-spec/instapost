@@ -1526,7 +1526,9 @@ def _save_session_from_chrome(username: str) -> tuple[bool, str]:
                 "cpu": "husky",
                 "version_code": "961145276",
             },
-            "user_agent": "Instagram 428.0.0.47.67 Android (34/14; 480dpi; 1344x2992; Google/google; Pixel 8 Pro; husky; husky; pt_BR; 961145276)",
+            # UA deve bater com o Chrome que fez o login (desktop, não mobile)
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "user_agent_mobile": "Instagram 428.0.0.47.67 Android (34/14; 480dpi; 1344x2992; Google/google; Pixel 8 Pro; husky; husky; pt_BR; 961145276)",
             "country": "BR",
             "country_code": 55,
             "locale": "pt_BR",
