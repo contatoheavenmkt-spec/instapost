@@ -1229,6 +1229,15 @@ def _open_chrome_for_account(
         try:
             from core.proxy_forwarder import start_forwarder
             fwd_server, fwd_port = start_forwarder(proxy)
+            # Espera forwarder estar pronto antes de abrir Chrome
+            import time as _time_fwd
+            _time_fwd.sleep(1)
+            # Verifica se forwarder responde
+            try:
+                import urllib.request as _urlr_fwd
+                _urlr_fwd.urlopen(f"http://127.0.0.1:{fwd_port}/", timeout=3)
+            except Exception:
+                pass  # OK, forwarder não responde GET mas está listening
             args.append(f"--proxy-server=http://127.0.0.1:{fwd_port}")
             print(f"[local-api] 🌐 Chrome via forwarder local 127.0.0.1:{fwd_port} → upstream {urlparse(proxy).hostname}")
             # NOTA: forwarder roda em daemon thread, morre com o worker.
