@@ -1601,7 +1601,7 @@ def _auto_login_flow(username: str, password: str, email: str = None, proxy: str
         return
 
     safe = "".join(c for c in username if c.isalnum() or c in "._-")
-    profile_dir = CHROME_PROFILES_DIR / safe
+    profile_dir = Path.home() / "InstaposterProfiles" / safe
     port_file = profile_dir / "DevToolsActivePort"
 
     deadline = time.time() + 20
