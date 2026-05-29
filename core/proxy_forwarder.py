@@ -8,7 +8,6 @@ import select
 import base64
 from urllib.parse import urlparse
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from socketserver import ThreadingMixIn
 
 
 def _get_free_port():
@@ -28,7 +27,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
     def do_CONNECT(self):
         try:
             upstream = socket.create_connection(
-                (self.upstream_host, self.upstream_port), timeout=60
+                (self.upstream_host, self.upstream_port), timeout=30
             )
             connect_line = f"CONNECT {self.path} HTTP/1.1\r\n"
             hdrs = f"Host: {self.path}\r\n"
@@ -64,7 +63,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         try:
             sockets = [client, upstream]
             while True:
-                readable, _, errors = select.select(sockets, [], sockets, 120)
+                readable, _, errors = select.select(sockets, [], sockets, 30)
                 if errors:
                     break
                 for s in readable:
@@ -100,10 +99,7 @@ def start_forwarder(proxy_url: str) -> tuple:
         "upstream_auth": upstream_auth,
     })
 
-    class ThreadedProxy(ThreadingMixIn, HTTPServer):
-        daemon_threads = True
-
-    server = ThreadedProxy(("127.0.0.1", port), handler)
+    server = HTTPServer(("127.0.0.1", port), handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 

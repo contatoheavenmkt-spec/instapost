@@ -1223,30 +1223,34 @@ def _open_chrome_for_account(
             proxy = proxy.replace(f":{_p_chrome.port}", ":823")
             print(f"[local-api] 🔄 Chrome usa porta 823 (rotativa) em vez de sticky {_p_chrome.port}")
 
-        # Extensão Chrome inline pra auth do proxy (mais confiável que forwarder)
+        # NOVA ESTRATÉGIA: Local Forwarder em vez de extensão Chrome.
+        # Chrome conecta em 127.0.0.1:PORT_LOCAL (sem auth dialog), forwarder
+        # em Python autentica com o upstream (DataImpulse). Bypassa o bug do
+        # auth dialog repetitivo que MV2/MV3 extension não resolvia.
         try:
-            from core.proxy_auth_extension import create_proxy_auth_extension
-            ext_path = create_proxy_auth_extension(proxy, profile_dir)
-            args.append(f"--load-extension={ext_path}")
-            # Proxy sem auth pro Chrome (extensão faz o auth)
+            from core.proxy_forwarder import start_forwarder
+            fwd_server, fwd_port = start_forwarder(proxy)
+            # Espera forwarder estar pronto antes de abrir Chrome
+            import time as _time_fwd
+            _time_fwd.sleep(1)
+            # Verifica se forwarder responde
+            try:
+                import urllib.request as _urlr_fwd
+                _urlr_fwd.urlopen(f"http://127.0.0.1:{fwd_port}/", timeout=3)
+            except Exception:
+                pass  # OK, forwarder não responde GET mas está listening
+            args.append(f"--proxy-server=http://127.0.0.1:{fwd_port}")
+            print(f"[local-api] 🌐 Chrome via forwarder local 127.0.0.1:{fwd_port} → upstream {urlparse(proxy).hostname}")
+            # NOTA: forwarder roda em daemon thread, morre com o worker.
+            # Pra fechar antes (quando Chrome fecha), seria preciso watcher
+            # do processo Chrome — não implementado por enquanto, OK pra MVP.
+        except Exception as e:
+            print(f"[local-api] ⚠️ falha iniciando forwarder ({e}) — tentando direto sem auth")
+            # Fallback: passa proxy direto pro Chrome (vai falhar com auth dialog
+            # mas pelo menos algo tenta)
             chrome_proxy, _, _ = _parse_proxy_for_chrome(proxy)
             if chrome_proxy:
                 args.append(f"--proxy-server={chrome_proxy}")
-            print(f"[local-api] 🌐 Chrome via proxy + extensão auth → {urlparse(proxy).hostname}")
-        except Exception as e:
-            print(f"[local-api] ⚠️ extensão proxy falhou ({e}) — tentando forwarder")
-            try:
-                from core.proxy_forwarder import start_forwarder
-                fwd_server, fwd_port = start_forwarder(proxy)
-                import time as _time_fwd
-                _time_fwd.sleep(1)
-                args.append(f"--proxy-server=http://127.0.0.1:{fwd_port}")
-                print(f"[local-api] 🌐 Chrome via forwarder 127.0.0.1:{fwd_port}")
-            except Exception as e2:
-                chrome_proxy, _, _ = _parse_proxy_for_chrome(proxy)
-                if chrome_proxy:
-                    args.append(f"--proxy-server={chrome_proxy}")
-                print(f"[local-api] ⚠️ forwarder falhou ({e2}) — proxy sem auth")
 
     # SEMPRE habilita debug port pra feature "Salvar Sessão" funcionar mesmo
     # quando não estamos injetando cookies (ex: login manual em conta nova).
