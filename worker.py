@@ -1213,15 +1213,16 @@ def _open_chrome_for_account(
         proxy = None
         print(f"[local-api] ⚠️ Chrome SEM PROXY (modo manual login) — IP residencial vai aparecer pro Insta")
     if proxy:
-        # Sticky session por conta (mesmo IP entre requests do Chrome + worker)
-        try:
-            from core.proxy_sticky import make_sticky
-            sticky = make_sticky(proxy, safe)
-            if sticky != proxy:
-                print(f"[local-api] 🔒 sticky session aplicado pro Chrome")
-                proxy = sticky
-        except Exception:
-            pass
+        # Chrome login: usa proxy ROTATIVO (porta original, ex: 823).
+        # Portas sticky (10000-20000) são lentas/instáveis pro Chrome.
+        # Sticky é aplicado só na postagem (web_poster na VPS).
+        from urllib.parse import urlparse as _up_chrome
+        _p_chrome = _up_chrome(proxy)
+        if _p_chrome.hostname and "dataimpulse" in _p_chrome.hostname.lower() and _p_chrome.port and _p_chrome.port >= 10000:
+            # Força porta 823 (rotativa) pro Chrome
+            proxy = proxy.replace(f":{_p_chrome.port}", ":823")
+            print(f"[local-api] 🔄 Chrome usa porta 823 (rotativa) em vez de sticky {_p_chrome.port}")
+
         # NOVA ESTRATÉGIA: Local Forwarder em vez de extensão Chrome.
         # Chrome conecta em 127.0.0.1:PORT_LOCAL (sem auth dialog), forwarder
         # em Python autentica com o upstream (DataImpulse). Bypassa o bug do
