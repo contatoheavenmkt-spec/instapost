@@ -289,6 +289,8 @@ def web_post_story_video(session_data: dict, video_path: str, caption: str = "",
             "upload_id": upload_id,
             "caption": caption or "",
             "configure_mode": "1",
+            "client_shared_at": str(int(time.time())),
+            "audience": "default",
         }
 
         # Link sticker (se fornecido)
@@ -365,6 +367,8 @@ def web_post_story_photo(session_data: dict, photo_path: str, caption: str = "",
             "upload_id": upload_id,
             "caption": caption or "",
             "configure_mode": "1",
+            "client_shared_at": str(int(time.time())),
+            "audience": "default",
         }
 
         if link_url:
