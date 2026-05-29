@@ -110,6 +110,23 @@ def make_sticky(
             encoded_user = quote(clean_user, safe="._-~")
             encoded_pass = quote(p.password, safe="._-~") if p.password else ""
             auth = f"{encoded_user}:{encoded_pass}" if encoded_pass else encoded_user
+
+            # Testa se a porta sticky responde, se não tenta próximas
+            import socket as _sock
+            for offset in range(10):
+                test_port = sticky_port + offset
+                if test_port > 20000:
+                    test_port = 10000 + (test_port - 20000)
+                try:
+                    s = _sock.create_connection((p.hostname, test_port), timeout=5)
+                    s.close()
+                    if offset > 0:
+                        print(f"[proxy-sticky] porta {sticky_port} morta, usando {test_port}")
+                    sticky_port = test_port
+                    break
+                except Exception:
+                    continue
+
             netloc = f"{auth}@{p.hostname}:{sticky_port}"
             return urlunparse((p.scheme, netloc, p.path, p.params, p.query, p.fragment))
 
