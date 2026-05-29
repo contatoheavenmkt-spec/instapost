@@ -288,6 +288,7 @@ def web_post_story_video(session_data: dict, video_path: str, caption: str = "",
             "source_type": "library",
             "upload_id": upload_id,
             "caption": caption or "",
+            "configure_mode": "1",
         }
 
         # Link sticker (se fornecido)
@@ -363,6 +364,7 @@ def web_post_story_photo(session_data: dict, photo_path: str, caption: str = "",
             "source_type": "library",
             "upload_id": upload_id,
             "caption": caption or "",
+            "configure_mode": "1",
         }
 
         if link_url:
