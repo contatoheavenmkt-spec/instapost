@@ -266,6 +266,9 @@ def apply_device_to_client(cl, username: str) -> Optional[Dict]:
     """
     try:
         device = device_for_account(username)
+        # Salva bloks_versioning_id antes de set_device — o instagrapi limpa
+        # esse campo ao mudar device, causando "bloks_versioning_id is empty" no login.
+        saved_bloks = getattr(cl, "bloks_versioning_id", "")
         # set_device aceita um dict com chaves esperadas pelo instagrapi
         cl.set_device({
             "app_version": device["app_version"],
@@ -295,6 +298,9 @@ def apply_device_to_client(cl, username: str) -> Optional[Dict]:
             "phone_id": device["phone_id"],
             "advertising_id": device["advertising_id"],
         })
+        # Restaura bloks_versioning_id que o set_device limpou
+        if saved_bloks and not cl.bloks_versioning_id:
+            cl.bloks_versioning_id = saved_bloks
         return device
     except Exception as e:
         print(f"[device] erro aplicando device pra @{username}: {e}")
