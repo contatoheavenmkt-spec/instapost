@@ -106,25 +106,11 @@ def _build_session(session_data: dict) -> requests.Session:
     return s
 
 
-def _upload_video(session: requests.Session, video_path: Path, upload_id: str,
-                   for_story: bool = False) -> dict:
+def _upload_video(session: requests.Session, video_path: Path, upload_id: str) -> dict:
     """Upload video via rupload_igvideo. Usa streaming pra não carregar
-    o arquivo inteiro em memória (vídeos podem ter 100MB+).
-
-    for_story: se True, marca upload como story (obrigatório pra configure_to_story
-    aceitar o upload_id — sem isso retorna 'incorrect upload id').
-    """
+    o arquivo inteiro em memória (vídeos podem ter 100MB+)."""
     video_size = video_path.stat().st_size
     entity = f"{upload_id}_0_{uuid.uuid4().hex}"
-
-    rupload_params = {
-        "media_type": 2,
-        "upload_id": upload_id,
-        "upload_media_height": 1920,
-        "upload_media_width": 1080,
-    }
-    if for_story:
-        rupload_params["for_direct_story"] = "1"
 
     with open(video_path, "rb") as f:
         r = session.post(
@@ -134,7 +120,12 @@ def _upload_video(session: requests.Session, video_path: Path, upload_id: str,
                 "X-Entity-Name": entity,
                 "X-Entity-Length": str(video_size),
                 "X-Entity-Type": "video/mp4",
-                "X-Instagram-Rupload-Params": json.dumps(rupload_params),
+                "X-Instagram-Rupload-Params": json.dumps({
+                    "media_type": 2,
+                    "upload_id": upload_id,
+                    "upload_media_height": 1920,
+                    "upload_media_width": 1080,
+                }),
                 "Offset": "0",
                 "Content-Type": "video/mp4",
             },
@@ -173,20 +164,10 @@ def _upload_thumbnail(session: requests.Session, thumb_path: Path, upload_id: st
     return {"status_code": r.status_code, "response": r.json() if r.status_code == 200 else {"error": r.text[:300]}}
 
 
-def _upload_photo(session: requests.Session, photo_path: Path, upload_id: str,
-                   for_story: bool = False) -> dict:
+def _upload_photo(session: requests.Session, photo_path: Path, upload_id: str) -> dict:
     """Upload foto via rupload_igphoto (pra story de foto)."""
     photo_size = photo_path.stat().st_size
     entity = f"{upload_id}_0_{uuid.uuid4().hex}"
-
-    rupload_params = {
-        "upload_id": upload_id,
-        "media_type": 1,
-        "waterfall_id": str(uuid.uuid4()),
-        "image_compression": json.dumps({"lib_name": "moz", "lib_version": "3.1.m", "quality": "80"}),
-    }
-    if for_story:
-        rupload_params["for_direct_story"] = "1"
 
     with open(photo_path, "rb") as f:
         r = session.post(
@@ -196,7 +177,12 @@ def _upload_photo(session: requests.Session, photo_path: Path, upload_id: str,
                 "X-Entity-Name": entity,
                 "X-Entity-Length": str(photo_size),
                 "X-Entity-Type": "image/jpeg",
-                "X-Instagram-Rupload-Params": json.dumps(rupload_params),
+                "X-Instagram-Rupload-Params": json.dumps({
+                    "upload_id": upload_id,
+                    "media_type": 1,
+                    "waterfall_id": str(uuid.uuid4()),
+                    "image_compression": json.dumps({"lib_name": "moz", "lib_version": "3.1.m", "quality": "80"}),
+                }),
                 "Offset": "0",
                 "Content-Type": "image/jpeg",
             },
@@ -204,6 +190,31 @@ def _upload_photo(session: requests.Session, photo_path: Path, upload_id: str,
         )
 
     return {"status_code": r.status_code, "response": r.json() if r.status_code == 200 else {"error": r.text[:300]}}
+
+
+def _build_story_link_fields(link_url: str, link_text: str = "Clique aqui") -> dict:
+    """Monta os campos de link sticker pra configure_to_story.
+
+    Envia em MÚLTIPLOS formatos pra maximizar compatibilidade:
+    - story_links: formato clássico (funciona na maioria das sessões web)
+    - story_cta: formato Web API (usado pelo instagram.com)
+    """
+    fields = {
+        "story_sticker_ids": "link_sticker_default",
+        # Formato clássico — aceito pela maioria das sessões
+        "story_links": json.dumps([{
+            "webUri": link_url,
+            "linkTitle": link_text,
+            "x": 0.5, "y": 0.5, "z": 0,
+            "width": 1.0, "height": 1.0,
+            "rotation": 0.0,
+        }]),
+        # Formato Web API (story_cta) — usado pelo instagram.com no browser
+        "story_cta": json.dumps([{
+            "links": [{"webUri": link_url, "linkTitle": link_text}],
+        }]),
+    }
+    return fields
 
 
 def web_post_reel(session_data: dict, video_path: str, caption: str = "") -> dict:
@@ -321,13 +332,13 @@ def web_post_story_video(session_data: dict, video_path: str, caption: str = "",
         s = _build_session(session_data)
         upload_id = str(int(time.time() * 1000))
 
-        # 1. Upload video (marcado como story — sem isso, configure_to_story rejeita)
+        # 1. Upload video (mesmo endpoint de Reel — o que diferencia é o configure)
         print(f"[web-poster] uploading story video ({video.stat().st_size // 1024} KB)...")
-        v_result = _upload_video(s, video, upload_id, for_story=True)
+        v_result = _upload_video(s, video, upload_id)
         if v_result["status_code"] != 200:
             return {"success": False, "media_id": None, "error": f"Upload video falhou: {v_result}"}
 
-        # 2. Thumbnail (não precisa de for_story — é só cover image)
+        # 2. Thumbnail
         thumb = _generate_thumbnail(video)
         if thumb:
             _upload_thumbnail(s, thumb, upload_id)
@@ -344,32 +355,9 @@ def web_post_story_video(session_data: dict, video_path: str, caption: str = "",
         }
 
         # Link sticker (se fornecido)
-        # Web API usa tap_models (não story_links que é do mobile API).
-        # story_links é silenciosamente ignorado em sessões web/cookies.
         if link_url:
-            configure_data["story_sticker_ids"] = "link_sticker_default"
-            configure_data["tap_models"] = json.dumps([{
-                "x": 0.4976,
-                "y": 0.8,
-                "z": 0,
-                "width": 0.5,
-                "height": 0.0856,
-                "rotation": 0.0,
-                "type": "story_link",
-                "link_type": "web_link",
-                "url": link_url,
-                "display_text": link_text or "Clique aqui",
-                "custom_cta": link_text or "Clique aqui",
-            }])
-            # Mantém story_links como fallback (algumas sessões hybrid aceitam)
-            configure_data["story_links"] = json.dumps([{
-                "webUri": link_url,
-                "linkTitle": link_text or "Clique aqui",
-                "linkType": 1,
-                "x": 0.4976, "y": 0.8, "z": 0,
-                "width": 0.5, "height": 0.0856,
-                "rotation": 0.0,
-            }])
+            link_fields = _build_story_link_fields(link_url, link_text or "Clique aqui")
+            configure_data.update(link_fields)
             print(f"[web-poster] link sticker: {link_url} [{link_text}]")
 
         # Retry pra transcode
@@ -385,6 +373,8 @@ def web_post_story_video(session_data: dict, video_path: str, caption: str = "",
                 data=configure_data,
                 timeout=60,
             )
+
+            print(f"[web-poster] configure_to_story HTTP {r.status_code}: {r.text[:200]}")
 
             if r.status_code == 202:
                 print(f"[web-poster] transcode story em andamento (202)...")
@@ -437,9 +427,9 @@ def web_post_story_photo(session_data: dict, photo_path: str, caption: str = "",
         s = _build_session(session_data)
         upload_id = str(int(time.time() * 1000))
 
-        # 1. Upload foto (marcado como story — sem isso, configure_to_story rejeita)
+        # 1. Upload foto
         print(f"[web-poster] uploading story photo ({photo.stat().st_size // 1024} KB)...")
-        p_result = _upload_photo(s, photo, upload_id, for_story=True)
+        p_result = _upload_photo(s, photo, upload_id)
         if p_result["status_code"] != 200:
             return {"success": False, "media_id": None, "error": f"Upload foto falhou: {p_result}"}
 
@@ -455,28 +445,8 @@ def web_post_story_photo(session_data: dict, photo_path: str, caption: str = "",
         }
 
         if link_url:
-            configure_data["story_sticker_ids"] = "link_sticker_default"
-            configure_data["tap_models"] = json.dumps([{
-                "x": 0.4976,
-                "y": 0.8,
-                "z": 0,
-                "width": 0.5,
-                "height": 0.0856,
-                "rotation": 0.0,
-                "type": "story_link",
-                "link_type": "web_link",
-                "url": link_url,
-                "display_text": link_text or "Clique aqui",
-                "custom_cta": link_text or "Clique aqui",
-            }])
-            configure_data["story_links"] = json.dumps([{
-                "webUri": link_url,
-                "linkTitle": link_text or "Clique aqui",
-                "linkType": 1,
-                "x": 0.4976, "y": 0.8, "z": 0,
-                "width": 0.5, "height": 0.0856,
-                "rotation": 0.0,
-            }])
+            link_fields = _build_story_link_fields(link_url, link_text or "Clique aqui")
+            configure_data.update(link_fields)
             print(f"[web-poster] link sticker: {link_url} [{link_text}]")
 
         r = s.post(
@@ -484,6 +454,8 @@ def web_post_story_photo(session_data: dict, photo_path: str, caption: str = "",
             data=configure_data,
             timeout=60,
         )
+
+        print(f"[web-poster] configure_to_story HTTP {r.status_code}: {r.text[:200]}")
 
         if r.status_code != 200:
             return _classify_error(None, r.status_code, r.text[:300])
