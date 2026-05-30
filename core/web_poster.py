@@ -20,7 +20,14 @@ import requests
 
 
 def _classify_error(response_json: dict = None, status_code: int = 0, raw_text: str = "") -> dict:
-    """Classifica erros do Instagram pra que o worker tome ação adequada."""
+    """Classifica erros do Instagram pra que o worker tome ação adequada.
+
+    Retorna dict com {success, media_id, error, error_type} onde error_type é:
+      - "auth_expired": sessão expirou, precisa re-login
+      - "rate_limited": muitas requisições, esperar
+      - "blocked": conta bloqueada/checkpoint
+      - "generic": outro erro
+    """
     msg = ""
     if response_json:
         msg = response_json.get("message", "")
@@ -76,11 +83,12 @@ def _build_session(session_data: dict) -> requests.Session:
     cookies = session_data.get("cookies", {})
     auth = session_data.get("authorization_data", {})
 
-    # Usa UA da sessão (deve ser o mesmo UA do Chrome que fez login)
-    # Se for UA mobile do instagrapi, substitui por desktop — IG web não aceita
+    # Usa UA da sessão (deve ser o mesmo UA do Chrome que fez login).
+    # Só substitui se estiver vazio — manter o UA original evita mismatch
+    # de fingerprint que o IG detecta como bot.
     ua = session_data.get("user_agent", "")
-    if not ua or "Instagram" in ua:
-        ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    if not ua:
+        ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
 
     s.headers.update({
         "User-Agent": ua,
@@ -99,14 +107,15 @@ def _build_session(session_data: dict) -> requests.Session:
 
 
 def _upload_video(session: requests.Session, video_path: Path, upload_id: str) -> dict:
-    """Upload video via rupload_igvideo."""
+    """Upload video via rupload_igvideo. Usa streaming pra não carregar
+    o arquivo inteiro em memória (vídeos podem ter 100MB+)."""
     video_size = video_path.stat().st_size
     entity = f"{upload_id}_0_{uuid.uuid4().hex}"
 
     with open(video_path, "rb") as f:
         r = session.post(
             f"https://www.instagram.com/rupload_igvideo/{entity}",
-            data=f.read(),
+            data=f,
             headers={
                 "X-Entity-Name": entity,
                 "X-Entity-Length": str(video_size),
@@ -230,10 +239,12 @@ def web_post_reel(session_data: dict, video_path: str, caption: str = "") -> dic
             "video_subtitles_enabled": "0",
         }
 
+        # Instagram precisa de tempo pra transcodificar o video.
+        # Retry até 5x com intervalo crescente.
         rj = None
         for attempt in range(6):
             if attempt > 0:
-                wait = 5 + attempt * 5
+                wait = 5 + attempt * 5  # 10s, 15s, 20s, 25s, 30s
                 print(f"[web-poster] aguardando transcode ({wait}s)...")
                 time.sleep(wait)
 
@@ -255,18 +266,25 @@ def web_post_reel(session_data: dict, video_path: str, caption: str = "") -> dic
                 msg = rj.get("message", "")
                 if "transcode" in msg.lower() or "not finished" in msg.lower():
                     print(f"[web-poster] transcode em andamento...")
-                    continue
+                    continue  # retry
                 if "media_needs_reupload" in msg:
                     return {"success": False, "media_id": None, "error": "Instagram pediu reupload (thumbnail inválido)"}
+                # Classifica erros de auth/rate-limit
                 return _classify_error(rj, r.status_code)
             elif r.status_code == 202:
+                # 202 = accepted but not done yet (transcode)
                 print(f"[web-poster] transcode em andamento (202)...")
                 continue
             else:
                 return _classify_error(None, r.status_code, r.text[:300])
 
+        # Loop esgotado sem sucesso
         if rj is not None:
+            msg = rj.get("message", "")
+            if msg == "media_needs_reupload":
+                return {"success": False, "media_id": None, "error": "Instagram pediu reupload (thumbnail inválido)"}
             return {"success": False, "media_id": None, "error": f"Resposta inesperada: {json.dumps(rj)[:300]}"}
+
         return {"success": False, "media_id": None, "error": "Transcode não completou após 6 tentativas"}
 
     except Exception as e:
@@ -277,7 +295,9 @@ def web_post_story_video(session_data: dict, video_path: str, caption: str = "",
                          link_url: str = None, link_text: str = None) -> dict:
     """
     Posta Story (video) via Web API usando cookies do Chrome.
-    IDÊNTICO ao commit d81c8cb (26/maio) que funcionava.
+
+    Returns:
+        dict com {success, media_id, error}
     """
     video = Path(video_path)
     if not video.exists():
@@ -291,23 +311,25 @@ def web_post_story_video(session_data: dict, video_path: str, caption: str = "",
         print(f"[web-poster] uploading story video ({video.stat().st_size // 1024} KB)...")
         v_result = _upload_video(s, video, upload_id)
         if v_result["status_code"] != 200:
-            return {"success": False, "media_id": None, "error": f"Upload video falhou: HTTP {v_result['status_code']} {v_result.get('response',{})}"}
-        print(f"[web-poster] upload OK")
+            return {"success": False, "media_id": None, "error": f"Upload video falhou: {v_result}"}
 
         # 2. Thumbnail
         thumb = _generate_thumbnail(video)
         if thumb:
             _upload_thumbnail(s, thumb, upload_id)
 
-        # 3. Configure as Story (formato EXATO do dia 26 que funcionava)
+        # 3. Configure as Story
         print(f"[web-poster] publishing story...")
         configure_data = {
             "source_type": "library",
             "upload_id": upload_id,
             "caption": caption or "",
+            "configure_mode": "1",
+            "client_shared_at": str(int(time.time())),
+            "audience": "default",
         }
 
-        # Link sticker
+        # Link sticker (se fornecido)
         if link_url:
             configure_data["story_sticker_ids"] = "link_sticker_default"
             configure_data["story_links"] = json.dumps([{
@@ -317,9 +339,9 @@ def web_post_story_video(session_data: dict, video_path: str, caption: str = "",
                 "width": 1.0, "height": 1.0,
                 "rotation": 0.0,
             }])
-            print(f"[web-poster] link sticker: {link_url}")
 
         # Retry pra transcode
+        rj = None
         for attempt in range(6):
             if attempt > 0:
                 wait = 5 + attempt * 5
@@ -332,25 +354,36 @@ def web_post_story_video(session_data: dict, video_path: str, caption: str = "",
                 timeout=60,
             )
 
-            # DEBUG: log completo da resposta pra diagnosticar
-            print(f"[web-poster] configure_to_story -> HTTP {r.status_code} | body: {r.text[:300]}")
-
-            if r.status_code == 202 or (r.status_code == 200 and "transcode" in r.text.lower()):
+            if r.status_code == 202:
+                print(f"[web-poster] transcode story em andamento (202)...")
                 continue
 
+            if r.status_code == 200:
+                try:
+                    rj = r.json()
+                except Exception:
+                    rj = {}
+                msg = rj.get("message", "")
+                if "transcode" in msg.lower() or "not finished" in msg.lower():
+                    print(f"[web-poster] transcode story em andamento...")
+                    continue
             break
 
         if r.status_code != 200:
             return _classify_error(None, r.status_code, r.text[:300])
 
-        rj = r.json()
+        if rj is None:
+            try:
+                rj = r.json()
+            except Exception:
+                rj = {}
         media = rj.get("media")
         if media:
             pk = media.get("pk") or media.get("id")
             print(f"[web-poster] STORY POSTADO! pk={pk}")
             return {"success": True, "media_id": str(pk), "error": None}
 
-        return _classify_error(rj, r.status_code, r.text[:300])
+        return _classify_error(rj, r.status_code)
 
     except Exception as e:
         return {"success": False, "media_id": None, "error": str(e)}
@@ -360,7 +393,9 @@ def web_post_story_photo(session_data: dict, photo_path: str, caption: str = "",
                          link_url: str = None, link_text: str = None) -> dict:
     """
     Posta Story (foto) via Web API usando cookies do Chrome.
-    IDÊNTICO ao commit d81c8cb (26/maio) que funcionava.
+
+    Returns:
+        dict com {success, media_id, error}
     """
     photo = Path(photo_path)
     if not photo.exists():
@@ -374,7 +409,7 @@ def web_post_story_photo(session_data: dict, photo_path: str, caption: str = "",
         print(f"[web-poster] uploading story photo ({photo.stat().st_size // 1024} KB)...")
         p_result = _upload_photo(s, photo, upload_id)
         if p_result["status_code"] != 200:
-            return {"success": False, "media_id": None, "error": f"Upload foto falhou: HTTP {p_result['status_code']} {p_result.get('response',{})}"}
+            return {"success": False, "media_id": None, "error": f"Upload foto falhou: {p_result}"}
 
         # 2. Configure as Story
         print(f"[web-poster] publishing photo story...")
@@ -382,6 +417,9 @@ def web_post_story_photo(session_data: dict, photo_path: str, caption: str = "",
             "source_type": "library",
             "upload_id": upload_id,
             "caption": caption or "",
+            "configure_mode": "1",
+            "client_shared_at": str(int(time.time())),
+            "audience": "default",
         }
 
         if link_url:
@@ -393,7 +431,6 @@ def web_post_story_photo(session_data: dict, photo_path: str, caption: str = "",
                 "width": 1.0, "height": 1.0,
                 "rotation": 0.0,
             }])
-            print(f"[web-poster] link sticker: {link_url}")
 
         r = s.post(
             "https://www.instagram.com/api/v1/media/configure_to_story/",
@@ -401,20 +438,20 @@ def web_post_story_photo(session_data: dict, photo_path: str, caption: str = "",
             timeout=60,
         )
 
-        # DEBUG: log completo da resposta
-        print(f"[web-poster] configure_to_story -> HTTP {r.status_code} | body: {r.text[:300]}")
-
         if r.status_code != 200:
             return _classify_error(None, r.status_code, r.text[:300])
 
-        rj = r.json()
+        try:
+            rj = r.json()
+        except Exception:
+            rj = {}
         media = rj.get("media")
         if media:
             pk = media.get("pk") or media.get("id")
             print(f"[web-poster] STORY PHOTO POSTADO! pk={pk}")
             return {"success": True, "media_id": str(pk), "error": None}
 
-        return _classify_error(rj, r.status_code, r.text[:300])
+        return _classify_error(rj, r.status_code)
 
     except Exception as e:
         return {"success": False, "media_id": None, "error": str(e)}
