@@ -106,11 +106,25 @@ def _build_session(session_data: dict) -> requests.Session:
     return s
 
 
-def _upload_video(session: requests.Session, video_path: Path, upload_id: str) -> dict:
+def _upload_video(session: requests.Session, video_path: Path, upload_id: str,
+                   for_story: bool = False) -> dict:
     """Upload video via rupload_igvideo. Usa streaming pra não carregar
-    o arquivo inteiro em memória (vídeos podem ter 100MB+)."""
+    o arquivo inteiro em memória (vídeos podem ter 100MB+).
+
+    for_story: se True, marca upload como story (obrigatório pra configure_to_story
+    aceitar o upload_id — sem isso retorna 'incorrect upload id').
+    """
     video_size = video_path.stat().st_size
     entity = f"{upload_id}_0_{uuid.uuid4().hex}"
+
+    rupload_params = {
+        "media_type": 2,
+        "upload_id": upload_id,
+        "upload_media_height": 1920,
+        "upload_media_width": 1080,
+    }
+    if for_story:
+        rupload_params["for_direct_story"] = "1"
 
     with open(video_path, "rb") as f:
         r = session.post(
@@ -120,12 +134,7 @@ def _upload_video(session: requests.Session, video_path: Path, upload_id: str) -
                 "X-Entity-Name": entity,
                 "X-Entity-Length": str(video_size),
                 "X-Entity-Type": "video/mp4",
-                "X-Instagram-Rupload-Params": json.dumps({
-                    "media_type": 2,
-                    "upload_id": upload_id,
-                    "upload_media_height": 1920,
-                    "upload_media_width": 1080,
-                }),
+                "X-Instagram-Rupload-Params": json.dumps(rupload_params),
                 "Offset": "0",
                 "Content-Type": "video/mp4",
             },
@@ -164,10 +173,20 @@ def _upload_thumbnail(session: requests.Session, thumb_path: Path, upload_id: st
     return {"status_code": r.status_code, "response": r.json() if r.status_code == 200 else {"error": r.text[:300]}}
 
 
-def _upload_photo(session: requests.Session, photo_path: Path, upload_id: str) -> dict:
+def _upload_photo(session: requests.Session, photo_path: Path, upload_id: str,
+                   for_story: bool = False) -> dict:
     """Upload foto via rupload_igphoto (pra story de foto)."""
     photo_size = photo_path.stat().st_size
     entity = f"{upload_id}_0_{uuid.uuid4().hex}"
+
+    rupload_params = {
+        "upload_id": upload_id,
+        "media_type": 1,
+        "waterfall_id": str(uuid.uuid4()),
+        "image_compression": json.dumps({"lib_name": "moz", "lib_version": "3.1.m", "quality": "80"}),
+    }
+    if for_story:
+        rupload_params["for_direct_story"] = "1"
 
     with open(photo_path, "rb") as f:
         r = session.post(
@@ -177,12 +196,7 @@ def _upload_photo(session: requests.Session, photo_path: Path, upload_id: str) -
                 "X-Entity-Name": entity,
                 "X-Entity-Length": str(photo_size),
                 "X-Entity-Type": "image/jpeg",
-                "X-Instagram-Rupload-Params": json.dumps({
-                    "upload_id": upload_id,
-                    "media_type": 1,
-                    "waterfall_id": str(uuid.uuid4()),
-                    "image_compression": json.dumps({"lib_name": "moz", "lib_version": "3.1.m", "quality": "80"}),
-                }),
+                "X-Instagram-Rupload-Params": json.dumps(rupload_params),
                 "Offset": "0",
                 "Content-Type": "image/jpeg",
             },
@@ -307,13 +321,13 @@ def web_post_story_video(session_data: dict, video_path: str, caption: str = "",
         s = _build_session(session_data)
         upload_id = str(int(time.time() * 1000))
 
-        # 1. Upload video
+        # 1. Upload video (marcado como story — sem isso, configure_to_story rejeita)
         print(f"[web-poster] uploading story video ({video.stat().st_size // 1024} KB)...")
-        v_result = _upload_video(s, video, upload_id)
+        v_result = _upload_video(s, video, upload_id, for_story=True)
         if v_result["status_code"] != 200:
             return {"success": False, "media_id": None, "error": f"Upload video falhou: {v_result}"}
 
-        # 2. Thumbnail
+        # 2. Thumbnail (não precisa de for_story — é só cover image)
         thumb = _generate_thumbnail(video)
         if thumb:
             _upload_thumbnail(s, thumb, upload_id)
@@ -423,9 +437,9 @@ def web_post_story_photo(session_data: dict, photo_path: str, caption: str = "",
         s = _build_session(session_data)
         upload_id = str(int(time.time() * 1000))
 
-        # 1. Upload foto
+        # 1. Upload foto (marcado como story — sem isso, configure_to_story rejeita)
         print(f"[web-poster] uploading story photo ({photo.stat().st_size // 1024} KB)...")
-        p_result = _upload_photo(s, photo, upload_id)
+        p_result = _upload_photo(s, photo, upload_id, for_story=True)
         if p_result["status_code"] != 200:
             return {"success": False, "media_id": None, "error": f"Upload foto falhou: {p_result}"}
 
