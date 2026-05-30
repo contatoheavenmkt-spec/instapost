@@ -2944,23 +2944,27 @@ def api_create_remote_job(payload: RemoteJobIn, request: Request, user=Depends(a
         if effective_kind == "story" and acc.get("auto_highlight_enabled") and acc.get("auto_highlight_title"):
             highlight_title = acc["auto_highlight_title"]
 
-        job = rjob_manager.create({
-            "operation": "post",
-            "params": {"auto_highlight_title": highlight_title} if highlight_title else {},
-            "account_username": acc["username"],
-            "account_password": acc["password"],
-            "account_totp_secret": acc.get("totp_secret"),
-            "account_proxy": acc.get("proxy"),
-            "video_name": video_name,
-            "media_type": media_type,
-            "kind": effective_kind,  # já resolvido com override > meta > default
-            "caption": caption,
-            "link_url": link_url,
-            "link_text": link_text,
-            "media_url": media_url,
-            "created_by": user["email"],
-        })
-        created.append(job.id)
+        try:
+            job = rjob_manager.create({
+                "operation": "post",
+                "params": {"auto_highlight_title": highlight_title} if highlight_title else {},
+                "account_username": acc["username"],
+                "account_password": acc["password"],
+                "account_totp_secret": acc.get("totp_secret"),
+                "account_proxy": acc.get("proxy"),
+                "video_name": video_name,
+                "media_type": media_type,
+                "kind": effective_kind,  # já resolvido com override > meta > default
+                "caption": caption,
+                "link_url": link_url,
+                "link_text": link_text,
+                "media_url": media_url,
+                "created_by": user["email"],
+            })
+            created.append(job.id)
+        except ValueError as e:
+            # Proteção anti-spam (mesma mídia < 24h) — retorna erro amigável
+            raise HTTPException(409, str(e))
 
     return {
         "ok": True,
