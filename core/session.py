@@ -216,10 +216,21 @@ def get_client(
                 cl.username = username
                 cl.password = password
             if session_is_manual:
-                # Sessão veio de login manual no Chrome — CONFIA, pula teste.
-                # Evita: rate limit no get_timeline_feed → assume "expired" →
-                # força login API → IG dá challenge → conta morre.
-                print(f"[{username}] Sessão MANUAL (Chrome) — usando direto sem teste")
+                # Sessão veio de login manual no Chrome. Faz teste LEVE de
+                # escrita (direct inbox) — o GET user info retorna 200 mesmo
+                # em sessões que não conseguem fazer upload (falso positivo).
+                try:
+                    cl.direct_threads(amount=1)
+                    print(f"[{username}] Sessão MANUAL (Chrome) — validada via direct_inbox ✓")
+                except LoginRequired:
+                    print(f"[{username}] ⚠️ Sessão manual EXPIROU (direct_inbox 401) — refaça login no Chrome + Salvar Sessão")
+                    raise ManualReconnectNeeded(
+                        f"Sessão manual de @{username} expirou (validação de escrita falhou). "
+                        f"Abra Chrome via Smartphone, loga manual, clica Salvar Sessão de novo."
+                    )
+                except Exception as e:
+                    # Erro não-401 (rate limit, network) = não descarta, usa assim
+                    print(f"[{username}] Sessão manual com erro temporário no teste ({e}) — usando mesmo assim")
                 return cl
             # Teste leve da sessão. Se válida, segue sem TOTP.
             cl.get_timeline_feed()

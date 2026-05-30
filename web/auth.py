@@ -18,8 +18,8 @@ from fastapi import HTTPException, Request
 
 from core.paths import USERS_FILE, INVITES_FILE, SECRET_FILE
 
-OWNER_DEFAULT_EMAIL = "edson.juan.oliversilva@gmail.com"
-OWNER_DEFAULT_PASSWORD = "@Tos1725"
+OWNER_DEFAULT_EMAIL = os.environ.get("INSTAPOST_OWNER_EMAIL", "admin@localhost")
+OWNER_DEFAULT_PASSWORD = os.environ.get("INSTAPOST_OWNER_PASSWORD", "")
 
 PBKDF2_ITERATIONS = 200_000
 
@@ -137,12 +137,27 @@ def change_password(email: str, new_password: str) -> bool:
 
 
 def ensure_owner_seed() -> None:
-    """Cria o owner default se não houver nenhum owner cadastrado."""
+    """Cria o owner default se não houver nenhum owner cadastrado.
+    Senha vem de INSTAPOST_OWNER_PASSWORD env var. Se não definida,
+    gera uma aleatória e imprime no console (única vez)."""
     users = load_users()
     if any(u.get("role") == "owner" for u in users):
         return
+    password = OWNER_DEFAULT_PASSWORD
+    generated = False
+    if not password:
+        password = secrets.token_urlsafe(16)
+        generated = True
     try:
-        create_user(OWNER_DEFAULT_EMAIL, OWNER_DEFAULT_PASSWORD, role="owner")
+        create_user(OWNER_DEFAULT_EMAIL, password, role="owner")
+        if generated:
+            print(f"\n{'='*60}")
+            print(f"  OWNER CRIADO — guarde estas credenciais!")
+            print(f"  Email:  {OWNER_DEFAULT_EMAIL}")
+            print(f"  Senha:  {password}")
+            print(f"  (defina INSTAPOST_OWNER_EMAIL e INSTAPOST_OWNER_PASSWORD")
+            print(f"   como variáveis de ambiente para evitar senhas aleatórias)")
+            print(f"{'='*60}\n")
     except ValueError:
         for u in users:
             if u["email"].lower() == OWNER_DEFAULT_EMAIL.lower():

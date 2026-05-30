@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Optional
 
 from core.paths import SCHEDULES_FILE
+from core.file_lock import file_lock as _file_lock
 
 # Quanto tempo depois da hora marcada o schedule é considerado "perdido"
 MISS_GRACE_SECONDS = 5 * 60
@@ -365,50 +366,51 @@ class ScheduleManager:
     def _tick(self):
         now = now_local()
         changed = False
+        # Coleta IDs dos schedules que precisam de dispatch (fora do lock)
+        to_dispatch: list[Schedule] = []
+
         with self._lock:
-            snapshot = list(self._items)
+            for s in self._items:
+                # ----- Updates de schedules em running -----
+                if s.status == "running":
+                    if s.via == "worker" and s.remote_job_ids:
+                        final, err = self._aggregate_remote_status(s)
+                        if final:
+                            s.status = final
+                            if err:
+                                s.note = err
+                            changed = True
+                    elif s.job_id:
+                        job = self._jobs.get(s.job_id)
+                        if job and job.status in ("finished", "error", "cancelled"):
+                            s.status = "done" if job.status == "finished" else job.status
+                            changed = True
+                    continue
 
-        for s in snapshot:
-            # ----- Updates de schedules em running -----
-            if s.status == "running":
-                # Modo worker: checa status de TODOS os remote_jobs
-                if s.via == "worker" and s.remote_job_ids:
-                    final, err = self._aggregate_remote_status(s)
-                    if final:
-                        s.status = final
-                        if err:
-                            s.note = err
-                        changed = True
-                # Modo server legacy
-                elif s.job_id:
-                    job = self._jobs.get(s.job_id)
-                    if job and job.status in ("finished", "error", "cancelled"):
-                        s.status = "done" if job.status == "finished" else job.status
-                        changed = True
-                continue
+                if s.status != "pending":
+                    continue
 
-            if s.status != "pending":
-                continue
+                try:
+                    when = s.scheduled_dt
+                except Exception:
+                    continue
 
-            try:
-                when = s.scheduled_dt
-            except Exception:
-                continue
+                if (now - when).total_seconds() > MISS_GRACE_SECONDS:
+                    s.status = "missed"
+                    s.note = f"servidor offline ou tick perdido (atrasado {int((now - when).total_seconds() // 60)}min)"
+                    changed = True
+                    continue
 
-            # Atrasado demais → missed
-            if (now - when).total_seconds() > MISS_GRACE_SECONDS:
-                s.status = "missed"
-                s.note = f"servidor offline ou tick perdido (atrasado {int((now - when).total_seconds() // 60)}min)"
-                changed = True
-                continue
+                if when <= now:
+                    to_dispatch.append(s)
 
-            # Chegou a hora → dispara
-            if when <= now:
+            # Dispatch dentro do lock pra evitar race condition com
+            # modificações concorrentes ao Schedule object
+            for s in to_dispatch:
                 self._dispatch(s)
                 changed = True
 
-        if changed:
-            with self._lock:
+            if changed:
                 self._save()
 
     def _aggregate_remote_status(self, s: Schedule):
@@ -690,11 +692,12 @@ class ScheduleManager:
                         changed = True
                         print(f"[automation] auto_follow_back @{acc['username']} +{per_run} (ws={slug}, total dia: {acc['auto_follow_back_today_count']}/{limit_f})")
 
-        # Salva accounts.json se mudou
+        # Salva accounts.json se mudou (com file lock pra evitar corrupção)
         if changed:
             try:
-                with open(ACCOUNTS_FILE, "w", encoding="utf-8") as f:
-                    _json.dump(accounts, f, ensure_ascii=False, indent=2)
+                with _file_lock(ACCOUNTS_FILE, timeout=10):
+                    with open(ACCOUNTS_FILE, "w", encoding="utf-8") as f:
+                        _json.dump(accounts, f, ensure_ascii=False, indent=2)
             except Exception as e:
                 print(f"[automation] erro salvando accounts (ws={slug}): {e}")
 
@@ -907,10 +910,11 @@ class ScheduleManager:
 
         if changed:
             try:
-                accounts_file.write_text(
-                    _json.dumps(accounts, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
+                with _file_lock(accounts_file, timeout=10):
+                    accounts_file.write_text(
+                        _json.dumps(accounts, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
             except Exception as e:
                 print(f"[sync] erro salvando accounts: {e}")
 
@@ -1468,7 +1472,8 @@ class ScheduleManager:
                         a["posted_media"] = kept
                         changed = True
                 if changed:
-                    accs_file.write_text(_json.dumps(accs, ensure_ascii=False, indent=2), encoding="utf-8")
+                    with _file_lock(accs_file, timeout=10):
+                        accs_file.write_text(_json.dumps(accs, ensure_ascii=False, indent=2), encoding="utf-8")
             except Exception as e:
                 print(f"[orphan-cleanup] trim posted_media ws={ws_slug}: {e}")
 
@@ -1552,19 +1557,8 @@ class ScheduleManager:
                 except Exception as e:
                     print(f"[health] erro criando job pra {acc['username']}: {e}")
 
-    def _dispatch_via_server(self, s: Schedule):
-        """Caminho LEGACY — dispara post.py local na VPS. Usa IP da VPS (vai falhar)."""
-        args = ["post.py", "--video", s.video]
-        if s.account:
-            args += ["--conta", s.account]
-        job = self._jobs.start(
-            kind="scheduled",
-            args=args,
-            label=f"agendado · server · {s.video}",
-        )
-        s.status = "running"
-        s.job_id = job.id
-        print(f"[scheduler] dispatched {s.id} via server -> job {job.id}")
+    # _dispatch_via_server removido — era caminho legacy que disparava post.py local.
+    # Todo dispatch agora usa _dispatch_via_worker.
 
 
 # Instância singleton (similar ao job_manager)

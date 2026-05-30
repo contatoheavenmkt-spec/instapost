@@ -954,19 +954,17 @@ def api_normalize_all_proxies():
 
 
 @app.get("/api/accounts/{username}/totp-code")
-def api_show_totp(username: str):
-    """Retorna credenciais COMPLETAS da conta pra login manual:
-    senha + código TOTP atual + segundos restantes. Pra usar quando
-    abre Chrome via botão Smartphone e precisa preencher manualmente."""
+def api_show_totp(username: str, _user=Depends(auth.require_user)):
+    """Retorna código TOTP atual + segundos restantes. Pra usar quando
+    abre Chrome via botão Smartphone e precisa preencher manualmente.
+    Senha NÃO é retornada por segurança — use o campo de senha na UI."""
     accounts = load_accounts()
     for a in accounts:
         if a["username"] == username:
-            password = a.get("password") or ""
             secret = a.get("totp_secret")
             result = {
                 "username": username,
-                "password": password,
-                "has_password": bool(password),
+                "has_password": bool(a.get("password")),
                 "has_totp": bool(secret),
                 "code": None,
                 "seconds_left": None,
@@ -976,7 +974,6 @@ def api_show_totp(username: str):
                     from instagrapi import Client
                     import time as _time
                     result["code"] = Client().totp_generate_code(secret.replace(" ", "").replace("-", "").upper())
-                    # TOTP padrão tem janela de 30s; calcula quanto falta
                     result["seconds_left"] = 30 - int(_time.time()) % 30
                 except Exception as e:
                     result["totp_error"] = f"Chave inválida: {e}"

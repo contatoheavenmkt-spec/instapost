@@ -326,7 +326,8 @@ def execute_job(job: dict):
     # Importa core
     try:
         from core.session import get_client
-        from core.poster import post_reel, post_story_photo, post_story_video
+        # core.poster não é mais usado pra posting (web_poster substitui),
+        # mas mantemos import de utilitários de detecção de mídia
         from core.profile import (
             get_profile_info, edit_profile_info, change_profile_picture,
             auto_like_own_recent_comments, auto_follow_back_new_followers,
@@ -644,6 +645,39 @@ def execute_job(job: dict):
         report_result(job_id, False, error_msg=f"login: erro lendo sessão: {e}")
         return
 
+    # Validação proativa: testa se sessão consegue ESCREVER antes de postar.
+    # GET user info retorna 200 mesmo com sessão expirada (falso positivo).
+    # Upload test é o único teste confiável.
+    report_step(job_id, "validating")
+    try:
+        from core.web_poster import _build_session, _upload_photo
+        import uuid as _uuid
+        _test_s = _build_session(session_data)
+        _test_upload_id = str(int(time.time() * 1000))
+        _test_entity = f"{_test_upload_id}_test_{_uuid.uuid4().hex[:8]}"
+        # Envia 1 byte pra testar auth — Instagram aceita mas não processa
+        _test_r = _test_s.post(
+            f"https://www.instagram.com/rupload_igphoto/{_test_entity}",
+            data=b"\xff",
+            headers={
+                "X-Entity-Name": _test_entity,
+                "X-Entity-Length": "1",
+                "X-Entity-Type": "image/jpeg",
+                "X-Instagram-Rupload-Params": json.dumps({"upload_id": _test_upload_id, "media_type": 1}),
+                "Offset": "0",
+                "Content-Type": "image/jpeg",
+            },
+            timeout=15,
+        )
+        if _test_r.status_code == 403 and "login_required" in _test_r.text.lower():
+            log(f"❌ sessão de @{username} expirou (upload retornou login_required)")
+            report_result(job_id, False,
+                          error_msg=f"[auth_expired] Sessão de @{username} expirou. Refaça Save Sessão via Chrome.")
+            return
+        log("✓ sessão validada (upload auth OK)")
+    except Exception as e:
+        log(f"⚠️ validação de sessão falhou ({e}) — tentando postar mesmo assim")
+
     # Posta via Web API (usa cookies do Chrome, sem instagrapi)
     report_step(job_id, "posting")
     try:
@@ -651,9 +685,16 @@ def execute_job(job: dict):
 
         kind = job.get("kind", "reel")
         media_type = job.get("media_type", "video")
-        caption = job.get("caption", "")
+        caption_raw = job.get("caption", "")
         link_url = job.get("link_url")
         link_text = job.get("link_text") or "Clique aqui"
+
+        # Caption única por conta (spinner + hashtag shuffle anti-cluster)
+        try:
+            from core.spinner import humanize_caption
+            caption = humanize_caption(caption_raw, username)
+        except Exception:
+            caption = caption_raw
 
         log(f"postando ({kind}, {media_type}){' + link [' + link_text + ']' if link_url else ''}")
 
@@ -998,47 +1039,9 @@ def _check_throttle(username: str) -> Optional[str]:
     return None
 
 
-def _build_proxy_auth_extension(extension_dir: Path, proxy_user: str, proxy_pass: str) -> None:
-    """Gera extensão Chrome temporária pra auth automática de proxy.
 
-    Usa Manifest V3 (MV2 tá deprecated em Chrome 127+ e estava deixando o
-    browser em branco). MV3 pra onAuthRequired precisa:
-    - permission 'webRequest' + 'webRequestAuthProvider'
-    - listener com modo 'asyncBlocking'
-
-    Sem essa extensão, Chrome popa modal pedindo user/senha do proxy
-    em CADA request (chato e quebra carregamento de página)."""
-    extension_dir.mkdir(parents=True, exist_ok=True)
-    manifest = {
-        "manifest_version": 3,
-        "name": "Insta Poster Proxy Auth",
-        "version": "1.0",
-        "permissions": ["webRequest", "webRequestAuthProvider"],
-        "host_permissions": ["<all_urls>"],
-        "background": {"service_worker": "bg.js"},
-    }
-    bg_js = (
-        "// Auto-responde ao proxy auth challenge.\n"
-        "// asyncBlocking permite resolver o callback async com credenciais.\n"
-        "chrome.webRequest.onAuthRequired.addListener(\n"
-        "  function(details, callback) {\n"
-        "    // Só responde se for auth do PROXY (não auth de sites)\n"
-        "    if (details.isProxy) {\n"
-        "      callback({authCredentials: {\n"
-        f"        username: {json.dumps(proxy_user)},\n"
-        f"        password: {json.dumps(proxy_pass)}\n"
-        "      }});\n"
-        "    } else {\n"
-        "      callback();\n"
-        "    }\n"
-        "  },\n"
-        "  {urls: ['<all_urls>']},\n"
-        "  ['asyncBlocking']\n"
-        ");\n"
-        "console.log('[InstaPosterProxyAuth] MV3 listener registrado');\n"
-    )
-    (extension_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-    (extension_dir / "bg.js").write_text(bg_js, encoding="utf-8")
+# _build_proxy_auth_extension removido — era legado MV2/MV3, substituído
+# pelo proxy_forwarder que faz tunnel CONNECT sem extensão Chrome.
 
 
 def _parse_proxy_for_chrome(proxy_url: str) -> tuple[Optional[str], Optional[str], Optional[str]]:

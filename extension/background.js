@@ -350,6 +350,26 @@ async function openInstaWithFingerprint(url, fingerprint) {
 }
 
 // =====================================================
+// AUTO-CLEANUP: limpa proxy quando todas as abas IG fecham
+// =====================================================
+
+chrome.tabs.onRemoved.addListener(async (tabId) => {
+  const meta = await chrome.storage.local.get("active_proxy_meta");
+  if (!meta.active_proxy_meta) return;
+  try {
+    const tabs = await chrome.tabs.query({ url: "*://*.instagram.com/*" });
+    if (tabs.length === 0) {
+      console.log("[bg] nenhuma aba IG restante — limpando proxy + UA");
+      await clearProxy();
+      await clearUARule();
+      chrome.storage.local.remove(["active_proxy_full", "active_proxy_meta"]);
+    }
+  } catch (e) {
+    console.warn("[bg] erro ao verificar abas IG:", e);
+  }
+});
+
+// =====================================================
 // MESSAGE ROUTER
 // =====================================================
 
