@@ -330,15 +330,33 @@ def web_post_story_video(session_data: dict, video_path: str, caption: str = "",
         }
 
         # Link sticker (se fornecido)
+        # Web API usa tap_models (não story_links que é do mobile API).
+        # story_links é silenciosamente ignorado em sessões web/cookies.
         if link_url:
             configure_data["story_sticker_ids"] = "link_sticker_default"
+            configure_data["tap_models"] = json.dumps([{
+                "x": 0.4976,
+                "y": 0.8,
+                "z": 0,
+                "width": 0.5,
+                "height": 0.0856,
+                "rotation": 0.0,
+                "type": "story_link",
+                "link_type": "web_link",
+                "url": link_url,
+                "display_text": link_text or "Clique aqui",
+                "custom_cta": link_text or "Clique aqui",
+            }])
+            # Mantém story_links como fallback (algumas sessões hybrid aceitam)
             configure_data["story_links"] = json.dumps([{
                 "webUri": link_url,
                 "linkTitle": link_text or "Clique aqui",
-                "x": 0.5, "y": 0.5, "z": 0,
-                "width": 1.0, "height": 1.0,
+                "linkType": 1,
+                "x": 0.4976, "y": 0.8, "z": 0,
+                "width": 0.5, "height": 0.0856,
                 "rotation": 0.0,
             }])
+            print(f"[web-poster] link sticker: {link_url} [{link_text}]")
 
         # Retry pra transcode
         rj = None
@@ -424,13 +442,28 @@ def web_post_story_photo(session_data: dict, photo_path: str, caption: str = "",
 
         if link_url:
             configure_data["story_sticker_ids"] = "link_sticker_default"
+            configure_data["tap_models"] = json.dumps([{
+                "x": 0.4976,
+                "y": 0.8,
+                "z": 0,
+                "width": 0.5,
+                "height": 0.0856,
+                "rotation": 0.0,
+                "type": "story_link",
+                "link_type": "web_link",
+                "url": link_url,
+                "display_text": link_text or "Clique aqui",
+                "custom_cta": link_text or "Clique aqui",
+            }])
             configure_data["story_links"] = json.dumps([{
                 "webUri": link_url,
                 "linkTitle": link_text or "Clique aqui",
-                "x": 0.5, "y": 0.5, "z": 0,
-                "width": 1.0, "height": 1.0,
+                "linkType": 1,
+                "x": 0.4976, "y": 0.8, "z": 0,
+                "width": 0.5, "height": 0.0856,
                 "rotation": 0.0,
             }])
+            print(f"[web-poster] link sticker: {link_url} [{link_text}]")
 
         r = s.post(
             "https://www.instagram.com/api/v1/media/configure_to_story/",
